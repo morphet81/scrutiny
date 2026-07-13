@@ -237,6 +237,26 @@ impl Config {
             })
     }
 
+    /// Unique model ids configured for a client (xs→xl order, deduped).
+    pub fn available_models(&self, client: &str) -> Vec<String> {
+        let Some(m) = self
+            .models
+            .get(client)
+            .or_else(|| self.models.get(&self.default_client))
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for opt in [&m.xs, &m.s, &m.m, &m.l, &m.xl] {
+            if let Some(id) = opt {
+                if !out.iter().any(|x| x == id) {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn suggested_plan(&self, client: &str, tier: Tier) -> SuggestedPlan {
         SuggestedPlan {
             client: client.to_string(),
@@ -244,6 +264,7 @@ impl Config {
                 .model_for(client, tier)
                 .unwrap_or("default")
                 .to_string(),
+            available_models: self.available_models(client),
             security: self.review.security_by_tier.get(tier),
             performance: self.review.performance_by_tier.get(tier),
             error_handling: self.review.error_handling_by_tier.get(tier),
@@ -319,7 +340,10 @@ pub struct SuggestedForge {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedPlan {
     pub client: String,
+    /// Recommended model for this tier (default selection).
     pub model: String,
+    /// All distinct models configured for this client — offer these in the model prompt.
+    pub available_models: Vec<String>,
     pub security: bool,
     pub performance: bool,
     pub error_handling: bool,
@@ -409,6 +433,8 @@ mod tests {
         let plan = cfg.suggested_plan("cursor", Tier::M);
         assert!(plan.prompt_reviewers);
         assert!(plan.prompt_evangelists);
+        assert!(!plan.available_models.is_empty());
+        assert!(plan.available_models.iter().any(|m| m == &plan.model));
         let plan_xs = cfg.suggested_plan("cursor", Tier::Xs);
         assert!(!plan_xs.prompt_reviewers);
         assert!(!plan_xs.prompt_evangelists);

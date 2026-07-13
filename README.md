@@ -33,7 +33,7 @@ Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline 
 - Network for release binary **or** Rust toolchain for `cargo build --release`
 - Optional: `gh` (PR review + GitHub issues), `acli` (Jira), `glab` (GitLab), `fcli` (Figma)
 - `SCRUTINY_GITHUB_REPO` overrides download repo (default `morphet81/scrutiny`)
-- Binary fetch uses GitHub Release **latest** by default. Set `SCRUTINY_VERSION=0.1.3` only to pin.
+- Binary fetch uses GitHub Release **latest** by default (cache keyed by `bin/.scrutiny-version`; refreshes when tag changes). Set `SCRUTINY_VERSION=0.1.5` only to pin. `SCRUTINY_USE_LOCAL=1` forces local `cargo` build.
 
 ## Build (developers)
 

@@ -31,9 +31,9 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 ```
 
 - stdout = absolute path to `scrutiny` only
-- Prefer: `bin/scrutiny` → `target/release/scrutiny` → GitHub Release **latest** → `cargo build --release`
+- Prefer: GitHub Release **latest** (stamp `bin/.scrutiny-version`) → else `cargo build --release`. Old cache without matching stamp is refreshed.
 - `ensure-bin.sh` walks up to repo `Cargo.toml` when skill lives under `skills/scrutiny/`
-- Env: `SCRUTINY_GITHUB_REPO` (default `morphet81/scrutiny`). Optional `SCRUTINY_VERSION` to pin (default = latest release).
+- Env: `SCRUTINY_GITHUB_REPO` (default `morphet81/scrutiny`). Optional `SCRUTINY_VERSION` to pin. `SCRUTINY_USE_LOCAL=1` → local target/release.
 
 Config: `~/.scrutiny/config.toml` (created on first run from shipped `config/default.toml`).
 
@@ -101,18 +101,24 @@ Show scan path. Findings are already caveman-shaped (`title`, `explanation`, `pr
 
 ### 5. Confirm plan → plan-write
 
-Read eval `tier` + `suggested_plan` (do **not** re-parse whole config into prompts). Ask user to confirm:
+Read eval `tier` + `suggested_plan` (do **not** re-parse whole config into prompts).
 
-| Prompt | Default | Hide rule |
-|--------|---------|-----------|
-| Model | `suggested_plan.model` | always show |
-| Security | `suggested_plan.security` | always show |
-| Performance | `suggested_plan.performance` | always show |
-| Error handling | `suggested_plan.error_handling` | always show |
-| Reviewer agents | `suggested_plan.reviewers` | hide if `prompt_reviewers` false → 0 |
-| Evangelists | `suggested_plan.evangelists` | hide if `prompt_evangelists` false → 0 |
+**Hard rule — separate prompts.** Ask **one question at a time**. Never bundle model with analyses. Never invent combined presets like “opus, all on”.
 
-Then write plan (no re-load of config prose later):
+Prompt order (skip a row only when Hide rule applies):
+
+| # | Prompt | Choices | Default |
+|---|--------|---------|---------|
+| 1 | **Model** | Exactly `suggested_plan.available_models` (all ids for this client). Mark recommended. | `suggested_plan.model` |
+| 2 | **Security analysis?** | yes / no | `suggested_plan.security` |
+| 3 | **Performance analysis?** | yes / no | `suggested_plan.performance` |
+| 4 | **Error-handling analysis?** | yes / no | `suggested_plan.error_handling` |
+| 5 | **Reviewer agents** (count) | 0,1,2,… | `suggested_plan.reviewers` — **skip entire prompt** if `prompt_reviewers` false → use `0` |
+| 6 | **Evangelists** (count) | 0,1,2,… | `suggested_plan.evangelists` — **skip** if `prompt_evangelists` false → use `0` |
+
+Model prompt example (Claude client): list every entry in `available_models` (e.g. haiku, sonnet, claude-sonnet-4-6, opus), default = recommended `model`. Do **not** filter the list down to 2 presets.
+
+Then write plan:
 
 ```bash
 "$SCRUTINY_BIN" plan-write \
