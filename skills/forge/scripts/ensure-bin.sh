@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Resolve the scrutiny binary. stdout = absolute path only. Progress on stderr.
 # Works from repo root scripts/ or skills/*/scripts/ (walks up for Cargo.toml).
+# Default: download GitHub Release *latest* asset. Pin only via SCRUTINY_VERSION.
 set -euo pipefail
 
 log() { printf '%s\n' "$*" >&2; }
@@ -97,44 +98,13 @@ detect_triple() {
   esac
 }
 
-read_version() {
+# Label for logs/errors only. Download uses latest unless SCRUTINY_VERSION is set.
+version_label() {
   if [[ -n "${SCRUTINY_VERSION:-}" ]]; then
     printf '%s\n' "${SCRUTINY_VERSION#v}"
-    return
+  else
+    printf '%s\n' "latest"
   fi
-  local cargo_toml="${SKILL_ROOT}/Cargo.toml"
-  if [[ ! -f "${cargo_toml}" ]]; then
-    # Installed skill without sources — use latest release tag via env or fixed fallback
-    printf '%s\n' "${SCRUTINY_VERSION_FALLBACK:-0.1.1}"
-    return
-  fi
-  local ver
-  ver="$(
-    awk '
-      /^\[workspace\.package\]/ { in_ws=1; next }
-      /^\[/ { in_ws=0 }
-      in_ws && /^version[[:space:]]*=/ {
-        gsub(/"/, "", $3);
-        print $3;
-        exit
-      }
-    ' "${cargo_toml}"
-  )"
-  if [[ -z "${ver}" ]]; then
-    ver="$(
-      awk '
-        /^\[package\]/ { in_pkg=1; next }
-        /^\[/ { in_pkg=0 }
-        in_pkg && /^version[[:space:]]*=/ {
-          gsub(/"/, "", $3);
-          print $3;
-          exit
-        }
-      ' "${cargo_toml}"
-    )"
-  fi
-  [[ -n "${ver}" ]] || die "could not read version from Cargo.toml"
-  printf '%s\n' "${ver}"
 }
 
 github_repo() {
@@ -154,10 +124,19 @@ github_repo() {
   printf '%s\n' "morphet81/scrutiny"
 }
 
+# Download URL: always latest unless SCRUTINY_VERSION pins a tag.
+release_asset_url() {
+  local repo="$1" asset="$2"
+  if [[ -n "${SCRUTINY_VERSION:-}" ]]; then
+    printf '%s\n' "https://github.com/${repo}/releases/download/v${SCRUTINY_VERSION#v}/${asset}"
+  else
+    printf '%s\n' "https://github.com/${repo}/releases/latest/download/${asset}"
+  fi
+}
+
 try_download() {
-  local repo version triple asset url dest tmp
+  local repo triple asset url dest tmp
   repo="$(github_repo)"
-  version="$(read_version)"
   triple="$(detect_triple)"
 
   # Intel macOS: no GitHub Release asset (runner retired). Skip to cargo.
@@ -174,14 +153,14 @@ try_download() {
     dest="${CACHED_BIN}"
   fi
 
-  url="https://github.com/${repo}/releases/download/v${version}/${asset}"
+  url="$(release_asset_url "${repo}" "${asset}")"
   mkdir -p "${BIN_DIR}"
   tmp="${dest}.tmp"
 
-  log "scrutiny ensure-bin: trying ${url}"
+  log "scrutiny ensure-bin: trying ${url} ($(version_label))"
 
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "${tmp}" "${url}"; then
+    if ! curl -fsSL --connect-timeout 10 --max-time 120 -L -o "${tmp}" "${url}"; then
       rm -f "${tmp}"
       return 1
     fi
@@ -238,5 +217,6 @@ fi
 
 die "no binary found.
 Install a Rust toolchain (https://rustup.rs) so cargo can build, or publish/download a release for this platform.
-Repo: $(github_repo)  Version: $(read_version)  Triple: $(detect_triple)
-Override with SCRUTINY_GITHUB_REPO / SCRUTINY_VERSION if needed."
+Repo: $(github_repo)  Version: $(version_label)  Triple: $(detect_triple)
+Default fetches GitHub Release latest. Pin with SCRUTINY_VERSION only if needed.
+Override repo with SCRUTINY_GITHUB_REPO."
