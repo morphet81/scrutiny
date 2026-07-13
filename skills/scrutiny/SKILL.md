@@ -103,9 +103,9 @@ Show scan path. Findings are already caveman-shaped (`title`, `explanation`, `pr
 
 Read eval `tier` + `suggested_plan` (do **not** re-parse whole config into prompts).
 
-**Hard rule — separate prompts.** Ask **one question at a time**. Never bundle model with analyses. Never invent combined presets like “opus, all on”.
+**Hard rule — one turn, separate fields.** Ask **all** of the prompts below in a **single** multi-question UI / one message (every applicable field at once). Never split into a second round (e.g. model+analyses first, reviewers later). Never bundle into combined presets like “opus, all on” — each field stays its own question with its own choices.
 
-Prompt order (skip a row only when Hide rule applies):
+Include every row whose Hide rule does not apply:
 
 | # | Prompt | Choices | Default |
 |---|--------|---------|---------|
@@ -113,12 +113,12 @@ Prompt order (skip a row only when Hide rule applies):
 | 2 | **Security analysis?** | yes / no | `suggested_plan.security` |
 | 3 | **Performance analysis?** | yes / no | `suggested_plan.performance` |
 | 4 | **Error-handling analysis?** | yes / no | `suggested_plan.error_handling` |
-| 5 | **Reviewer agents** (count) | 0,1,2,… | `suggested_plan.reviewers` — **skip entire prompt** if `prompt_reviewers` false → use `0` |
-| 6 | **Evangelists** (count) | 0,1,2,… | `suggested_plan.evangelists` — **skip** if `prompt_evangelists` false → use `0` |
+| 5 | **Reviewer agents** (count) | 0,1,2,… | `suggested_plan.reviewers` — **omit from the form** if `prompt_reviewers` false → use `0` |
+| 6 | **Evangelists** (count) | 0,1,2,… | `suggested_plan.evangelists` — **omit** if `prompt_evangelists` false → use `0` |
 
-Model prompt example (Claude client): list every entry in `available_models` (e.g. haiku, sonnet, claude-sonnet-4-6, opus), default = recommended `model`. Do **not** filter the list down to 2 presets.
+Model field: list every entry in `available_models` (e.g. haiku, sonnet, claude-sonnet-4-6, opus), default = recommended `model`. Do **not** shrink the list to two presets.
 
-Then write plan:
+Wait for that one answer set, then write plan:
 
 ```bash
 "$SCRUTINY_BIN" plan-write \

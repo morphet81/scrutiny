@@ -1,13 +1,20 @@
 # Scrutiny
 
-AI code-review + ticket-implement skills with **Rust** helpers.
+Agent skills for code review and ticket implementation, backed by a shared Rust CLI.
+
+## Why scripts first
+
+The goal is simple: **do as much work as possible outside the model.** Deterministic steps—diff analysis, packing, static scans, ticket fetch, line resolution, posting reviews—run as Rust commands that write small JSON artifacts. The agent only decides, confirms, and edits those files. That keeps prompts short, avoids re-exploring the repo, and spends tokens on judgment instead of plumbing.
 
 ## Skills
 
-| Skill | Command | Role |
-|-------|---------|------|
-| **scrutiny** | `/scrutiny` | Review local branch or PR; triage findings JSON; post GitHub PR review |
-| **forge** | `/forge` | Implement Jira / GitHub / GitLab / inline ticket with multi-agent team |
+### `/scrutiny`
+
+Reviews a local branch or a GitHub PR. Scripts score complexity, build a change map, pack only the relevant diffs and symbol slices, run a zero-token static scan, then (after you confirm model and analyses separately) optional AI reviewers read the pack alone. Findings are tracked in a structured JSON file you triage; a script posts the chosen items as a PR review with precise line anchors and an `[AI Agent]` tag.
+
+### `/forge`
+
+Implements a ticket from Jira, GitHub, GitLab, or an inline description. Scripts fetch and normalize the ticket, write a session plan (approach, team sizes, e2e, post-review counts—forceable in config), and produce a compact context pack plus caveman brief so implementers never re-hit the ticket CLIs. The agent then runs plan, TDD, or heads-down modes with PO/testers/developers as configured, and can reuse the scrutiny pack pipeline for post-implementation review.
 
 ## Install with `npx skills`
 
@@ -110,14 +117,9 @@ enable_figma = false
 enable_lore = false
 ```
 
-## Token-saving (forge)
+## Token-saving habits
 
-- Artifact-first: agents get ticket/session/brief paths — no re-fetch CLIs
-- `forge-brief` ~1–2KB instead of full ticket dumps
-- `forge-context` keyword paths + test harness sniff
-- Post-impl review reuses scrutiny pack (pack-only agents)
-- Config force knobs skip prompt turns; disable Figma/lore when unused
-- `reviewers = evangelists = 0` skips post-impl AI review
+Same idea across both skills: artifact paths in, not raw CLI dumps; pack/brief instead of full-file fishing; config force knobs to skip prompts; turn off Figma/lore when unused; set reviewers/evangelists to `0` when you want static-only.
 
 ## Releases
 
