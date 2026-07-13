@@ -33,7 +33,7 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 - stdout = absolute path to `scrutiny` only
 - Prefer: `bin/scrutiny` → `target/release/scrutiny` → GitHub Release → `cargo build --release`
 - `ensure-bin.sh` walks up to repo `Cargo.toml` when skill lives under `skills/scrutiny/`
-- Env: `SCRUTINY_GITHUB_REPO` (default `alexanderobellianne/scrutiny`), `SCRUTINY_VERSION`
+- Env: `SCRUTINY_GITHUB_REPO` (default `morphet81/scrutiny`), `SCRUTINY_VERSION`
 
 Config: `~/.scrutiny/config.toml` (created on first run from shipped `config/default.toml`).
 

@@ -15,11 +15,11 @@ AI code-review + ticket-implement skills with **Rust** helpers.
 
 ```bash
 # both skills
-npx skills add alexanderobellianne/scrutiny -g -y --skill '*'
+npx skills add morphet81/scrutiny -g -y --skill '*'
 
 # one skill
-npx skills add alexanderobellianne/scrutiny@scrutiny -g -y
-npx skills add alexanderobellianne/scrutiny@forge -g -y
+npx skills add morphet81/scrutiny@scrutiny -g -y
+npx skills add morphet81/scrutiny@forge -g -y
 
 # local checkout
 npx skills add /path/to/scrutiny -g -y --skill '*' --agent cursor

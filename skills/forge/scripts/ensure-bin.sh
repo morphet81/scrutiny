@@ -151,7 +151,7 @@ github_repo() {
       return
     fi
   fi
-  printf '%s\n' "alexanderobellianne/scrutiny"
+  printf '%s\n' "morphet81/scrutiny"
 }
 
 try_download() {
