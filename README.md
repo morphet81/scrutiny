@@ -6,7 +6,7 @@ AI code-review + ticket-implement skills with **Rust** helpers.
 
 | Skill | Command | Role |
 |-------|---------|------|
-| **scrutiny** | `/scrutiny` | Review local branch or PR (eval → map → pack → scan → AI) |
+| **scrutiny** | `/scrutiny` | Review local branch or PR; triage findings JSON; post GitHub PR review |
 | **forge** | `/forge` | Implement Jira / GitHub / GitLab / inline ticket with multi-agent team |
 
 ## Install with `npx skills`
@@ -58,7 +58,20 @@ bash scripts/ensure-bin.sh
   --client claude --model sonnet \
   --security true --performance false --error-handling true \
   --reviewers 1 --evangelists 0
+./target/release/scrutiny findings-init --scan … --eval … --pack … --plan … [--pr 42]
+# agent edits findings JSON during triage, then:
+./target/release/scrutiny findings-resolve --findings …
+./target/release/scrutiny findings-validate --findings …
+./target/release/scrutiny post-comments --findings …
 ```
+
+### Findings / post-comments
+
+After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `info`.
+
+`post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It creates one PR review with line comments; bodies end with `[AI Agent]`. `review.event` is `REQUEST_CHANGES`, `COMMENT`, or `APPROVE`.
+
+Line anchors are verified with `git show <head_oid>:<path>` — never invent line numbers.
 
 ### Forge pipeline
 

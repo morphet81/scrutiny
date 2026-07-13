@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
-    run_eval, run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map,
-    run_pack, run_plan_write, run_scan, EvalInput, ForgeFetchInput, ForgePlanWriteInput,
-    PlanWriteInput,
+    run_eval, run_findings_init, run_findings_resolve, run_findings_validate, run_forge_brief,
+    run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_plan_write,
+    run_post_comments, run_scan, EvalInput, FindingsInitInput, ForgeFetchInput, ForgePlanWriteInput,
+    PlanWriteInput, PostCommentsInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -152,6 +153,45 @@ enum Commands {
         session: Option<PathBuf>,
         #[arg(long)]
         context: Option<PathBuf>,
+    },
+    /// Seed findings triage JSON from scan; print path
+    FindingsInit {
+        #[arg(long)]
+        scan: PathBuf,
+        #[arg(long)]
+        eval: Option<PathBuf>,
+        #[arg(long)]
+        pack: Option<PathBuf>,
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// PR number or URL (else gh pr view for current branch)
+        #[arg(long)]
+        pr: Option<String>,
+    },
+    /// Verify/resolve line anchors against head blob; rewrite findings JSON
+    FindingsResolve {
+        #[arg(long)]
+        findings: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+    },
+    /// Validate triage completeness before post
+    FindingsValidate {
+        #[arg(long)]
+        findings: PathBuf,
+    },
+    /// Post included findings as a GitHub PR review
+    PostComments {
+        #[arg(long)]
+        findings: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        strict: bool,
     },
 }
 
@@ -336,6 +376,51 @@ fn run() -> Result<()> {
         } => {
             let (_report, path) =
                 run_forge_brief(&ticket, session.as_deref(), context.as_deref())?;
+            println!("{}", path.display());
+        }
+        Commands::FindingsInit {
+            scan,
+            eval,
+            pack,
+            plan,
+            cwd,
+            pr,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let (_report, path) = run_findings_init(FindingsInitInput {
+                cwd,
+                scan_path: scan,
+                eval_path: eval,
+                pack_path: pack,
+                plan_path: plan,
+                pr,
+            })?;
+            println!("{}", path.display());
+        }
+        Commands::FindingsResolve {
+            findings,
+            cwd,
+            strict,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let (_report, path) = run_findings_resolve(&findings, &cwd, strict)?;
+            println!("{}", path.display());
+        }
+        Commands::FindingsValidate { findings } => {
+            let (_report, path) = run_findings_validate(&findings)?;
+            println!("{}", path.display());
+        }
+        Commands::PostComments {
+            findings,
+            cwd,
+            strict,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let (_result, path) = run_post_comments(PostCommentsInput {
+                findings_path: findings,
+                cwd,
+                strict,
+            })?;
             println!("{}", path.display());
         }
     }

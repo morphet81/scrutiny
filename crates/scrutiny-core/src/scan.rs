@@ -376,10 +376,21 @@ fn finding(
         explanation: explanation.into(),
         proposed_fix: proposed_fix.into(),
         fix_options: Vec::new(),
-        severity: severity.into(),
+        severity: normalize_severity(severity),
         source: source.into(),
         paths,
         bucket: bucket.into(),
+    }
+}
+
+/// Map legacy / free-form severities to critical | warning | info.
+pub fn normalize_severity(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "critical" | "high" | "error" | "blocker" => "critical".into(),
+        "warning" | "medium" | "warn" => "warning".into(),
+        "info" | "low" | "note" | "nit" => "info".into(),
+        other if other.is_empty() => "warning".into(),
+        _ => "warning".into(),
     }
 }
 

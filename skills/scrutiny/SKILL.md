@@ -130,7 +130,7 @@ If `skip_ai` is true (XS + docs + empty scan, or reviewers=evangelists=0):
 
 - Print reason (e.g. “static clean; optional doc skim”)
 - **Do not** spawn reviewer/evangelist agents
-- Jump to findings from **scan only** → Step 7 triage
+- Jump to **findings-init** from scan → Step 7 triage
 - Optional tiny doc skim from pack digests only if user asks
 
 ### 6. AI review (when `skip_ai` is false)
@@ -159,38 +159,73 @@ Telling the main agent “prefer 4.6” while the UI session is Opus **does not*
 
 Merge: static scan findings + AI findings → dedupe → numbered caveman list.
 
-### 7. Findings output (mandatory format)
+### 6.5 findings-init (canonical findings JSON)
 
-Clear, concise, caveman-style numbered list. Each issue:
-
-1. **Number**
-2. **Title**
-3. **Explanation** — short
-4. **Proposed fix** — multi-fix → options `A`, `B`, …
-
-```
-1. Missing null guard on reservation id
-   Why: `id` can be undefined after fetch; crash on open.
-   Fix: Guard before use; show empty state if missing.
-
-2. N+1 fetch in list render
-   Why: Each card hits store in loop.
-   Fix options:
-   A) Batch load once in parent
-   B) Derive from already-loaded collection
+```bash
+FINDINGS="$("$SCRUTINY_BIN" findings-init \
+  --scan "$SCAN" --eval "$EVAL" --pack "$PACK" --plan "$PLAN" \
+  --cwd <repo-root> [--pr <url|number>])"
 ```
 
-### 8. Interactive choices (exact order)
+Show findings path. **This JSON is the source of truth** — not a parallel prose list.
 
-1. Findings with multi-option fixes → ask option **or Ignore**
-2. Checkbox list of all other (single-fix) findings → which to report
-3. Final report = chosen multi-option + checked singles only
+- Seeded from scan findings (severity already `critical|warning|info`)
+- Merge AI findings into the same file: add items, renumber `number`/`id` (`F1`…), set `severity`, `paths`, draft `anchor.path` + `anchor.line` from pack symbol slices / diff hunks only
+- Optional `--pr` or auto `gh pr view` fills `pr_number` / `pr_url` / `head_oid`
+
+### 7. Findings output (mandatory format — grouped by severity)
+
+Read `$FINDINGS`. Print caveman list **grouped**:
+
+```
+## Critical
+1. Title
+   Why: …
+   Fix: … | Fix options: A) … B) …
+
+## Warning
+2. …
+
+## Info
+3. …
+```
+
+Each issue: **number**, **title**, **explanation**, **proposed fix** (options `A`, `B`, … when present).
+
+### 8. Interactive triage → edit findings JSON
+
+Exact order. After each answer, **write** the findings file (do not only remember in chat):
+
+1. Multi-option findings → set `chosen_option` (`A`/`B`/…) **or** `include=false` (Ignore)
+2. Checkbox list of single-fix findings → set `include` true/false for each
+3. For each `include=true`:
+   - Draft `comment_body` (why + chosen fix). Script appends `[AI Agent]` if missing.
+   - Set `anchor.path` + `anchor.line` (and optional `start_line` / `needle`) from pack only — **never invent line numbers**
+4. Resolve anchors against PR/branch head blob:
+
+```bash
+"$SCRUTINY_BIN" findings-resolve --findings "$FINDINGS" --cwd <repo-root>
+```
+
+5. If `line_resolved=false` on included findings: re-read `git show <head_oid>:<path>`, fix `line`/`needle`, resolve again. Critical included must resolve.
+6. Ask review action → set `review.event` + short `review.body` (counts of included critical/warning/info):
+   - **Request changes** → `REQUEST_CHANGES`
+   - **Comment only** → `COMMENT`
+   - **Approve** → `APPROVE`
+7. Validate + post (requires PR — else stop: open a PR or re-run `/scrutiny <pr-url>`):
+
+```bash
+"$SCRUTINY_BIN" findings-validate --findings "$FINDINGS"
+RESULT="$("$SCRUTINY_BIN" post-comments --findings "$FINDINGS" --cwd <repo-root>)"
+```
+
+Show result path / review `html_url`. Comments post as one PR review; each line comment and the review body end with `[AI Agent]`.
 
 ---
 
 ## Notes
 
-- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → confirm → `plan-write` → (optional AI) → merge → triage
+- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → confirm → `plan-write` → (optional AI) → `findings-init` → triage → `findings-resolve` → `findings-validate` → `post-comments`
 - Edit `~/.scrutiny/config.toml` for models / pack / scan / agent counts
 - Claude `[models.claude]` uses aliases or pinned Anthropic ids only — not Cursor slugs
 - Install: `npx skills add <owner>/scrutiny -g -y --skill '*'` (see README)
