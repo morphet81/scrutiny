@@ -184,7 +184,7 @@ enum Commands {
         #[arg(long)]
         findings: PathBuf,
     },
-    /// Post included findings as a GitHub PR review
+    /// Post included findings as a GitHub PR review (prompts for COMMENT/REQUEST_CHANGES/APPROVE)
     PostComments {
         #[arg(long)]
         findings: PathBuf,
@@ -192,6 +192,9 @@ enum Commands {
         cwd: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         strict: bool,
+        /// Skip interactive prompt (COMMENT|REQUEST_CHANGES|APPROVE)
+        #[arg(long)]
+        event: Option<String>,
     },
 }
 
@@ -414,12 +417,14 @@ fn run() -> Result<()> {
             findings,
             cwd,
             strict,
+            event,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             let (_result, path) = run_post_comments(PostCommentsInput {
                 findings_path: findings,
                 cwd,
                 strict,
+                event,
             })?;
             println!("{}", path.display());
         }

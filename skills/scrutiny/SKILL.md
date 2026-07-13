@@ -163,7 +163,15 @@ Telling the main agent “prefer 4.6” while the UI session is Opus **does not*
 - Enabled analyses only: security / performance / error_handling from plan
 - Agents must not fish outside pack
 
-Merge: static scan findings + AI findings → dedupe → numbered caveman list.
+**Hard rule — anchors at raise time.** Every finding a reviewer/evangelist returns **must** include:
+
+- `path` (repo-relative)
+- `line` (1-based, from pack `symbol_slices` / diff hunk new-file lines — the agent is reading that text)
+- optional `start_line`, `severity` (`critical|warning|info`), `title`, `explanation`, `proposed_fix` / `fix_options`
+
+No finding without a line. “I’ll figure out the line later” is forbidden. The lead agent must **reject and re-ask** any finding missing `path`+`line`.
+
+Merge: static scan findings + AI findings → dedupe → write into findings JSON (Step 6.5) **with anchors already set**. For scan-only items, lead sets `anchor` from pack hunks/symbol slices when possible before showing triage.
 
 ### 6.5 findings-init (canonical findings JSON)
 
@@ -175,17 +183,17 @@ FINDINGS="$("$SCRUTINY_BIN" findings-init \
 
 Show findings path. **This JSON is the source of truth** — not a parallel prose list.
 
-- Seeded from scan findings (severity already `critical|warning|info`)
-- Merge AI findings into the same file: add items, renumber `number`/`id` (`F1`…), set `severity`, `paths`, draft `anchor.path` + `anchor.line` from pack symbol slices / diff hunks only
+- Seeded from scan; then merge AI findings into the same file (renumber `F1`…, set severity)
+- **Every finding must already have `anchor.path` + `anchor.line` before Step 7** (from the raising reviewer, or pack-derived for scan). Do not leave line blank hoping resolve will invent it.
 - Optional `--pr` or auto `gh pr view` fills `pr_number` / `pr_url` / `head_oid`
 
 ### 7. Findings output (mandatory format — grouped by severity)
 
-Read `$FINDINGS`. Print caveman list **grouped**:
+Read `$FINDINGS`. Print caveman list **grouped**. Include **`path:line`** on every item:
 
 ```
 ## Critical
-1. Title
+1. Title (`src/foo.ts:42`)
    Why: …
    Fix: … | Fix options: A) … B) …
 
@@ -196,42 +204,45 @@ Read `$FINDINGS`. Print caveman list **grouped**:
 3. …
 ```
 
-Each issue: **number**, **title**, **explanation**, **proposed fix** (options `A`, `B`, … when present).
+Each issue: **number**, **title**, **path:line**, **explanation**, **proposed fix** (options `A`, `B`, … when present).
 
-### 8. Interactive triage → edit findings JSON
+### 8. Interactive triage → edit findings JSON → hand off to script
 
-Exact order. After each answer, **write** the findings file (do not only remember in chat):
+**Hard rule — one triage prompt.** Ask **all finding decisions in a single** multi-question form. Never split by severity. Never a second menu. **Do not** ask Request changes / Comment / Approve — that is `post-comments`'s job.
 
-1. Multi-option findings → set `chosen_option` (`A`/`B`/…) **or** `include=false` (Ignore)
-2. Checkbox list of single-fix findings → set `include` true/false for each
-3. For each `include=true`:
-   - Draft `comment_body` (why + chosen fix). Script appends `[AI Agent]` if missing.
-   - Set `anchor.path` + `anchor.line` (and optional `start_line` / `needle`) from pack only — **never invent line numbers**
-4. Resolve anchors against PR/branch head blob:
+In that one form, for **each** finding `F1…Fn`:
+
+- If it has `fix_options` → choices: each option **or Ignore**
+- Else → choices: **Post** or **Ignore**
+
+After that **one** answer set, agent work ends with file edits + starting the script:
+
+1. Set `include` / `chosen_option` from answers
+2. For each `include=true`: draft `comment_body` (why + chosen fix). Anchors already present from reviewers — do not invent lines. Script appends `[AI Agent]` if missing.
+3. Leave `review.event` unset (or null)
+4. Verify anchors:
 
 ```bash
 "$SCRUTINY_BIN" findings-resolve --findings "$FINDINGS" --cwd <repo-root>
 ```
 
-5. If `line_resolved=false` on included findings: re-read `git show <head_oid>:<path>`, fix `line`/`needle`, resolve again. Critical included must resolve.
-6. Ask review action → set `review.event` + short `review.body` (counts of included critical/warning/info):
-   - **Request changes** → `REQUEST_CHANGES`
-   - **Comment only** → `COMMENT`
-   - **Approve** → `APPROVE`
-7. Validate + post (requires PR — else stop: open a PR or re-run `/scrutiny <pr-url>`):
+5. If `line_resolved=false` on an included finding: fix from pack/head (real cited line), resolve again. Critical must resolve.
+6. **Stop agent prompting.** Run the poster (it asks review action on stdin, then posts). Requires PR — else stop with “open a PR or re-run `/scrutiny <pr-url>`”:
 
 ```bash
 "$SCRUTINY_BIN" findings-validate --findings "$FINDINGS"
-RESULT="$("$SCRUTINY_BIN" post-comments --findings "$FINDINGS" --cwd <repo-root>)"
+RESULT="$("$SCRUTINY_BIN" post-comments --findings "$FINDINGS" --cwd <repo-root>")"
 ```
 
-Show result path / review `html_url`. Comments post as one PR review; each line comment and the review body end with `[AI Agent]`.
+Optional non-interactive: `post-comments --event COMMENT|REQUEST_CHANGES|APPROVE`.
+
+Show result path / review `html_url` from the script output. Agent must **not** re-ask the review action in chat.
 
 ---
 
 ## Notes
 
-- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → confirm → `plan-write` → (optional AI) → `findings-init` → triage → `findings-resolve` → `findings-validate` → `post-comments`
+- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → confirm → `plan-write` → (optional AI with anchors) → `findings-init` → **one** triage prompt → `findings-resolve` → `post-comments` (script prompts review event + posts)
 - Edit `~/.scrutiny/config.toml` for models / pack / scan / agent counts
 - Claude `[models.claude]` uses aliases or pinned Anthropic ids only — not Cursor slugs
 - Install: `npx skills add <owner>/scrutiny -g -y --skill '*'` (see README)

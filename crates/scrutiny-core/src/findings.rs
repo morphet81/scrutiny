@@ -318,17 +318,7 @@ pub fn run_findings_validate(findings_path: &Path) -> Result<(FindingsReport, Pa
     let report: FindingsReport = read_json(findings_path)?;
     let mut errs = Vec::new();
 
-    if report.review.event.is_none() {
-        errs.push("review.event not set (REQUEST_CHANGES|COMMENT|APPROVE)".into());
-    } else if let Some(ev) = &report.review.event {
-        let ok = matches!(
-            ev.as_str(),
-            "REQUEST_CHANGES" | "COMMENT" | "APPROVE"
-        );
-        if !ok {
-            errs.push(format!("invalid review.event: {ev}"));
-        }
-    }
+    // review.event is prompted by post-comments — not required here
 
     for f in &report.findings {
         if f.include.is_none() {
@@ -372,6 +362,8 @@ pub struct PostCommentsInput {
     pub findings_path: PathBuf,
     pub cwd: PathBuf,
     pub strict: bool,
+    /// If set, skip interactive prompt. Else prompt on stderr/stdin when review.event missing.
+    pub event: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,7 +379,7 @@ pub struct PostResult {
 }
 
 pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBuf)> {
-    // Re-resolve then validate
+    // Re-resolve then validate (findings triage completeness — not review.event)
     run_findings_resolve(&input.findings_path, &input.cwd, input.strict)?;
     let (mut report, _) = run_findings_validate(&input.findings_path)?;
 
@@ -395,11 +387,13 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
         .pr_number
         .context("pr_number required to post")?;
     let (owner, name) = split_repo(&report.repo)?;
-    let event = report
-        .review
-        .event
-        .clone()
-        .context("review.event required")?;
+
+    let event = resolve_review_event(&mut report, &input)?;
+    report.review.event = Some(event.clone());
+    if report.review.body.is_none() {
+        report.review.body = Some(default_review_body(&report));
+    }
+    write_json_pretty(&input.findings_path, &report)?;
 
     ensure_gh()?;
 
@@ -595,6 +589,63 @@ fn finalize_post(
     let out = temp_artifact_path(&report.repo, "post", "result");
     write_json_pretty(&out, &result)?;
     Ok((result, out))
+}
+
+fn resolve_review_event(report: &mut FindingsReport, input: &PostCommentsInput) -> Result<String> {
+    if let Some(ev) = &input.event {
+        return normalize_event(ev);
+    }
+    if let Some(ev) = &report.review.event {
+        return normalize_event(ev);
+    }
+
+    let (crit, warn, info) = included_counts(report);
+    eprintln!("scrutiny post-comments: review action for the PR?");
+    eprintln!("  Included to post: {crit} critical, {warn} warning, {info} info");
+    eprintln!("  1) COMMENT       — post comments only (no approve / no block)");
+    eprintln!("  2) REQUEST_CHANGES — block the PR");
+    eprintln!("  3) APPROVE       — approve and attach comments");
+    eprint!("Enter 1, 2, 3 (or COMMENT / REQUEST_CHANGES / APPROVE): ");
+    use std::io::{self, Write};
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("read review action from stdin")?;
+    let choice = line.trim();
+    let event = match choice {
+        "1" | "c" | "C" => "COMMENT",
+        "2" | "r" | "R" => "REQUEST_CHANGES",
+        "3" | "a" | "A" => "APPROVE",
+        other => other,
+    };
+    normalize_event(event)
+}
+
+fn normalize_event(raw: &str) -> Result<String> {
+    match raw.trim().to_ascii_uppercase().replace('-', "_").as_str() {
+        "COMMENT" | "COMMENTS" => Ok("COMMENT".into()),
+        "REQUEST_CHANGES" | "REQUESTCHANGES" | "CHANGES" => Ok("REQUEST_CHANGES".into()),
+        "APPROVE" | "APPROVED" => Ok("APPROVE".into()),
+        other => bail!("invalid review event {other} (COMMENT|REQUEST_CHANGES|APPROVE)"),
+    }
+}
+
+fn included_counts(report: &FindingsReport) -> (u32, u32, u32) {
+    let mut crit = 0u32;
+    let mut warn = 0u32;
+    let mut info = 0u32;
+    for f in &report.findings {
+        if f.include != Some(true) {
+            continue;
+        }
+        match f.severity.as_str() {
+            "critical" => crit += 1,
+            "warning" => warn += 1,
+            _ => info += 1,
+        }
+    }
+    (crit, warn, info)
 }
 
 fn format_fallback_bullet(f: &TriageFinding, body: &str) -> String {

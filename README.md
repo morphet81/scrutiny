@@ -76,7 +76,7 @@ bash scripts/ensure-bin.sh
 
 After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `info`.
 
-`post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It creates one PR review with line comments; bodies end with `[AI Agent]`. `review.event` is `REQUEST_CHANGES`, `COMMENT`, or `APPROVE`.
+`post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It **prompts** for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or pass `--event`), then creates one PR review with line comments; bodies end with `[AI Agent]`.
 
 Line anchors are verified with `git show <head_oid>:<path>` — never invent line numbers.
 
