@@ -213,6 +213,158 @@ fn scan_to_triage(f: &ScanFinding, number: usize) -> TriageFinding {
     }
 }
 
+/// Append curated AI findings into an existing findings report and rewrite IDs.
+pub fn merge_ai_findings(
+    findings_path: &Path,
+    ai: &[crate::agent_runner::AgentFinding],
+) -> Result<(FindingsReport, PathBuf)> {
+    let mut report: FindingsReport = read_json(findings_path)?;
+    let mut next = report.findings.len() + 1;
+    for a in ai {
+        report.findings.push(agent_to_triage(a, next));
+        next += 1;
+    }
+    renumber(&mut report);
+    write_json_pretty(findings_path, &report)?;
+    Ok((report, findings_path.to_path_buf()))
+}
+
+fn agent_to_triage(a: &crate::agent_runner::AgentFinding, number: usize) -> TriageFinding {
+    TriageFinding {
+        id: format!("F{number}"),
+        number: number as u32,
+        severity: normalize_severity(&a.severity),
+        title: a.title.clone(),
+        explanation: a.explanation.clone(),
+        proposed_fix: a.proposed_fix.clone(),
+        fix_options: a.fix_options.clone(),
+        chosen_option: None,
+        include: None,
+        source: format!("ai.{}", a.source_role),
+        paths: vec![a.path.clone()],
+        anchor: Anchor {
+            path: Some(a.path.clone()),
+            side: "RIGHT".into(),
+            start_line: a.start_line,
+            line: Some(a.line),
+            line_resolved: false,
+            line_text: None,
+            in_diff: None,
+        },
+        comment_body: None,
+        status: "pending".into(),
+        fail_reason: None,
+        needle: None,
+    }
+}
+
+fn renumber(report: &mut FindingsReport) {
+    for (i, f) in report.findings.iter_mut().enumerate() {
+        let n = (i + 1) as u32;
+        f.number = n;
+        f.id = format!("F{n}");
+    }
+}
+
+/// Interactive stdin triage: Post/Ignore (or fix option) per finding.
+pub fn run_findings_triage(findings_path: &Path) -> Result<(FindingsReport, PathBuf)> {
+    use std::io::{self, Write};
+    let mut report: FindingsReport = read_json(findings_path)?;
+    if report.findings.is_empty() {
+        eprintln!("scrutiny findings-triage: no findings");
+        return Ok((report, findings_path.to_path_buf()));
+    }
+
+    eprintln!("scrutiny findings-triage: decide Post/Ignore for each finding (one pass).");
+    for f in &mut report.findings {
+        let where_ = f
+            .anchor
+            .path
+            .as_deref()
+            .or(f.paths.first().map(|s| s.as_str()))
+            .unwrap_or("?");
+        let line = f.anchor.line.unwrap_or(0);
+        eprintln!();
+        eprintln!(
+            "{} [{}] {} (`{}:{line}`)",
+            f.id, f.severity, f.title, where_
+        );
+        eprintln!("  Why: {}", truncate(&f.explanation, 200));
+        if !f.fix_options.is_empty() {
+            for (i, opt) in f.fix_options.iter().enumerate() {
+                eprintln!("  {}) {}", (b'A' + i as u8) as char, truncate(opt, 120));
+            }
+            eprint!("Choose option letter, or I to Ignore [I]: ");
+        } else {
+            eprintln!("  Fix: {}", truncate(&f.proposed_fix, 160));
+            eprint!("Post (P) or Ignore (I) [I]: ");
+        }
+        let _ = io::stderr().flush();
+        let mut line_in = String::new();
+        io::stdin()
+            .read_line(&mut line_in)
+            .context("read triage choice")?;
+        let choice = line_in.trim();
+        if choice.is_empty()
+            || choice.eq_ignore_ascii_case("i")
+            || choice.eq_ignore_ascii_case("ignore")
+        {
+            f.include = Some(false);
+            f.status = "skipped".into();
+            continue;
+        }
+        if !f.fix_options.is_empty() {
+            let idx = if choice.len() == 1 {
+                let c = choice.chars().next().unwrap().to_ascii_uppercase();
+                if c >= 'A' && c < (b'A' + f.fix_options.len() as u8) as char {
+                    Some((c as u8 - b'A') as usize)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(i) = idx {
+                f.include = Some(true);
+                f.chosen_option = Some(f.fix_options[i].clone());
+                f.comment_body = Some(format!(
+                    "**{}**\n\n{}\n\n**Fix:** {}\n\n{}",
+                    f.title, f.explanation, f.fix_options[i], AI_AGENT_TAG
+                ));
+                f.status = "ready".into();
+            } else {
+                f.include = Some(false);
+                f.status = "skipped".into();
+            }
+        } else if choice.eq_ignore_ascii_case("p")
+            || choice.eq_ignore_ascii_case("post")
+            || choice.eq_ignore_ascii_case("y")
+        {
+            f.include = Some(true);
+            f.comment_body = Some(format!(
+                "**{}**\n\n{}\n\n**Fix:** {}\n\n{}",
+                f.title, f.explanation, f.proposed_fix, AI_AGENT_TAG
+            ));
+            f.status = "ready".into();
+        } else {
+            f.include = Some(false);
+            f.status = "skipped".into();
+        }
+    }
+
+    write_json_pretty(findings_path, &report)?;
+    Ok((report, findings_path.to_path_buf()))
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max).collect();
+        format!("{t}…")
+    }
+}
+
 pub fn run_findings_resolve(findings_path: &Path, cwd: &Path, strict: bool) -> Result<(FindingsReport, PathBuf)> {
     let mut report: FindingsReport = read_json(findings_path)?;
     let pack: Option<PackReport> = if let Some(p) = &report.pack_path {

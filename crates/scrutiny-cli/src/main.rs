@@ -2,11 +2,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, run_eval, run_findings_init, run_findings_resolve,
-    run_findings_validate, run_forge_brief, run_forge_context, run_forge_fetch,
-    run_forge_plan_write, run_map, run_pack, run_plan_confirm, run_plan_write, run_post_comments,
-    run_review_session_write, run_scan, EvalInput, FindingsInitInput, ForgeFetchInput,
-    ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
-    ReviewSessionWriteInput,
+    run_findings_triage, run_findings_validate, run_forge_brief, run_forge_context,
+    run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_plan_confirm, run_plan_write,
+    run_post_comments, run_review, run_review_session_write, run_scan, run_skills_install,
+    EvalInput, FindingsInitInput, ForgeFetchInput, ForgePlanWriteInput, PlanConfirmInput,
+    PlanWriteInput, PostCommentsInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -72,6 +72,8 @@ enum Commands {
         eval: PathBuf,
         #[arg(long)]
         client: Option<String>,
+        #[arg(long)]
+        spawn_mode: Option<String>,
         /// Skip stdin; pass PlanAnswers JSON
         #[arg(long)]
         from_json: Option<String>,
@@ -100,12 +102,54 @@ enum Commands {
         reviewers: Option<u32>,
         #[arg(long)]
         evangelists: Option<u32>,
+        #[arg(long)]
+        spawn_mode: Option<String>,
         /// Path to plan-answers JSON from plan-confirm
         #[arg(long)]
         answers: Option<PathBuf>,
         /// Alternate: pass a JSON object with plan-write fields (or PlanAnswers)
         #[arg(long)]
         from_json: Option<String>,
+    },
+    /// Orchestrate full review: analyze → plan → headless agents → triage → post
+    Review {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// PR URL or number (else local branch)
+        #[arg(long)]
+        pr: Option<String>,
+        /// Positional alias for --pr
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+        #[arg(long)]
+        client: Option<String>,
+        /// isolated (default) | team
+        #[arg(long)]
+        spawn_mode: Option<String>,
+        #[arg(long)]
+        from_json: Option<String>,
+        #[arg(long, default_value_t = false)]
+        skip_agents: bool,
+        #[arg(long)]
+        event: Option<String>,
+        /// Skip interactive client/spawn/triage prompts
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Install scrutiny skills via `npx skills add` (global or project)
+    SkillsInstall {
+        #[arg(long, short = 'g', default_value_t = false)]
+        global: bool,
+        #[arg(long, default_value = "*")]
+        skill: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long, short = 'y', default_value_t = false)]
+        yes: bool,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
     /// Partition pack paths across N reviewers; print JSON array of path arrays
     PackPartition {
@@ -124,7 +168,11 @@ enum Commands {
         #[arg(long)]
         from_json: String,
     },
-    /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
+    /// Interactive Post/Ignore triage for findings JSON; print path
+    FindingsTriage {
+        #[arg(long)]
+        findings: PathBuf,
+    },    /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -289,11 +337,13 @@ fn run() -> Result<()> {
         Commands::PlanConfirm {
             eval,
             client,
+            spawn_mode,
             from_json,
         } => {
             let (_answers, path) = run_plan_confirm(PlanConfirmInput {
                 eval_path: eval,
                 client,
+                spawn_mode,
                 from_json,
             })?;
             println!("{}", path.display());
@@ -310,10 +360,11 @@ fn run() -> Result<()> {
             error_handling,
             reviewers,
             evangelists,
+            spawn_mode,
             answers,
             from_json,
         } => {
-            let input = resolve_plan_write_input(
+            let mut input = resolve_plan_write_input(
                 eval,
                 map,
                 pack,
@@ -328,8 +379,60 @@ fn run() -> Result<()> {
                 answers,
                 from_json,
             )?;
+            if let Some(m) = spawn_mode {
+                input.spawn_mode = m;
+            }
             let (_plan, path) = run_plan_write(input)?;
             println!("{}", path.display());
+        }
+        Commands::Review {
+            cwd,
+            pr,
+            rest,
+            client,
+            spawn_mode,
+            from_json,
+            skip_agents,
+            event,
+            yes,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let pr = pr.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            let (findings, _report) = run_review(ReviewCmdInput {
+                cwd,
+                pr,
+                client,
+                spawn_mode,
+                from_json,
+                skip_agents,
+                event,
+                non_interactive: yes,
+            })?;
+            println!("{}", findings.display());
+        }
+        Commands::SkillsInstall {
+            global,
+            skill,
+            agent,
+            yes,
+            source,
+            cwd,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            run_skills_install(SkillsInstallInput {
+                cwd,
+                global,
+                skill,
+                agent,
+                yes,
+                source,
+            })?;
         }
         Commands::PackPartition { pack, reviewers } => {
             let buckets = partition_pack_paths(&pack, reviewers)?;
@@ -345,6 +448,10 @@ fn run() -> Result<()> {
                 pack_path: pack,
                 from_json,
             })?;
+            println!("{}", path.display());
+        }
+        Commands::FindingsTriage { findings } => {
+            let (_r, path) = run_findings_triage(&findings)?;
             println!("{}", path.display());
         }
         Commands::ForgeFetch {
@@ -502,6 +609,7 @@ fn resolve_plan_write_input(
             error_handling: a.error_handling,
             reviewers: a.reviewers,
             evangelists: a.evangelists,
+            spawn_mode: a.spawn_mode,
             eval_path: eval,
             map_path: map,
             pack_path: pack,
@@ -524,6 +632,7 @@ fn resolve_plan_write_input(
                 error_handling: a.error_handling,
                 reviewers: a.reviewers,
                 evangelists: a.evangelists,
+                spawn_mode: a.spawn_mode,
                 eval_path: eval,
                 map_path: map,
                 pack_path: pack,
@@ -557,6 +666,7 @@ fn resolve_plan_write_input(
             .context("plan-write requires --error-handling (or --answers / --from-json)")?,
         reviewers: reviewers.unwrap_or(0),
         evangelists: evangelists.unwrap_or(0),
+        spawn_mode: "isolated".into(),
         eval_path: eval,
         map_path: map,
         pack_path: pack,

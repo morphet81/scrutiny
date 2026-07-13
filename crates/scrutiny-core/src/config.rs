@@ -12,6 +12,12 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_client: String,
+    /// Force headless client for `scrutiny review` (cursor|claude|codex). Omit → detect + prompt.
+    #[serde(default)]
+    pub force_client: Option<String>,
+    /// Force spawn mode: isolated | team. Omit → prompt (default isolated).
+    #[serde(default)]
+    pub force_spawn_mode: Option<String>,
     pub models: BTreeMap<String, ClientModels>,
     pub review: ReviewConfig,
     pub agents: AgentsConfig,

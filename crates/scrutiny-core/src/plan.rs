@@ -36,6 +36,13 @@ pub struct ConfirmedPlan {
     /// Cap reviewers by pack size (skill should honor).
     pub max_reviewers: u32,
     pub spawn_evangelists: bool,
+    /// isolated (script parallel) | team (one lead spawns team).
+    #[serde(default = "default_spawn_isolated")]
+    pub spawn_mode: String,
+}
+
+fn default_spawn_isolated() -> String {
+    "isolated".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +54,8 @@ pub struct PlanWriteInput {
     pub error_handling: bool,
     pub reviewers: u32,
     pub evangelists: u32,
+    #[serde(default = "default_spawn_isolated")]
+    pub spawn_mode: String,
     pub eval_path: PathBuf,
     pub map_path: Option<PathBuf>,
     pub pack_path: Option<PathBuf>,
@@ -63,12 +72,16 @@ pub struct PlanAnswers {
     pub error_handling: bool,
     pub reviewers: u32,
     pub evangelists: u32,
+    #[serde(default = "default_spawn_isolated")]
+    pub spawn_mode: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct PlanConfirmInput {
     pub eval_path: PathBuf,
     pub client: Option<String>,
+    /// Pre-resolved spawn mode (from review command / config); skips that prompt when set.
+    pub spawn_mode: Option<String>,
     /// When set, skip stdin and use these answers (CI / tests).
     pub from_json: Option<String>,
 }
@@ -92,9 +105,14 @@ pub fn run_plan_confirm(input: PlanConfirmInput) -> Result<(PlanAnswers, PathBuf
         if a.client.is_empty() {
             a.client = client;
         }
+        if let Some(m) = &input.spawn_mode {
+            a.spawn_mode = crate::runtime::normalize_spawn_mode(m)?;
+        } else {
+            a.spawn_mode = crate::runtime::normalize_spawn_mode(&a.spawn_mode)?;
+        }
         a
     } else {
-        prompt_plan_answers(&client, suggested)?
+        prompt_plan_answers(&client, suggested, input.spawn_mode.as_deref())?
     };
 
     let out = temp_artifact_path(&eval.repo, &eval.branch, "plan-answers");
@@ -105,6 +123,7 @@ pub fn run_plan_confirm(input: PlanConfirmInput) -> Result<(PlanAnswers, PathBuf
 fn prompt_plan_answers(
     client: &str,
     suggested: &crate::config::SuggestedPlan,
+    spawn_mode_preset: Option<&str>,
 ) -> Result<PlanAnswers> {
     eprintln!("scrutiny plan-confirm: answer all knobs in this session (stdin).");
     eprintln!("Client: {client}");
@@ -136,14 +155,26 @@ fn prompt_plan_answers(
     let security = prompt_bool("2) Security analysis?", suggested.security)?;
     let performance = prompt_bool("3) Performance analysis?", suggested.performance)?;
     let error_handling = prompt_bool("4) Error-handling analysis?", suggested.error_handling)?;
-    let reviewers = prompt_u32(
-        "5) Reviewer agents (count)",
-        suggested.reviewers,
-    )?;
-    let evangelists = prompt_u32(
-        "6) Evangelist agents (count)",
-        suggested.evangelists,
-    )?;
+    let reviewers = prompt_u32("5) Reviewer agents (count)", suggested.reviewers)?;
+    let evangelists = prompt_u32("6) Evangelist agents (count)", suggested.evangelists)?;
+
+    let spawn_mode = if let Some(m) = spawn_mode_preset {
+        crate::runtime::normalize_spawn_mode(m)?
+    } else {
+        eprintln!("7) Spawn mode");
+        eprintln!("   [1] isolated — parallel reviewers/evangelists/specialists (default)");
+        eprintln!("   [2] team     — one lead agent spawns its own team");
+        eprint!("Enter 1 or 2 [default 1]: ");
+        let _ = io::stderr().flush();
+        let line = read_line()?;
+        if line.is_empty() || line == "1" || line.eq_ignore_ascii_case("isolated") {
+            "isolated".into()
+        } else if line == "2" || line.eq_ignore_ascii_case("team") {
+            "team".into()
+        } else {
+            bail!("expected 1/2/isolated/team, got {line}");
+        }
+    };
 
     Ok(PlanAnswers {
         client: client.to_string(),
@@ -153,6 +184,7 @@ fn prompt_plan_answers(
         error_handling,
         reviewers,
         evangelists,
+        spawn_mode,
     })
 }
 
@@ -257,10 +289,16 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
         scan.as_ref(),
         input.reviewers,
         input.evangelists,
+        input.security,
+        input.performance,
+        input.error_handling,
+        &input.spawn_mode,
     );
 
     let mut reviewers = input.reviewers;
     let mut evangelists = input.evangelists;
+    let spawn_mode = crate::runtime::normalize_spawn_mode(&input.spawn_mode)
+        .unwrap_or_else(|_| "isolated".into());
 
     // Cap agents by pack size
     let max_reviewers = if pack_chars < 4_000 {
@@ -288,9 +326,9 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
         version: 1,
         client: input.client,
         model: input.model,
-        security: input.security,
-        performance: input.performance,
-        error_handling: input.error_handling,
+        security: input.security && !skip_ai,
+        performance: input.performance && !skip_ai,
+        error_handling: input.error_handling && !skip_ai,
         reviewers,
         evangelists,
         reviewers_requested,
@@ -303,6 +341,7 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
         scan_path: input.scan_path.map(|p| p.display().to_string()),
         max_reviewers,
         spawn_evangelists,
+        spawn_mode,
     };
 
     if reviewers_requested > max_reviewers {
@@ -326,13 +365,17 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
     Ok((plan, out))
 }
 
-/// XS + docs (+ empty scan) or zero agents with only-static path → skip AI.
+/// XS + docs (+ empty scan) or zero agents/specialists (and not team) → skip AI.
 pub fn compute_skip_ai(
     tier: Tier,
     change_class: &str,
     scan: Option<&ScanReport>,
     reviewers: u32,
     evangelists: u32,
+    security: bool,
+    performance: bool,
+    error_handling: bool,
+    spawn_mode: &str,
 ) -> (bool, Option<String>) {
     let scan_empty = scan.map(|s| s.findings.is_empty()).unwrap_or(true);
     let docs_only = change_class.eq_ignore_ascii_case("docs")
@@ -345,10 +388,12 @@ pub fn compute_skip_ai(
         );
     }
 
-    if reviewers == 0 && evangelists == 0 {
+    let specialists = security || performance || error_handling;
+    let team = spawn_mode.eq_ignore_ascii_case("team");
+    if reviewers == 0 && evangelists == 0 && !specialists && !team {
         return (
             true,
-            Some("reviewers=0 and evangelists=0 — use scan findings only".into()),
+            Some("no reviewers/evangelists/specialists — use scan findings only".into()),
         );
     }
 
@@ -361,20 +406,26 @@ mod tests {
 
     #[test]
     fn xs_docs_empty_skips() {
-        let (skip, reason) = compute_skip_ai(Tier::Xs, "docs", None, 1, 1);
+        let (skip, reason) = compute_skip_ai(Tier::Xs, "docs", None, 1, 1, true, true, true, "isolated");
         assert!(skip);
         assert!(reason.unwrap().contains("XS"));
     }
 
     #[test]
     fn zero_agents_skips() {
-        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 0, 0);
+        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 0, 0, false, false, false, "isolated");
         assert!(skip);
     }
 
     #[test]
+    fn specialists_keep_ai() {
+        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 0, 0, true, false, false, "isolated");
+        assert!(!skip);
+    }
+
+    #[test]
     fn m_with_agents_runs() {
-        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 1, 0);
+        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 1, 0, false, false, false, "isolated");
         assert!(!skip);
     }
 
@@ -433,6 +484,7 @@ mod tests {
         let (answers, path) = run_plan_confirm(PlanConfirmInput {
             eval_path,
             client: None,
+            spawn_mode: None,
             from_json: Some(answers_json.into()),
         })
         .unwrap();
@@ -440,6 +492,7 @@ mod tests {
         assert_eq!(answers.model, "opus");
         assert_eq!(answers.reviewers, 2);
         assert_eq!(answers.evangelists, 1);
+        assert_eq!(answers.spawn_mode, "isolated");
         assert!(path.exists());
         assert!(!answers.error_handling);
         assert!(answers.performance);

@@ -1,5 +1,6 @@
-//! Scrutiny core: config, git, eval, map, pack, scan, plan, forge, findings, review session.
+//! Scrutiny core: config, git, eval, map, pack, scan, plan, forge, findings, review.
 
+pub mod agent_runner;
 pub mod config;
 pub mod eval;
 pub mod findings;
@@ -9,16 +10,20 @@ pub mod map;
 pub mod pack;
 pub mod paths;
 pub mod plan;
+pub mod review_cmd;
 pub mod review_session;
+pub mod runtime;
 pub mod scan;
 pub mod score;
+pub mod skills_install;
 pub mod taxonomy;
 
 pub use config::{ensure_config, load_config, Config};
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
-    run_findings_init, run_findings_resolve, run_findings_validate, run_post_comments,
-    FindingsInitInput, FindingsReport, PostCommentsInput, PostResult,
+    merge_ai_findings, run_findings_init, run_findings_resolve, run_findings_triage,
+    run_findings_validate, run_post_comments, FindingsInitInput, FindingsReport, PostCommentsInput,
+    PostResult,
 };
 pub use forge::{
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, ForgeFetchInput,
@@ -31,7 +36,10 @@ pub use plan::{
     load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
     PlanConfirmInput, PlanWriteInput,
 };
+pub use review_cmd::{run_review, ReviewCmdInput};
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
 };
+pub use runtime::{detect_clients, resolve_client, normalize_spawn_mode, DetectedClient};
 pub use scan::{normalize_severity, run_scan, ScanReport};
+pub use skills_install::{run_skills_install, SkillsInstallInput};

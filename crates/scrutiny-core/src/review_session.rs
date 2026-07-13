@@ -56,28 +56,58 @@ pub fn run_review_session_write(
 
     let reviewers_expected = plan.reviewers;
     let evangelists_expected = plan.evangelists;
+    let spawn_mode = plan.spawn_mode.as_str();
 
     let mut errs = Vec::new();
-    let reviewer_count = agents.iter().filter(|a| a.role == "reviewer").count() as u32;
-    let evangelist_count = agents.iter().filter(|a| a.role == "evangelist").count() as u32;
 
     if !plan.skip_ai {
-        if reviewer_count != reviewers_expected {
-            errs.push(format!(
-                "reviewers_expected={reviewers_expected} but agents has {reviewer_count} reviewer(s)"
-            ));
-        }
-        if evangelist_count != evangelists_expected {
-            errs.push(format!(
-                "evangelists_expected={evangelists_expected} but agents has {evangelist_count} evangelist(s)"
-            ));
-        }
-        let expected_total = reviewers_expected + evangelists_expected;
-        if agents.len() as u32 != expected_total {
-            errs.push(format!(
-                "agents.length={} != reviewers+evangelists ({expected_total})",
-                agents.len()
-            ));
+        if spawn_mode == "team" {
+            let lead_count = agents.iter().filter(|a| a.role == "lead").count();
+            if agents.len() != 1 || lead_count != 1 {
+                errs.push(format!(
+                    "team mode expects exactly 1 lead agent, got {} agent(s)",
+                    agents.len()
+                ));
+            }
+        } else {
+            let reviewer_count = agents.iter().filter(|a| a.role == "reviewer").count() as u32;
+            let evangelist_count = agents.iter().filter(|a| a.role == "evangelist").count() as u32;
+            if reviewer_count != reviewers_expected {
+                errs.push(format!(
+                    "reviewers_expected={reviewers_expected} but agents has {reviewer_count} reviewer(s)"
+                ));
+            }
+            if evangelist_count != evangelists_expected {
+                errs.push(format!(
+                    "evangelists_expected={evangelists_expected} but agents has {evangelist_count} evangelist(s)"
+                ));
+            }
+            let mut specialists_expected = 0u32;
+            if plan.security {
+                specialists_expected += 1;
+                if !agents.iter().any(|a| a.role == "security") {
+                    errs.push("missing security specialist agent".into());
+                }
+            }
+            if plan.performance {
+                specialists_expected += 1;
+                if !agents.iter().any(|a| a.role == "performance") {
+                    errs.push("missing performance specialist agent".into());
+                }
+            }
+            if plan.error_handling {
+                specialists_expected += 1;
+                if !agents.iter().any(|a| a.role == "error_handling") {
+                    errs.push("missing error_handling specialist agent".into());
+                }
+            }
+            let expected_total = reviewers_expected + evangelists_expected + specialists_expected;
+            if agents.len() as u32 != expected_total {
+                errs.push(format!(
+                    "agents.length={} != reviewers+evangelists+specialists ({expected_total})",
+                    agents.len()
+                ));
+            }
         }
     }
 

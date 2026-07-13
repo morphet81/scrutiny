@@ -10,25 +10,21 @@ The goal is simple: **do as much work as possible outside the model.** Determini
 
 ### `/scrutiny`
 
-Reviews a local branch or a GitHub PR. Scripts score complexity, build a change map, pack only the relevant diffs and symbol slices, run a zero-token static scan, then `plan-confirm` collects all plan knobs in one stdin session (model, analyses, reviewers, evangelists). Optional AI reviewers read partitioned pack paths; a review-session artifact validates spawn counts. Findings are tracked in a structured JSON file you triage; `post-comments` posts them (handles pending reviews) with precise line anchors and an `[AI Agent]` tag.
+Reviews a local branch or a GitHub PR. Prefer **`scrutiny review`** for script-orchestrated runs (detects Cursor/Claude/Codex CLIs, plan knobs, headless agents, triage, post). The `/scrutiny` skill remains for IDE agent sessions that chain discrete commands.
 
 ### `/forge`
 
 Implements a ticket from Jira, GitHub, GitLab, or an inline description. Scripts fetch and normalize the ticket, write a session plan (approach, team sizes, e2e, post-review counts—forceable in config), and produce a compact context pack plus caveman brief so implementers never re-hit the ticket CLIs. The agent then runs plan, TDD, or heads-down modes with PO/testers/developers as configured, and can reuse the scrutiny pack pipeline for post-implementation review.
 
-## Install with `npx skills`
-
-[`npx skills`](https://github.com/vercel-labs/skills) copies skill folders. It does **not** compile Rust; each skill’s `scripts/ensure-bin.sh` downloads a GitHub Release binary or builds from source on first use.
+## Install skills
 
 ```bash
-# both skills
+# via CLI (wraps npx skills add — uses local checkout when available)
+./target/release/scrutiny skills-install -g -y --skill '*'
+./target/release/scrutiny skills-install --skill scrutiny --agent cursor
+
+# or npx directly
 npx skills add morphet81/scrutiny -g -y --skill '*'
-
-# one skill
-npx skills add morphet81/scrutiny@scrutiny -g -y
-npx skills add morphet81/scrutiny@forge -g -y
-
-# local checkout
 npx skills add /path/to/scrutiny -g -y --skill '*' --agent cursor
 ```
 
@@ -39,7 +35,9 @@ Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline 
 - `git`
 - Network for release binary **or** Rust toolchain for `cargo build --release`
 - Optional: `gh` (PR review + GitHub issues), `acli` (Jira), `glab` (GitLab), `fcli` (Figma)
-- `SCRUTINY_GITHUB_REPO` overrides download repo (default `morphet81/scrutiny`)
+- For `scrutiny review`: headless agent CLI on PATH — `agent`/`cursor-agent`, `claude`, and/or `codex`
+- `npx` for `skills-install`
+- `SCRUTINY_GITHUB_REPO` overrides download/install repo (default `morphet81/scrutiny`)
 - Binary fetch uses GitHub Release **latest** by default (cache keyed by `bin/.scrutiny-version`; refreshes when tag changes). Set `SCRUTINY_VERSION=0.1.5` only to pin. `SCRUTINY_USE_LOCAL=1` forces local `cargo` build.
 
 ## Build (developers)
@@ -47,13 +45,32 @@ Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline 
 ```bash
 cargo build --release
 ./target/release/scrutiny eval --help
-./target/release/scrutiny forge-fetch --help
+./target/release/scrutiny review --help
+./target/release/scrutiny skills-install --help
 bash scripts/ensure-bin.sh
 ```
 
 ## Commands
 
-### Review pipeline
+### One-shot review (preferred)
+
+```bash
+./target/release/scrutiny review
+./target/release/scrutiny review --pr 42
+./target/release/scrutiny review --client claude --spawn-mode isolated
+./target/release/scrutiny review --from-json '{"client":"claude","model":"sonnet","security":true,"performance":false,"error_handling":true,"reviewers":1,"evangelists":0,"spawn_mode":"isolated"}' --yes
+```
+
+Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **isolated** parallel headless agents (default) or **team** lead → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
+
+Config (`~/.scrutiny/config.toml`):
+
+```toml
+# force_client = "claude"       # skip client prompt
+# force_spawn_mode = "isolated" # or "team"
+```
+
+### Step-by-step review pipeline
 
 ```bash
 ./target/release/scrutiny eval
@@ -61,7 +78,7 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny map --eval /tmp/scrutiny-…-eval.json
 ./target/release/scrutiny pack --map /tmp/scrutiny-…-map.json
 ./target/release/scrutiny scan --map … --pack … --eval …
-# interactive: all six knobs in one session (or --from-json for CI)
+# interactive: knobs in one session (or --from-json for CI)
 ./target/release/scrutiny plan-confirm --eval …
 ./target/release/scrutiny plan-write --eval … --map … --pack … --scan … \
   --answers /tmp/…-plan-answers.json
@@ -70,7 +87,7 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny review-session-write --plan … --pack … \
   --from-json '[{"role":"reviewer","index":1,"paths":["a.rs"],"findings_count":2}]'
 ./target/release/scrutiny findings-init --scan … --eval … --pack … --plan … [--pr 42]
-# agent edits findings JSON during triage, then:
+./target/release/scrutiny findings-triage --findings …
 ./target/release/scrutiny findings-resolve --findings …
 ./target/release/scrutiny findings-validate --findings …
 ./target/release/scrutiny post-comments --findings …
@@ -78,17 +95,22 @@ bash scripts/ensure-bin.sh
 
 ### plan-confirm / plan-write
 
-`plan-confirm` always asks (stdin): model, security, performance, error-handling, reviewers, evangelists — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` (or `--from-json` of that shape) applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or zero agents. Plan stores both requested and effective counts.
+`plan-confirm` asks (stdin): model, security, performance, error-handling, reviewers, evangelists, **spawn_mode** (`isolated` default | `team`) — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or no agents/specialists.
+
+### Spawn modes
+
+- **isolated (default):** script runs reviewers + evangelists + analysis specialists in parallel; script collates, dedupes, builds the report.
+- **team:** one lead headless agent spawns its own team and returns the final findings JSON; script does not merge specialists.
 
 ### Review session
 
-`pack-partition` splits pack slice paths across N reviewers (round-robin). `review-session-write` records spawned agents and **fails** if reviewer/evangelist counts do not match the plan — skill must re-spawn before triage.
+`pack-partition` splits pack slice paths across N reviewers (round-robin). `review-session-write` records spawned agents and **fails** if counts do not match the plan (team mode expects one `lead`).
 
 ### Findings / post-comments
 
 After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `info`.
 
-`post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It **prompts** for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or pass `--event`), then creates one PR review with line comments; bodies end with `[AI Agent]`.
+`findings-triage` prompts Post/Ignore (or fix options) on stdin. `post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It **prompts** for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or pass `--event`), then creates one PR review with line comments; bodies end with `[AI Agent]`.
 
 If the authenticated user already has a **PENDING** review on that PR, the script asks:
 

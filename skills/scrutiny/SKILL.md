@@ -1,21 +1,31 @@
 ---
 name: scrutiny
 description: >-
-  Code review skill. Runs Rust eval → map → pack → scan, plan-confirm (script owns knobs),
-  optionally spawns review agents on pack slices only (Claude: Task model=),
-  review-session-write, merges static+AI findings, caveman list, interactive triage.
-  Local default; PR URL/number for PR mode. post-comments owns GitHub review API.
+  Code review skill. Prefer `scrutiny review` for script-orchestrated runs
+  (headless agents, isolated|team spawn). Or chain Rust eval → map → pack → scan,
+  plan-confirm, optional Task agents, review-session-write, findings triage,
+  post-comments. Local default; PR URL/number for PR mode.
 argument-hint: "[PR-URL | PR-number]"
 ---
 
 # Scrutiny
 
-Code review skill. Complexity, map, pack, and scan are **scripts** (Rust).
-Agent judgment starts after artifacts exist. Review agents read **pack only**.
+**Preferred (no IDE agent host):** run the CLI orchestrator:
+
+```bash
+SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
+"$SCRUTINY_BIN" review [--pr <url|number>]
+```
+
+That probes `agent`/`claude`/`codex`, asks plan knobs, runs headless review
+(`isolated` parallel specialists by default, or `team` lead), triage, and posts.
+
+This skill is for **IDE agent sessions** that still chain discrete steps below.
+Complexity, map, pack, and scan stay scripts. Review agents read **pack only**.
 
 ## Usage
 
-- `/scrutiny` — local branch vs auto-detected base
+- `/scrutiny` — local branch vs auto-detected base (or suggest `scrutiny review`)
 - `/scrutiny <PR-URL>` — PR mode
 - `/scrutiny <PR-number>` — PR mode when unambiguous in current repo
 
@@ -34,8 +44,10 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 - Prefer: GitHub Release **latest** (stamp `bin/.scrutiny-version`) → else `cargo build --release`. Old cache without matching stamp is refreshed.
 - `ensure-bin.sh` walks up to repo `Cargo.toml` when skill lives under `skills/scrutiny/`
 - Env: `SCRUTINY_GITHUB_REPO` (default `morphet81/scrutiny`). Optional `SCRUTINY_VERSION` to pin. `SCRUTINY_USE_LOCAL=1` → local target/release.
+- Install skills: `"$SCRUTINY_BIN" skills-install -g -y` (wraps `npx skills add`)
 
 Config: `~/.scrutiny/config.toml` (created on first run from shipped `config/default.toml`).
+Optional: `force_client`, `force_spawn_mode` (`isolated` | `team`).
 
 Sibling skill: `/forge` (ticket implement) — same binary.
 
