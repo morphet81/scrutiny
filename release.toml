@@ -1,0 +1,10 @@
+# Never crates.io. Ship binaries via GitHub Releases (`v*` tags) + ensure-bin.sh.
+# Crate name `scrutiny` is already taken on crates.io by an unrelated package.
+publish = false
+verify = false
+
+# One workspace tag matching ensure-bin / release.yml (`v0.1.1`, not per-crate).
+consolidate-commits = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "chore: release {{version}}"
+tag-message = "v{{version}}"

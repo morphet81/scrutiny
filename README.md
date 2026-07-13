@@ -62,4 +62,12 @@ First run copies `config/default.toml` → `~/.scrutiny/config.toml`.
 
 ## Releases
 
+**Not on crates.io** — both crates set `publish = false`; `release.toml` keeps `cargo release` from publishing.
+
+Bump + tag (no registry):
+
+```bash
+cargo release patch --execute   # or minor / major
+```
+
 Tag `v*` runs `.github/workflows/release.yml` and uploads platform binaries; `ensure-bin.sh` downloads the host asset when present.

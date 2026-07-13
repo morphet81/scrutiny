@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Scrutiny"]
+# Skill + GitHub Releases only — never crates.io (name also taken upstream).
+publish = false
 
 [workspace.dependencies]
 anyhow = "1"
