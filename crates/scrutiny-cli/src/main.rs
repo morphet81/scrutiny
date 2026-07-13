@@ -1,13 +1,19 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
-    run_eval, run_map, run_pack, run_plan_write, run_scan, EvalInput, PlanWriteInput,
+    run_eval, run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map,
+    run_pack, run_plan_write, run_scan, EvalInput, ForgeFetchInput, ForgePlanWriteInput,
+    PlanWriteInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
-#[command(name = "scrutiny", version, about = "PR complexity eval + change map for AI code review")]
+#[command(
+    name = "scrutiny",
+    version,
+    about = "PR complexity eval + forge ticket implement helpers"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,
@@ -85,6 +91,68 @@ enum Commands {
         #[arg(long)]
         from_json: Option<String>,
     },
+    /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
+    ForgeFetch {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// URL, issue key/number, or description text
+        #[arg(long)]
+        input: Option<String>,
+        /// Positional alias for --input
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+        /// Force source: jira|github|gitlab|inline
+        #[arg(long)]
+        source: Option<String>,
+        /// Treat input as inline description
+        #[arg(long, default_value_t = false)]
+        inline: bool,
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Write confirmed forge session plan JSON; print path
+    ForgePlanWrite {
+        #[arg(long)]
+        ticket: PathBuf,
+        #[arg(long)]
+        client: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        approach: String,
+        #[arg(long, action = clap::ArgAction::Set, value_parser = parse_bool_arg)]
+        e2e: bool,
+        #[arg(long)]
+        agents: u32,
+        #[arg(long)]
+        testers: u32,
+        #[arg(long)]
+        reviewers: u32,
+        #[arg(long)]
+        evangelists: u32,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        from_json: Option<String>,
+    },
+    /// Keyword/context pack for forge agents; print path
+    ForgeContext {
+        #[arg(long)]
+        ticket: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Caveman brief markdown (+ JSON) for subagent prompts; print JSON path
+    ForgeBrief {
+        #[arg(long)]
+        ticket: PathBuf,
+        #[arg(long)]
+        session: Option<PathBuf>,
+        #[arg(long)]
+        context: Option<PathBuf>,
+    },
 }
 
 fn parse_bool_arg(s: &str) -> Result<bool, String> {
@@ -158,8 +226,8 @@ fn run() -> Result<()> {
             from_json,
         } => {
             let input = if let Some(raw) = from_json {
-                let mut v: PlanWriteInput = serde_json::from_str(&raw)
-                    .context("parse --from-json for plan-write")?;
+                let mut v: PlanWriteInput =
+                    serde_json::from_str(&raw).context("parse --from-json for plan-write")?;
                 // Ensure eval path present; allow flags to fill gaps if omitted in JSON
                 if v.eval_path.as_os_str().is_empty() {
                     v.eval_path = eval;
@@ -190,6 +258,84 @@ fn run() -> Result<()> {
                 }
             };
             let (_plan, path) = run_plan_write(input)?;
+            println!("{}", path.display());
+        }
+        Commands::ForgeFetch {
+            cwd,
+            input,
+            rest,
+            source,
+            inline,
+            client,
+            title,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let input = input.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            let (_report, path) = run_forge_fetch(ForgeFetchInput {
+                cwd,
+                input,
+                source,
+                inline,
+                client,
+                title,
+            })?;
+            println!("{}", path.display());
+        }
+        Commands::ForgePlanWrite {
+            ticket,
+            client,
+            model,
+            approach,
+            e2e,
+            agents,
+            testers,
+            reviewers,
+            evangelists,
+            cwd,
+            from_json,
+        } => {
+            let input = if let Some(raw) = from_json {
+                let mut v: ForgePlanWriteInput =
+                    serde_json::from_str(&raw).context("parse --from-json for forge-plan-write")?;
+                if v.ticket_path.as_os_str().is_empty() {
+                    v.ticket_path = ticket;
+                }
+                v
+            } else {
+                ForgePlanWriteInput {
+                    ticket_path: ticket,
+                    client,
+                    model,
+                    approach,
+                    e2e,
+                    agents,
+                    testers,
+                    reviewers,
+                    evangelists,
+                    cwd,
+                }
+            };
+            let (_plan, path) = run_forge_plan_write(input)?;
+            println!("{}", path.display());
+        }
+        Commands::ForgeContext { ticket, cwd } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let (_report, path) = run_forge_context(&ticket, &cwd)?;
+            println!("{}", path.display());
+        }
+        Commands::ForgeBrief {
+            ticket,
+            session,
+            context,
+        } => {
+            let (_report, path) =
+                run_forge_brief(&ticket, session.as_deref(), context.as_deref())?;
             println!("{}", path.display());
         }
     }

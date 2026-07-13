@@ -32,9 +32,12 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 
 - stdout = absolute path to `scrutiny` only
 - Prefer: `bin/scrutiny` → `target/release/scrutiny` → GitHub Release → `cargo build --release`
+- `ensure-bin.sh` walks up to repo `Cargo.toml` when skill lives under `skills/scrutiny/`
 - Env: `SCRUTINY_GITHUB_REPO` (default `alexanderobellianne/scrutiny`), `SCRUTINY_VERSION`
 
 Config: `~/.scrutiny/config.toml` (created on first run from shipped `config/default.toml`).
+
+Sibling skill: `/forge` (ticket implement) — same binary.
 
 ---
 
@@ -190,4 +193,4 @@ Clear, concise, caveman-style numbered list. Each issue:
 - Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → confirm → `plan-write` → (optional AI) → merge → triage
 - Edit `~/.scrutiny/config.toml` for models / pack / scan / agent counts
 - Claude `[models.claude]` uses aliases or pinned Anthropic ids only — not Cursor slugs
-- Install: `npx skills add <owner>/scrutiny -g -y` (see README)
+- Install: `npx skills add <owner>/scrutiny -g -y --skill '*'` (see README)

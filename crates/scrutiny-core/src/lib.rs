@@ -1,7 +1,8 @@
-//! Scrutiny core: config, git base detection, complexity eval, change map, pack, scan, plan.
+//! Scrutiny core: config, git base detection, complexity eval, change map, pack, scan, plan, forge.
 
 pub mod config;
 pub mod eval;
+pub mod forge;
 pub mod git;
 pub mod map;
 pub mod pack;
@@ -13,6 +14,10 @@ pub mod taxonomy;
 
 pub use config::{ensure_config, load_config, Config};
 pub use eval::{run_eval, EvalInput, EvalReport};
+pub use forge::{
+    run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, ForgeFetchInput,
+    ForgePlanWriteInput, ForgeSessionPlan, TicketReport,
+};
 pub use map::{run_map, MapReport};
 pub use pack::{run_pack, PackReport};
 pub use paths::temp_artifact_path;

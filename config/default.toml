@@ -67,6 +67,28 @@ symbol_context_lines = 3
 enable = true
 # commands = []  # optional project lint hooks, run in repo cwd
 
+# Forge (ticket implement skill). Omit/null force fields → prompt.
+# Set approach/e2e/agents/testers/reviewers/evangelists/model to skip prompts.
+[forge]
+# approach = "tdd"          # "tdd" | "heads_down" | "plan"
+# e2e = true
+# agents = 2
+# testers = 1
+# reviewers = 1
+# evangelists = 0
+# model = "sonnet"
+
+enable_figma = true
+enable_lore = true
+enable_ticket_writeback = true
+enable_po = true
+
+default_approach = "tdd"
+default_agents = 2
+default_testers = 1
+default_reviewers = 1
+default_evangelists = 0
+
 [git]
 base_candidates = ["main", "master", "develop"]
 exclude_globs = [
