@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
-    run_eval, run_findings_init, run_findings_resolve, run_findings_validate, run_forge_brief,
-    run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_plan_write,
-    run_post_comments, run_scan, EvalInput, FindingsInitInput, ForgeFetchInput, ForgePlanWriteInput,
-    PlanWriteInput, PostCommentsInput,
+    load_plan_answers, partition_pack_paths, run_eval, run_findings_init, run_findings_resolve,
+    run_findings_validate, run_forge_brief, run_forge_context, run_forge_fetch,
+    run_forge_plan_write, run_map, run_pack, run_plan_confirm, run_plan_write, run_post_comments,
+    run_review_session_write, run_scan, EvalInput, FindingsInitInput, ForgeFetchInput,
+    ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
+    ReviewSessionWriteInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -64,6 +66,16 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Interactively confirm plan knobs (all in one stdin session); print answers JSON path
+    PlanConfirm {
+        #[arg(long)]
+        eval: PathBuf,
+        #[arg(long)]
+        client: Option<String>,
+        /// Skip stdin; pass PlanAnswers JSON
+        #[arg(long)]
+        from_json: Option<String>,
+    },
     /// Write confirmed plan.json (includes skip_ai); print path
     PlanWrite {
         #[arg(long)]
@@ -75,22 +87,42 @@ enum Commands {
         #[arg(long)]
         scan: Option<PathBuf>,
         #[arg(long)]
-        client: String,
+        client: Option<String>,
         #[arg(long)]
-        model: String,
+        model: Option<String>,
         #[arg(long, action = clap::ArgAction::Set, value_parser = parse_bool_arg)]
-        security: bool,
+        security: Option<bool>,
         #[arg(long, action = clap::ArgAction::Set, value_parser = parse_bool_arg)]
-        performance: bool,
+        performance: Option<bool>,
         #[arg(long, action = clap::ArgAction::Set, value_parser = parse_bool_arg)]
-        error_handling: bool,
-        #[arg(long, default_value_t = 0)]
-        reviewers: u32,
-        #[arg(long, default_value_t = 0)]
-        evangelists: u32,
-        /// Alternate: pass a JSON object with the same fields (overrides flags when set)
+        error_handling: Option<bool>,
+        #[arg(long)]
+        reviewers: Option<u32>,
+        #[arg(long)]
+        evangelists: Option<u32>,
+        /// Path to plan-answers JSON from plan-confirm
+        #[arg(long)]
+        answers: Option<PathBuf>,
+        /// Alternate: pass a JSON object with plan-write fields (or PlanAnswers)
         #[arg(long)]
         from_json: Option<String>,
+    },
+    /// Partition pack paths across N reviewers; print JSON array of path arrays
+    PackPartition {
+        #[arg(long)]
+        pack: PathBuf,
+        #[arg(long)]
+        reviewers: u32,
+    },
+    /// Record spawned review agents; validate counts vs plan; print session path
+    ReviewSessionWrite {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        pack: Option<PathBuf>,
+        /// JSON array of {role,index,paths,findings_count} or {agents:[…]}
+        #[arg(long)]
+        from_json: String,
     },
     /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
@@ -254,6 +286,18 @@ fn run() -> Result<()> {
             let (_report, path) = run_scan(&map, pack.as_deref(), eval.as_deref(), &cwd)?;
             println!("{}", path.display());
         }
+        Commands::PlanConfirm {
+            eval,
+            client,
+            from_json,
+        } => {
+            let (_answers, path) = run_plan_confirm(PlanConfirmInput {
+                eval_path: eval,
+                client,
+                from_json,
+            })?;
+            println!("{}", path.display());
+        }
         Commands::PlanWrite {
             eval,
             map,
@@ -266,41 +310,41 @@ fn run() -> Result<()> {
             error_handling,
             reviewers,
             evangelists,
+            answers,
             from_json,
         } => {
-            let input = if let Some(raw) = from_json {
-                let mut v: PlanWriteInput =
-                    serde_json::from_str(&raw).context("parse --from-json for plan-write")?;
-                // Ensure eval path present; allow flags to fill gaps if omitted in JSON
-                if v.eval_path.as_os_str().is_empty() {
-                    v.eval_path = eval;
-                }
-                if v.map_path.is_none() {
-                    v.map_path = map;
-                }
-                if v.pack_path.is_none() {
-                    v.pack_path = pack;
-                }
-                if v.scan_path.is_none() {
-                    v.scan_path = scan;
-                }
-                v
-            } else {
-                PlanWriteInput {
-                    client,
-                    model,
-                    security,
-                    performance,
-                    error_handling,
-                    reviewers,
-                    evangelists,
-                    eval_path: eval,
-                    map_path: map,
-                    pack_path: pack,
-                    scan_path: scan,
-                }
-            };
+            let input = resolve_plan_write_input(
+                eval,
+                map,
+                pack,
+                scan,
+                client,
+                model,
+                security,
+                performance,
+                error_handling,
+                reviewers,
+                evangelists,
+                answers,
+                from_json,
+            )?;
             let (_plan, path) = run_plan_write(input)?;
+            println!("{}", path.display());
+        }
+        Commands::PackPartition { pack, reviewers } => {
+            let buckets = partition_pack_paths(&pack, reviewers)?;
+            println!("{}", serde_json::to_string(&buckets)?);
+        }
+        Commands::ReviewSessionWrite {
+            plan,
+            pack,
+            from_json,
+        } => {
+            let (_session, path) = run_review_session_write(ReviewSessionWriteInput {
+                plan_path: plan,
+                pack_path: pack,
+                from_json,
+            })?;
             println!("{}", path.display());
         }
         Commands::ForgeFetch {
@@ -430,4 +474,92 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_plan_write_input(
+    eval: PathBuf,
+    map: Option<PathBuf>,
+    pack: Option<PathBuf>,
+    scan: Option<PathBuf>,
+    client: Option<String>,
+    model: Option<String>,
+    security: Option<bool>,
+    performance: Option<bool>,
+    error_handling: Option<bool>,
+    reviewers: Option<u32>,
+    evangelists: Option<u32>,
+    answers: Option<PathBuf>,
+    from_json: Option<String>,
+) -> Result<PlanWriteInput> {
+    // Prefer --answers file, then --from-json as PlanAnswers, else flags / full PlanWriteInput JSON.
+    if let Some(path) = answers {
+        let a = load_plan_answers(&path)?;
+        return Ok(PlanWriteInput {
+            client: a.client,
+            model: a.model,
+            security: a.security,
+            performance: a.performance,
+            error_handling: a.error_handling,
+            reviewers: a.reviewers,
+            evangelists: a.evangelists,
+            eval_path: eval,
+            map_path: map,
+            pack_path: pack,
+            scan_path: scan,
+        });
+    }
+
+    if let Some(raw) = from_json {
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).context("parse --from-json for plan-write")?;
+        // PlanAnswers from plan-confirm (no eval_path) vs full PlanWriteInput JSON
+        if v.get("eval_path").is_none() {
+            let a: scrutiny_core::PlanAnswers =
+                serde_json::from_value(v).context("parse plan-answers --from-json")?;
+            return Ok(PlanWriteInput {
+                client: a.client,
+                model: a.model,
+                security: a.security,
+                performance: a.performance,
+                error_handling: a.error_handling,
+                reviewers: a.reviewers,
+                evangelists: a.evangelists,
+                eval_path: eval,
+                map_path: map,
+                pack_path: pack,
+                scan_path: scan,
+            });
+        }
+        let mut input: PlanWriteInput =
+            serde_json::from_value(v).context("parse PlanWriteInput --from-json")?;
+        if input.eval_path.as_os_str().is_empty() {
+            input.eval_path = eval;
+        }
+        if input.map_path.is_none() {
+            input.map_path = map;
+        }
+        if input.pack_path.is_none() {
+            input.pack_path = pack;
+        }
+        if input.scan_path.is_none() {
+            input.scan_path = scan;
+        }
+        return Ok(input);
+    }
+
+    Ok(PlanWriteInput {
+        client: client.context("plan-write requires --client (or --answers / --from-json)")?,
+        model: model.context("plan-write requires --model (or --answers / --from-json)")?,
+        security: security.context("plan-write requires --security (or --answers / --from-json)")?,
+        performance: performance
+            .context("plan-write requires --performance (or --answers / --from-json)")?,
+        error_handling: error_handling
+            .context("plan-write requires --error-handling (or --answers / --from-json)")?,
+        reviewers: reviewers.unwrap_or(0),
+        evangelists: evangelists.unwrap_or(0),
+        eval_path: eval,
+        map_path: map,
+        pack_path: pack,
+        scan_path: scan,
+    })
 }

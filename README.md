@@ -10,7 +10,7 @@ The goal is simple: **do as much work as possible outside the model.** Determini
 
 ### `/scrutiny`
 
-Reviews a local branch or a GitHub PR. Scripts score complexity, build a change map, pack only the relevant diffs and symbol slices, run a zero-token static scan, then (after you confirm model and analyses separately) optional AI reviewers read the pack alone. Findings are tracked in a structured JSON file you triage; a script posts the chosen items as a PR review with precise line anchors and an `[AI Agent]` tag.
+Reviews a local branch or a GitHub PR. Scripts score complexity, build a change map, pack only the relevant diffs and symbol slices, run a zero-token static scan, then `plan-confirm` collects all plan knobs in one stdin session (model, analyses, reviewers, evangelists). Optional AI reviewers read partitioned pack paths; a review-session artifact validates spawn counts. Findings are tracked in a structured JSON file you triage; `post-comments` posts them (handles pending reviews) with precise line anchors and an `[AI Agent]` tag.
 
 ### `/forge`
 
@@ -61,10 +61,14 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny map --eval /tmp/scrutiny-…-eval.json
 ./target/release/scrutiny pack --map /tmp/scrutiny-…-map.json
 ./target/release/scrutiny scan --map … --pack … --eval …
+# interactive: all six knobs in one session (or --from-json for CI)
+./target/release/scrutiny plan-confirm --eval …
 ./target/release/scrutiny plan-write --eval … --map … --pack … --scan … \
-  --client claude --model sonnet \
-  --security true --performance false --error-handling true \
-  --reviewers 1 --evangelists 0
+  --answers /tmp/…-plan-answers.json
+# after spawning reviewers/evangelists:
+./target/release/scrutiny pack-partition --pack … --reviewers 2
+./target/release/scrutiny review-session-write --plan … --pack … \
+  --from-json '[{"role":"reviewer","index":1,"paths":["a.rs"],"findings_count":2}]'
 ./target/release/scrutiny findings-init --scan … --eval … --pack … --plan … [--pr 42]
 # agent edits findings JSON during triage, then:
 ./target/release/scrutiny findings-resolve --findings …
@@ -72,11 +76,26 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny post-comments --findings …
 ```
 
+### plan-confirm / plan-write
+
+`plan-confirm` always asks (stdin): model, security, performance, error-handling, reviewers, evangelists — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` (or `--from-json` of that shape) applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or zero agents. Plan stores both requested and effective counts.
+
+### Review session
+
+`pack-partition` splits pack slice paths across N reviewers (round-robin). `review-session-write` records spawned agents and **fails** if reviewer/evangelist counts do not match the plan — skill must re-spawn before triage.
+
 ### Findings / post-comments
 
 After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `info`.
 
 `post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It **prompts** for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or pass `--event`), then creates one PR review with line comments; bodies end with `[AI Agent]`.
+
+If the authenticated user already has a **PENDING** review on that PR, the script asks:
+
+1. Add these comments to the pending review, then submit it  
+2. Close the pending review (choose event), then create a **new** review with the findings  
+
+Agents must not call `gh` review create/dismiss/delete — only `post-comments`.
 
 Line anchors are verified with `git show <head_oid>:<path>` — never invent line numbers.
 

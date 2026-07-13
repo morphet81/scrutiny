@@ -1,4 +1,4 @@
-//! Scrutiny core: config, git, eval, map, pack, scan, plan, forge, findings.
+//! Scrutiny core: config, git, eval, map, pack, scan, plan, forge, findings, review session.
 
 pub mod config;
 pub mod eval;
@@ -9,6 +9,7 @@ pub mod map;
 pub mod pack;
 pub mod paths;
 pub mod plan;
+pub mod review_session;
 pub mod scan;
 pub mod score;
 pub mod taxonomy;
@@ -26,5 +27,11 @@ pub use forge::{
 pub use map::{run_map, MapReport};
 pub use pack::{run_pack, PackReport};
 pub use paths::temp_artifact_path;
-pub use plan::{run_plan_write, ConfirmedPlan, PlanWriteInput};
+pub use plan::{
+    load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
+    PlanConfirmInput, PlanWriteInput,
+};
+pub use review_session::{
+    partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
+};
 pub use scan::{normalize_severity, run_scan, ScanReport};

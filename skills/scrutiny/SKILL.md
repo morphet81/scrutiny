@@ -1,10 +1,10 @@
 ---
 name: scrutiny
 description: >-
-  Code review skill. Runs Rust eval → map → pack → scan, confirms plan,
+  Code review skill. Runs Rust eval → map → pack → scan, plan-confirm (script owns knobs),
   optionally spawns review agents on pack slices only (Claude: Task model=),
-  merges static+AI findings, caveman list, interactive triage. Local default;
-  PR URL/number for PR mode.
+  review-session-write, merges static+AI findings, caveman list, interactive triage.
+  Local default; PR URL/number for PR mode. post-comments owns GitHub review API.
 argument-hint: "[PR-URL | PR-number]"
 ---
 
@@ -99,36 +99,30 @@ Pack holds:
 
 Show scan path. Findings are already caveman-shaped (`title`, `explanation`, `proposed_fix`, …). **Merge these before / without AI.**
 
-### 5. Confirm plan → plan-write
+### 5. Confirm plan → plan-confirm → plan-write
 
-Read eval `tier` + `suggested_plan` (do **not** re-parse whole config into prompts).
+**Hard rule — no chat plan prompts.** Do **not** use AskUserQuestion / multi-question chat UI for model, analyses, reviewers, or evangelists. Chat UIs cap ~4 fields per turn and split the form. Scripts own collection.
 
-**Hard rule — one turn, separate fields.** Ask **all** of the prompts below in a **single** multi-question UI / one message (every applicable field at once). Never split into a second round (e.g. model+analyses first, reviewers later). Never bundle into combined presets like “opus, all on” — each field stays its own question with its own choices.
-
-Include every row whose Hide rule does not apply:
-
-| # | Prompt | Choices | Default |
-|---|--------|---------|---------|
-| 1 | **Model** | Exactly `suggested_plan.available_models` (all ids for this client). Mark recommended. | `suggested_plan.model` |
-| 2 | **Security analysis?** | yes / no | `suggested_plan.security` |
-| 3 | **Performance analysis?** | yes / no | `suggested_plan.performance` |
-| 4 | **Error-handling analysis?** | yes / no | `suggested_plan.error_handling` |
-| 5 | **Reviewer agents** (count) | 0,1,2,… | `suggested_plan.reviewers` — **omit from the form** if `prompt_reviewers` false → use `0` |
-| 6 | **Evangelists** (count) | 0,1,2,… | `suggested_plan.evangelists` — **omit** if `prompt_evangelists` false → use `0` |
-
-Model field: list every entry in `available_models` (e.g. haiku, sonnet, claude-sonnet-4-6, opus), default = recommended `model`. Do **not** shrink the list to two presets.
-
-Wait for that one answer set, then write plan:
+Run **one** interactive script session (all six knobs, stdin, same process):
 
 ```bash
-"$SCRUTINY_BIN" plan-write \
-  --eval <eval> --map <map> --pack <pack> --scan <scan> \
-  --client <client> --model <confirmed-model> \
-  --security <true|false> --performance <true|false> --error-handling <true|false> \
-  --reviewers <n> --evangelists <n>
+ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL")"
+# CI / non-interactive:
+# ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL" --from-json '{"client":"claude","model":"opus","security":true,"performance":true,"error_handling":true,"reviewers":2,"evangelists":1}')"
 ```
 
-Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `model`, `spawn_evangelists`, `max_reviewers`.
+Then write plan from answers JSON (paths from earlier steps):
+
+```bash
+PLAN="$("$SCRUTINY_BIN" plan-write \
+  --eval "$EVAL" --map "$MAP" --pack "$PACK" --scan "$SCAN" \
+  --answers "$ANSWERS")"
+# equivalent: --from-json "$(cat "$ANSWERS")"
+```
+
+Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `reviewers_requested`, `evangelists_requested`, `model`, `spawn_evangelists`, `max_reviewers`.
+
+If `reviewers_requested` > `reviewers` (pack `max_reviewers` cap, e.g. pack_chars < 4000 → cap 1), tell user the effective count — do not spawn the raw requested number.
 
 #### Short-circuit (no AI review)
 
@@ -155,13 +149,36 @@ If `skip_ai` is true (XS + docs + empty scan, or reviewers=evangelists=0):
 
 Telling the main agent “prefer 4.6” while the UI session is Opus **does not** change the session.
 
-#### Spawn rules
+#### Spawn rules (mandatory when `skip_ai` false and `plan.reviewers` > 0)
 
-- Reviewer count = `plan.reviewers` (already capped by pack size via `max_reviewers`)
-- Evangelists only if `plan.spawn_evangelists` (architecture_risk or tier ≥ L) and count > 0
-- Brief each agent with: **plan.json + pack path only** (not full eval/config dumps)
-- Enabled analyses only: security / performance / error_handling from plan
-- Agents must not fish outside pack
+1. Partition pack paths across reviewers:
+
+```bash
+BUCKETS="$("$SCRUTINY_BIN" pack-partition --pack "$PACK" --reviewers "$(jq .reviewers "$PLAN")")"
+```
+
+`BUCKETS` = JSON array of path arrays. Reviewer *i* gets **only** `BUCKETS[i]` (+ shared plan/pack paths in the brief).
+
+2. Spawn **exactly** `plan.reviewers` reviewer Tasks + `plan.evangelists` evangelists **in parallel**, each with confirmed `model=`.
+3. **Wait for all** to finish before merge — no early stop / skim.
+4. Each agent return must be structured findings with `path`+`line`, or explicit `findings: []`.
+5. Lead **rejects** missing anchors / empty unexplained returns; re-spawn that agent.
+6. Record session (fails if agent count ≠ expected):
+
+```bash
+SESSION="$("$SCRUTINY_BIN" review-session-write --plan "$PLAN" --pack "$PACK" --from-json "$AGENTS_JSON")"
+```
+
+`AGENTS_JSON` example: `[{"role":"reviewer","index":1,"paths":["a.ts"],"findings_count":3},…]`.
+
+If `review-session-write` fails validation (or `agents.length != reviewers_expected + evangelists_expected`), **re-spawn missing agents** before triage — do not invent session JSON.
+
+Other:
+
+- Evangelists only if `plan.spawn_evangelists` and count > 0 (plan already zeroes them otherwise)
+- Brief: **plan path + pack path + that agent’s path list only**
+- Analyses: security / performance / error_handling from plan
+- Agents must not fish outside pack / their paths
 
 **Hard rule — anchors at raise time.** Every finding a reviewer/evangelist returns **must** include:
 
@@ -227,7 +244,7 @@ After that **one** answer set, agent work ends with file edits + starting the sc
 ```
 
 5. If `line_resolved=false` on an included finding: fix from pack/head (real cited line), resolve again. Critical must resolve.
-6. **Stop agent prompting.** Run the poster (it asks review action on stdin, then posts). Requires PR — else stop with “open a PR or re-run `/scrutiny <pr-url>`”:
+6. **Stop agent prompting.** Run the poster. Requires PR — else stop with “open a PR or re-run `/scrutiny <pr-url>`”:
 
 ```bash
 "$SCRUTINY_BIN" findings-validate --findings "$FINDINGS"
@@ -236,13 +253,15 @@ RESULT="$("$SCRUTINY_BIN" post-comments --findings "$FINDINGS" --cwd <repo-root>
 
 Optional non-interactive: `post-comments --event COMMENT|REQUEST_CHANGES|APPROVE`.
 
+**`post-comments` owns GitHub review API.** Script prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE`. If your user already has a **PENDING** review, script asks add-vs-close (then event). Agent must **never** run `gh api` to create / dismiss / delete / submit reviews. If script fails, show stderr to user — do not improvise.
+
 Show result path / review `html_url` from the script output. Agent must **not** re-ask the review action in chat.
 
 ---
 
 ## Notes
 
-- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → confirm → `plan-write` → (optional AI with anchors) → `findings-init` → **one** triage prompt → `findings-resolve` → `post-comments` (script prompts review event + posts)
+- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → `plan-confirm` → `plan-write` → (optional AI: partition + parallel spawn + wait + `review-session-write`) → `findings-init` → **one** triage prompt → `findings-resolve` → `post-comments` (pending + event prompts)
 - Edit `~/.scrutiny/config.toml` for models / pack / scan / agent counts
 - Claude `[models.claude]` uses aliases or pinned Anthropic ids only — not Cursor slugs
 - Install: `npx skills add <owner>/scrutiny -g -y --skill '*'` (see README)

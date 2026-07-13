@@ -388,14 +388,10 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
         .context("pr_number required to post")?;
     let (owner, name) = split_repo(&report.repo)?;
 
-    let event = resolve_review_event(&mut report, &input)?;
-    report.review.event = Some(event.clone());
-    if report.review.body.is_none() {
-        report.review.body = Some(default_review_body(&report));
-    }
-    write_json_pretty(&input.findings_path, &report)?;
-
     ensure_gh()?;
+
+    let (api_comments, body_fallbacks, failed) =
+        build_comment_payloads(&mut report, input.strict)?;
 
     let mut review_body = report
         .review
@@ -403,17 +399,145 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
         .clone()
         .unwrap_or_else(|| default_review_body(&report));
     review_body = ensure_ai_tag(&review_body);
+    if !body_fallbacks.is_empty() {
+        review_body.push_str("\n\n### Could not attach as line comments\n");
+        for b in &body_fallbacks {
+            review_body.push_str(b);
+            review_body.push('\n');
+        }
+    }
 
+    // Pending review owned by current user?
+    let pending = find_pending_review(&input.cwd, &owner, &name, pr)?;
+
+    let event;
+    let resp;
+    let posted;
+
+    if let Some(pending_id) = pending {
+        eprintln!("scrutiny post-comments: pending review #{pending_id} found.");
+        eprintln!("  1) Add comments to that pending review, then submit it");
+        eprintln!("  2) Close the pending review first, then post a new review with these findings");
+        eprint!("Enter 1 or 2: ");
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        let choice = read_stdin_line()?;
+        match choice.trim() {
+            "1" => {
+                add_comments_to_pending(
+                    &input.cwd,
+                    &owner,
+                    &name,
+                    pr,
+                    pending_id,
+                    &api_comments,
+                )?;
+                event = resolve_review_event(&mut report, &input)?;
+                report.review.event = Some(event.clone());
+                write_json_pretty(&input.findings_path, &report)?;
+                // Update review body then submit
+                set_pending_review_body(
+                    &input.cwd,
+                    &owner,
+                    &name,
+                    pr,
+                    pending_id,
+                    &review_body,
+                )?;
+                resp = submit_review_event(
+                    &input.cwd,
+                    &owner,
+                    &name,
+                    pr,
+                    pending_id,
+                    &event,
+                )?;
+                posted = api_comments.len() as u32;
+            }
+            "2" => {
+                eprintln!("Close pending review as:");
+                let close_event = prompt_event_choice(
+                    "  (closing does not attach new findings to the old review)",
+                )?;
+                let _ = submit_review_event(
+                    &input.cwd,
+                    &owner,
+                    &name,
+                    pr,
+                    pending_id,
+                    &close_event,
+                )?;
+                eprintln!("Pending review closed as {close_event}.");
+                event = resolve_review_event(&mut report, &input)?;
+                report.review.event = Some(event.clone());
+                if report.review.body.is_none() {
+                    report.review.body = Some(default_review_body(&report));
+                }
+                write_json_pretty(&input.findings_path, &report)?;
+                let (r, p) = create_new_review(
+                    &input.cwd,
+                    &owner,
+                    &name,
+                    pr,
+                    &report,
+                    &event,
+                    &review_body,
+                    &api_comments,
+                )?;
+                resp = r;
+                posted = p;
+            }
+            other => bail!("expected 1 or 2, got {other}"),
+        }
+    } else {
+        event = resolve_review_event(&mut report, &input)?;
+        report.review.event = Some(event.clone());
+        if report.review.body.is_none() {
+            report.review.body = Some(default_review_body(&report));
+        }
+        write_json_pretty(&input.findings_path, &report)?;
+        let (r, p) = create_new_review(
+            &input.cwd,
+            &owner,
+            &name,
+            pr,
+            &report,
+            &event,
+            &review_body,
+            &api_comments,
+        )?;
+        resp = r;
+        posted = p;
+    }
+
+    for f in report.findings.iter_mut() {
+        if f.include == Some(true) && f.status == "pending" {
+            f.status = "posted".into();
+        }
+    }
+    finalize_post(
+        &mut report,
+        &input.findings_path,
+        resp,
+        &event,
+        posted,
+        body_fallbacks.len() as u32,
+        failed,
+    )
+}
+
+fn build_comment_payloads(
+    report: &mut FindingsReport,
+    strict: bool,
+) -> Result<(Vec<Value>, Vec<String>, Vec<String>)> {
     let mut api_comments: Vec<Value> = Vec::new();
     let mut body_fallbacks: Vec<String> = Vec::new();
     let mut failed = Vec::new();
-    let mut included: Vec<&mut TriageFinding> = report
-        .findings
-        .iter_mut()
-        .filter(|f| f.include == Some(true))
-        .collect();
 
-    for f in included.iter_mut() {
+    for f in report.findings.iter_mut() {
+        if f.include != Some(true) {
+            continue;
+        }
         let body = ensure_ai_tag(f.comment_body.as_deref().unwrap_or(""));
         f.comment_body = Some(body.clone());
 
@@ -422,16 +546,12 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
             || f.anchor.line.is_none()
             || f.anchor.in_diff == Some(false)
         {
-            // Prefer body fallback when not in diff
             body_fallbacks.push(format_fallback_bullet(f, &body));
             f.status = "failed".into();
             f.fail_reason = Some("line not in diff or unresolved; appended to review body".into());
             failed.push(f.id.clone());
-            if input.strict && f.severity == "critical" {
-                bail!(
-                    "strict: critical {} cannot post as line comment",
-                    f.id
-                );
+            if strict && f.severity == "critical" {
+                bail!("strict: critical {} cannot post as line comment", f.id);
             }
             continue;
         }
@@ -452,22 +572,25 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
         }
         api_comments.push(c);
     }
+    Ok((api_comments, body_fallbacks, failed))
+}
 
-    if !body_fallbacks.is_empty() {
-        review_body.push_str("\n\n### Could not attach as line comments\n");
-        for b in &body_fallbacks {
-            review_body.push_str(b);
-            review_body.push('\n');
-        }
-    }
-
+fn create_new_review(
+    cwd: &Path,
+    owner: &str,
+    name: &str,
+    pr: u64,
+    report: &FindingsReport,
+    event: &str,
+    review_body: &str,
+    api_comments: &[Value],
+) -> Result<(Value, u32)> {
     let payload = json!({
         "commit_id": report.head_oid,
         "body": review_body,
         "event": event,
         "comments": api_comments,
     });
-
     let endpoint = format!("repos/{owner}/{name}/pulls/{pr}/reviews");
     let payload_path = temp_artifact_path(&report.repo, "review", "payload");
     write_json_pretty(&payload_path, &payload)?;
@@ -475,83 +598,235 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
     let output = Command::new("gh")
         .args(["api", "--method", "POST", &endpoint, "--input"])
         .arg(&payload_path)
-        .current_dir(&input.cwd)
+        .current_dir(cwd)
         .output()
         .context("run gh api POST review")?;
 
-    if !output.status.success() {
-        // Retry without line comments — body only
-        let err = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !api_comments.is_empty() {
-            // Move all to body and retry COMMENT-style payload
-            for c in &api_comments {
-                let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-                let line = c.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                body_fallbacks.push(format!("- `{path}:{line}`\n{body}\n"));
-            }
-            let mut body2 = report
-                .review
-                .body
-                .clone()
-                .unwrap_or_else(|| default_review_body(&report));
-            body2 = ensure_ai_tag(&body2);
-            body2.push_str("\n\n### Review comments (fallback)\n");
-            for b in &body_fallbacks {
-                body2.push_str(b);
-                body2.push('\n');
-            }
-            let payload2 = json!({
-                "commit_id": report.head_oid,
-                "body": body2,
-                "event": event,
-                "comments": [],
-            });
-            write_json_pretty(&payload_path, &payload2)?;
-            let output2 = Command::new("gh")
-                .args(["api", "--method", "POST", &endpoint, "--input"])
-                .arg(&payload_path)
-                .current_dir(&input.cwd)
-                .output()
-                .context("run gh api POST review fallback")?;
-            if !output2.status.success() {
-                bail!(
-                    "gh api review failed: {} {}",
-                    String::from_utf8_lossy(&output2.stderr),
-                    String::from_utf8_lossy(&output2.stdout)
-                );
-            }
-            let resp: Value = serde_json::from_slice(&output2.stdout).context("parse review resp")?;
-            return finalize_post(
-                &mut report,
-                &input.findings_path,
-                resp,
-                &event,
-                0,
-                body_fallbacks.len() as u32 + api_comments.len() as u32,
-                failed,
-            );
-        }
-        bail!("gh api review failed: {err} {stdout}");
+    if output.status.success() {
+        let resp: Value =
+            serde_json::from_slice(&output.stdout).context("parse review resp")?;
+        return Ok((resp, api_comments.len() as u32));
     }
 
-    let resp: Value = serde_json::from_slice(&output.stdout).context("parse review resp")?;
-    let posted = api_comments.len() as u32;
-    for f in report.findings.iter_mut() {
-        if f.include == Some(true) && f.status == "pending" {
-            f.status = "posted".into();
+    let err = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // If pending-review error slipped through, tell user to re-run (script should have handled)
+    if err.contains("pending review") || stdout.contains("pending review") {
+        bail!(
+            "gh api failed due to a pending review. Re-run post-comments — it will ask how to handle it.\n{err} {stdout}"
+        );
+    }
+
+    // Fallback: body-only review
+    if !api_comments.is_empty() {
+        let mut body2 = review_body.to_string();
+        body2.push_str("\n\n### Review comments (fallback)\n");
+        for c in api_comments {
+            let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let line = c.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+            let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            body2.push_str(&format!("- `{path}:{line}`\n{body}\n"));
+        }
+        let payload2 = json!({
+            "commit_id": report.head_oid,
+            "body": body2,
+            "event": event,
+            "comments": [],
+        });
+        write_json_pretty(&payload_path, &payload2)?;
+        let output2 = Command::new("gh")
+            .args(["api", "--method", "POST", &endpoint, "--input"])
+            .arg(&payload_path)
+            .current_dir(cwd)
+            .output()
+            .context("run gh api POST review fallback")?;
+        if !output2.status.success() {
+            bail!(
+                "gh api review failed: {} {}",
+                String::from_utf8_lossy(&output2.stderr),
+                String::from_utf8_lossy(&output2.stdout)
+            );
+        }
+        let resp: Value =
+            serde_json::from_slice(&output2.stdout).context("parse review resp")?;
+        return Ok((resp, 0));
+    }
+    bail!("gh api review failed: {err} {stdout}");
+}
+
+fn find_pending_review(
+    cwd: &Path,
+    owner: &str,
+    name: &str,
+    pr: u64,
+) -> Result<Option<u64>> {
+    let login = gh_json(cwd, &["api", "user", "-q", ".login"])?
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if login.is_empty() {
+        return Ok(None);
+    }
+    let endpoint = format!("repos/{owner}/{name}/pulls/{pr}/reviews");
+    let reviews = gh_json(cwd, &["api", &endpoint])?;
+    let Some(arr) = reviews.as_array() else {
+        return Ok(None);
+    };
+    for r in arr {
+        let state = r.get("state").and_then(|s| s.as_str()).unwrap_or("");
+        let user = r
+            .pointer("/user/login")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        if state.eq_ignore_ascii_case("PENDING") && user == login {
+            if let Some(id) = r.get("id").and_then(|i| i.as_u64()) {
+                return Ok(Some(id));
+            }
         }
     }
-    finalize_post(
-        &mut report,
-        &input.findings_path,
-        resp,
-        &event,
-        posted,
-        body_fallbacks.len() as u32,
-        failed,
-    )
+    Ok(None)
+}
+
+fn add_comments_to_pending(
+    cwd: &Path,
+    owner: &str,
+    name: &str,
+    pr: u64,
+    review_id: u64,
+    comments: &[Value],
+) -> Result<()> {
+    for c in comments {
+        let endpoint =
+            format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}/comments");
+        let payload_path = temp_artifact_path("scrutiny", "pending", "comment");
+        write_json_pretty(&payload_path, c)?;
+        let output = Command::new("gh")
+            .args(["api", "--method", "POST", &endpoint, "--input"])
+            .arg(&payload_path)
+            .current_dir(cwd)
+            .output()
+            .context("add comment to pending review")?;
+        if !output.status.success() {
+            bail!(
+                "failed to add comment to pending review: {} {}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn set_pending_review_body(
+    cwd: &Path,
+    owner: &str,
+    name: &str,
+    pr: u64,
+    review_id: u64,
+    body: &str,
+) -> Result<()> {
+    // GitHub allows updating pending review via PUT
+    let endpoint = format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}");
+    let payload = json!({ "body": body });
+    let payload_path = temp_artifact_path("scrutiny", "pending", "body");
+    write_json_pretty(&payload_path, &payload)?;
+    let output = Command::new("gh")
+        .args(["api", "--method", "PUT", &endpoint, "--input"])
+        .arg(&payload_path)
+        .current_dir(cwd)
+        .output()
+        .context("update pending review body")?;
+    // Non-fatal if PUT fails — submit still works
+    if !output.status.success() {
+        eprintln!(
+            "scrutiny post-comments: warn: could not update pending review body ({})",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn submit_review_event(
+    cwd: &Path,
+    owner: &str,
+    name: &str,
+    pr: u64,
+    review_id: u64,
+    event: &str,
+) -> Result<Value> {
+    let endpoint =
+        format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}/events");
+    let payload = json!({ "event": event });
+    let payload_path = temp_artifact_path("scrutiny", "pending", "event");
+    write_json_pretty(&payload_path, &payload)?;
+    let output = Command::new("gh")
+        .args(["api", "--method", "POST", &endpoint, "--input"])
+        .arg(&payload_path)
+        .current_dir(cwd)
+        .output()
+        .context("submit review event")?;
+    if !output.status.success() {
+        bail!(
+            "failed to submit review event: {} {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("parse submit event resp")
+}
+
+fn gh_json(cwd: &Path, args: &[&str]) -> Result<Value> {
+    let output = Command::new("gh")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("gh {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // -q may print raw string without quotes
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        return Ok(Value::Null);
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(&text) {
+        return Ok(v);
+    }
+    Ok(Value::String(text))
+}
+
+fn read_stdin_line() -> Result<String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("read stdin")?;
+    Ok(line.trim().to_string())
+}
+
+fn prompt_event_choice(extra: &str) -> Result<String> {
+    eprintln!("scrutiny post-comments: review action?");
+    if !extra.is_empty() {
+        eprintln!("{extra}");
+    }
+    eprintln!("  1) COMMENT       — comments only");
+    eprintln!("  2) REQUEST_CHANGES — block the PR");
+    eprintln!("  3) APPROVE       — approve");
+    eprint!("Enter 1, 2, 3 (or COMMENT / REQUEST_CHANGES / APPROVE): ");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    let choice = read_stdin_line()?;
+    let event = match choice.as_str() {
+        "1" | "c" | "C" => "COMMENT",
+        "2" | "r" | "R" => "REQUEST_CHANGES",
+        "3" | "a" | "A" => "APPROVE",
+        other => other,
+    };
+    normalize_event(event)
 }
 
 fn finalize_post(
@@ -598,28 +873,10 @@ fn resolve_review_event(report: &mut FindingsReport, input: &PostCommentsInput) 
     if let Some(ev) = &report.review.event {
         return normalize_event(ev);
     }
-
     let (crit, warn, info) = included_counts(report);
-    eprintln!("scrutiny post-comments: review action for the PR?");
-    eprintln!("  Included to post: {crit} critical, {warn} warning, {info} info");
-    eprintln!("  1) COMMENT       — post comments only (no approve / no block)");
-    eprintln!("  2) REQUEST_CHANGES — block the PR");
-    eprintln!("  3) APPROVE       — approve and attach comments");
-    eprint!("Enter 1, 2, 3 (or COMMENT / REQUEST_CHANGES / APPROVE): ");
-    use std::io::{self, Write};
-    let _ = io::stderr().flush();
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .context("read review action from stdin")?;
-    let choice = line.trim();
-    let event = match choice {
-        "1" | "c" | "C" => "COMMENT",
-        "2" | "r" | "R" => "REQUEST_CHANGES",
-        "3" | "a" | "A" => "APPROVE",
-        other => other,
-    };
-    normalize_event(event)
+    prompt_event_choice(&format!(
+        "  Included to post: {crit} critical, {warn} warning, {info} info"
+    ))
 }
 
 fn normalize_event(raw: &str) -> Result<String> {
