@@ -1,0 +1,15 @@
+[package]
+name = "scrutiny"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scrutiny"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+scrutiny-core = { path = "../scrutiny-core" }
+serde_json.workspace = true

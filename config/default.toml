@@ -1,0 +1,83 @@
+default_client = "cursor"
+
+[models.cursor]
+xs = "composer-2-fast"
+s = "composer-2-fast"
+m = "claude-4.6-sonnet-medium-thinking"
+l = "claude-sonnet-5-thinking-high"
+xl = "claude-opus-4-8-thinking-high"
+
+# Claude Code: use aliases or pinned Anthropic ids only (not Cursor slugs).
+# Aliases like "sonnet"/"opus" resolve to *latest* — pin if you need 4.6 specifically.
+[models.claude]
+xs = "haiku"
+s = "haiku"
+m = "sonnet"
+l = "claude-sonnet-4-6"
+xl = "opus"
+
+[models.codex]
+xs = "gpt-5.3-codex"
+s = "gpt-5.3-codex"
+m = "gpt-5.5-medium"
+l = "gpt-5.6-sol-medium"
+xl = "gpt-5.6-terra-medium"
+
+[review.security_by_tier]
+XS = false
+S = false
+M = true
+L = true
+XL = true
+
+[review.performance_by_tier]
+XS = false
+S = false
+M = false
+L = true
+XL = true
+
+[review.error_handling_by_tier]
+XS = false
+S = true
+M = true
+L = true
+XL = true
+
+[agents.reviewers_by_tier]
+XS = 0
+S = 1
+M = 1
+L = 2
+XL = 2
+
+[agents.evangelists_by_tier]
+XS = 0
+S = 0
+M = 1
+L = 1
+XL = 2
+
+[pack]
+max_chars = 48000
+doc_digest_lines = 40
+symbol_context_lines = 3
+
+[scan]
+enable = true
+# commands = []  # optional project lint hooks, run in repo cwd
+
+[git]
+base_candidates = ["main", "master", "develop"]
+exclude_globs = [
+  "**/package-lock.json",
+  "**/*.lock",
+  "**/node_modules/**",
+  "**/*.snap",
+  "**/dist/**",
+  "**/*.min.js",
+  "**/*.map",
+  "**/generated/**",
+  "**/*.pb.go",
+  "**/*.pb.ts",
+]
