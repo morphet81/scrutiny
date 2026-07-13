@@ -69,7 +69,10 @@ detect_triple() {
     darwin)
       case "${arch}" in
         arm64|aarch64) echo "aarch64-apple-darwin" ;;
-        x86_64) echo "x86_64-apple-darwin" ;;
+        x86_64)
+          # No release asset (Intel runner retired). Cargo fallback builds host.
+          echo "x86_64-apple-darwin"
+          ;;
         *) die "unsupported macOS arch: ${arch}" ;;
       esac
       ;;
@@ -156,6 +159,12 @@ try_download() {
   repo="$(github_repo)"
   version="$(read_version)"
   triple="$(detect_triple)"
+
+  # Intel macOS: no GitHub Release asset (runner retired). Skip to cargo.
+  if [[ "${triple}" == "x86_64-apple-darwin" ]]; then
+    log "scrutiny ensure-bin: no release binary for Intel Mac; falling back to cargo"
+    return 1
+  fi
 
   if [[ "${triple}" == *windows* ]]; then
     asset="scrutiny-${triple}.exe"
