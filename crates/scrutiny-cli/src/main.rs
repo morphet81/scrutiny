@@ -764,12 +764,27 @@ fn run() -> Result<()> {
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             prepare_artifacts(&cwd, None, &[findings.as_path()])?;
-            let (_result, path) = run_post_comments(PostCommentsInput {
+            let (result, path) = run_post_comments(PostCommentsInput {
                 findings_path: findings,
                 cwd,
                 strict,
                 event,
             })?;
+            eprintln!(
+                "scrutiny post-comments: posted {} comment(s) as {} → {}",
+                result.posted_comments,
+                result.event,
+                path.display()
+            );
+            if let Some(url) = &result.html_url {
+                eprintln!("  {url}");
+            }
+            if !result.failed.is_empty() {
+                eprintln!(
+                    "scrutiny post-comments: {} finding(s) failed to anchor",
+                    result.failed.len()
+                );
+            }
             println!("{}", path.display());
         }
     }
