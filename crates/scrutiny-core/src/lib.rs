@@ -9,6 +9,7 @@ pub mod forge;
 pub mod forge_cmd;
 pub mod git;
 pub mod map;
+pub mod mdterm;
 pub mod pack;
 pub mod paths;
 pub mod plan;

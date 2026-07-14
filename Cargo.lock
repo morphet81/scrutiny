@@ -487,6 +487,7 @@ version = "0.1.14"
 dependencies = [
  "anyhow",
  "chrono",
+ "console",
  "dialoguer",
  "globset",
  "serde",

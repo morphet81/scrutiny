@@ -482,43 +482,19 @@ fn run_tdd_plan_loop(
     let plan_path = session_root.join("test-plan.md");
     let theme = ColorfulTheme::default();
 
-    loop {
-        let prompt = build_test_plan_prompt(
-            ticket_path,
-            session_path,
-            brief_path,
-            context_path,
-            session,
-            &plan_path,
-            None,
-        );
-        eprintln!("scrutiny forge: generating test plan…");
-        let out = run_headless(
-            client,
-            model,
-            cwd,
-            &prompt,
-            HeadlessKind::Forge,
-            "forge-test-plan",
-            Duration::from_secs(AGENT_WALL_SECS),
-        )?;
-        if out.code != 0 && !out.timed_out && !plan_path.exists() {
-            bail!(
-                "test-plan agent failed: {}",
-                out.stderr.chars().take(400).collect::<String>()
-            );
-        }
-        // If agent did not write file, salvage from stdout
-        if !plan_path.exists() {
-            let text = extract_markdownish(&out.stdout);
-            if text.trim().is_empty() {
-                bail!("test-plan agent produced no markdown");
-            }
-            fs::write(&plan_path, text).context("write test-plan.md")?;
-        }
+    // Generate once up front; the loop only re-renders and (on Revise) re-runs.
+    run_test_plan_agent(
+        client, model, cwd, ticket_path, session_path, brief_path, context_path, session,
+        &plan_path, None, "forge-test-plan",
+    )?;
 
+    loop {
         let plan_text = fs::read_to_string(&plan_path).context("read test-plan.md")?;
-        eprintln!("\n======== TEST PLAN ========\n{plan_text}\n===========================\n");
+        eprintln!("\n{}\n", crate::mdterm::render_markdown(&plan_text));
+        eprintln!(
+            "Test plan file (open in your editor to edit):\n  {}\n",
+            plan_path.display()
+        );
 
         if !std::io::stdin().is_terminal() {
             eprintln!("scrutiny forge: non-TTY — auto-confirm test plan");
@@ -527,45 +503,86 @@ fn run_tdd_plan_loop(
 
         let sel = Select::with_theme(&theme)
             .with_prompt("Test plan")
-            .items(&["Confirm", "Comment (revise)"])
+            .items(&[
+                "Confirm",
+                "Revise (AI edits per your comments)",
+                "Edited already — re-read file",
+            ])
             .default(0)
             .interact()
             .context("test plan menu")?;
-        if sel == 0 {
-            break;
-        }
-        let comment: String = Input::with_theme(&theme)
-            .with_prompt("Your comments")
-            .interact_text()
-            .context("test plan comment")?;
-        let rev_prompt = build_test_plan_prompt(
-            ticket_path,
-            session_path,
-            brief_path,
-            context_path,
-            session,
-            &plan_path,
-            Some(&comment),
-        );
-        eprintln!("scrutiny forge: revising test plan…");
-        let out = run_headless(
-            client,
-            model,
-            cwd,
-            &rev_prompt,
-            HeadlessKind::Forge,
-            "forge-test-plan-revise",
-            Duration::from_secs(AGENT_WALL_SECS),
-        )?;
-        if !plan_path.exists() {
-            let text = extract_markdownish(&out.stdout);
-            if !text.trim().is_empty() {
-                fs::write(&plan_path, text).ok();
+        match sel {
+            0 => break,
+            2 => continue, // user edited on disk → re-read + re-render, no agent
+            _ => {
+                let comment: String = Input::with_theme(&theme)
+                    .with_prompt("Your comments")
+                    .interact_text()
+                    .context("test plan comment")?;
+                run_test_plan_agent(
+                    client, model, cwd, ticket_path, session_path, brief_path, context_path,
+                    session, &plan_path, Some(&comment), "forge-test-plan-revise",
+                )?;
             }
         }
     }
 
     Ok(plan_path)
+}
+
+/// Run the test-plan agent (initial or revision) and ensure `plan_path` exists,
+/// salvaging markdown from stdout when the agent didn't write the file.
+#[allow(clippy::too_many_arguments)]
+fn run_test_plan_agent(
+    client: &crate::runtime::DetectedClient,
+    model: &str,
+    cwd: &Path,
+    ticket_path: &Path,
+    session_path: &Path,
+    brief_path: &Path,
+    context_path: &Path,
+    session: &ForgeSessionPlan,
+    plan_path: &Path,
+    comment: Option<&str>,
+    label: &str,
+) -> Result<()> {
+    let prompt = build_test_plan_prompt(
+        ticket_path,
+        session_path,
+        brief_path,
+        context_path,
+        session,
+        plan_path,
+        comment,
+    );
+    eprintln!(
+        "scrutiny forge: {} test plan…",
+        if comment.is_some() { "revising" } else { "generating" }
+    );
+    let out = run_headless(
+        client,
+        model,
+        cwd,
+        &prompt,
+        HeadlessKind::Forge,
+        label,
+        Duration::from_secs(AGENT_WALL_SECS),
+    )?;
+    if out.code != 0 && !out.timed_out && !plan_path.exists() {
+        bail!(
+            "test-plan agent failed: {}",
+            out.stderr.chars().take(400).collect::<String>()
+        );
+    }
+    // Salvage from stdout if the agent didn't write the file.
+    if !plan_path.exists() {
+        let text = extract_markdownish(&out.stdout);
+        if text.trim().is_empty() {
+            bail!("test-plan agent produced no markdown");
+        }
+        fs::write(plan_path, text).context("write test-plan.md")?;
+    }
+    Ok(())
 }
 
 fn build_test_plan_prompt(
