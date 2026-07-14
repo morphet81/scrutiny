@@ -113,14 +113,35 @@ Show scan path. Findings are already caveman-shaped (`title`, `explanation`, `pr
 
 ### 5. Confirm plan → plan-confirm → plan-write
 
-**Hard rule — no chat plan prompts.** Do **not** use AskUserQuestion / multi-question chat UI for model, analyses, reviewers, or evangelists. Chat UIs cap ~4 fields per turn and split the form. Scripts own collection.
+**Hard rule — user must choose knobs. Never auto-adopt eval `suggested_plan`.**
 
-Run **one** interactive script session (all six knobs, stdin, same process):
+Forbidden:
+
+- Inventing model / reviewers / evangelists / analyses from scan/eval chatter (“Building plan (suggested: opus…)”)
+- Passing `--from-json` unless the **user** supplied those answers (or CI user explicitly did)
+- Spawning Tasks before `plan-write` succeeded from real answers
+- Piping empty stdin into `plan-confirm` (CLI **refuses** non-TTY without `--from-json`)
+
+**Hard rule — no multi-field chat form as the primary collector** when a terminal is available. Prefer the script (all knobs, one session). Chat UIs cap fields and invite skipping.
+
+**Required:** run interactive `plan-confirm` so the **user** answers model, security, performance, error-handling, reviewers, evangelists, spawn_mode:
 
 ```bash
+# Must be a real terminal with user present — NOT a background agent shell with empty stdin.
 ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL")"
-# CI / non-interactive:
-# ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL" --from-json '{"client":"claude","model":"opus","security":true,"performance":true,"error_handling":true,"reviewers":2,"evangelists":1}')"
+```
+
+If the agent host cannot attach a TTY:
+
+1. **Stop.** Tell the user to run the command above in their repo terminal and paste the printed answers JSON path.
+2. Only then: `plan-write --answers <that-path>`.
+3. Do **not** synthesize answers from suggestions.
+
+CI / user-provided JSON only:
+
+```bash
+# ONLY when user/CI already chose the knobs:
+ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL" --from-json '{"client":"claude","model":"opus","security":true,"performance":true,"error_handling":true,"reviewers":2,"evangelists":1,"spawn_mode":"isolated"}')"
 ```
 
 Then write plan from answers JSON (paths from earlier steps):
@@ -129,10 +150,9 @@ Then write plan from answers JSON (paths from earlier steps):
 PLAN="$("$SCRUTINY_BIN" plan-write \
   --eval "$EVAL" --map "$MAP" --pack "$PACK" --scan "$SCAN" \
   --answers "$ANSWERS")"
-# equivalent: --from-json "$(cat "$ANSWERS")"
 ```
 
-Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `reviewers_requested`, `evangelists_requested`, `model`, `spawn_evangelists`, `max_reviewers`.
+Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `reviewers_requested`, `evangelists_requested`, `model`, `spawn_evangelists`, `max_reviewers`. **Confirm those numbers to the user before any spawn.**
 
 If `reviewers_requested` > `reviewers` (pack `max_reviewers` cap, e.g. pack_chars < 4000 → cap 1), tell user the effective count — do not spawn the raw requested number.
 

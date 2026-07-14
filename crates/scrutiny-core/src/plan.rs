@@ -125,6 +125,16 @@ fn prompt_plan_answers(
     suggested: &crate::config::SuggestedPlan,
     spawn_mode_preset: Option<&str>,
 ) -> Result<PlanAnswers> {
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() {
+        bail!(
+            "plan-confirm needs an interactive TTY (or pass --from-json with explicit answers).\n\
+             Empty/non-TTY stdin would silently accept suggested defaults — that is forbidden.\n\
+             Run in a real terminal, or:\n\
+               scrutiny plan-confirm --eval <eval.json> --from-json '{{...}}'"
+        );
+    }
+
     eprintln!("scrutiny plan-confirm: answer all knobs in this session (stdin).");
     eprintln!("Client: {client}");
     eprintln!();
