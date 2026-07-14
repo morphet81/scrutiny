@@ -18,7 +18,8 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 ```
 
 That probes `agent`/`claude`/`codex`, asks plan knobs, runs headless review
-(`isolated` parallel specialists by default, or `team` lead), triage, and posts.
+(`isolated` parallel specialists by default, or `team` lead with **verbatim
+isolated member briefs embedded** in the lead prompt), triage, and posts.
 
 This skill is for **IDE agent sessions** that still chain discrete steps below.
 Complexity, map, pack, and scan stay scripts. Review agents read **pack only**.
@@ -183,6 +184,17 @@ Telling the main agent “prefer 4.6” while the UI session is Opus **does not*
 
 #### Spawn rules (mandatory when `skip_ai` false and `plan.reviewers` > 0)
 
+**Prefer CLI templates** (same text as `scrutiny review` isolated / team):
+
+```bash
+"$SCRUTINY_BIN" agent-prompt --role reviewer --pack "$PACK" --plan "$PLAN" --paths "a.ts,b.ts"
+"$SCRUTINY_BIN" agent-prompt --role evangelist --pack "$PACK" --plan "$PLAN"
+# team lead (embeds all member briefs):
+"$SCRUTINY_BIN" agent-prompt --role lead --pack "$PACK" --plan "$PLAN"
+```
+
+Paste that stdout into each Task brief. Do **not** freestyle a weaker prompt.
+
 1. Partition pack paths across reviewers:
 
 ```bash
@@ -191,7 +203,7 @@ BUCKETS="$("$SCRUTINY_BIN" pack-partition --pack "$PACK" --reviewers "$(jq .revi
 
 `BUCKETS` = JSON array of path arrays. Reviewer *i* gets **only** `BUCKETS[i]` (+ shared plan/pack paths in the brief).
 
-2. Spawn **exactly** `plan.reviewers` reviewer Tasks + `plan.evangelists` evangelists **in parallel**, each with confirmed `model=`.
+2. Spawn **exactly** `plan.reviewers` reviewer Tasks + `plan.evangelists` evangelists **in parallel**, each with confirmed `model=` and the matching `agent-prompt` text.
 3. **Wait for all** to finish before merge — no early stop / skim.
 4. Each agent return must be structured findings with `path`+`line`, or explicit `findings: []`.
 5. Lead **rejects** missing anchors / empty unexplained returns; re-spawn that agent.

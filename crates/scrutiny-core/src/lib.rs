@@ -37,6 +37,9 @@ pub use plan::{
     load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
     PlanConfirmInput, PlanWriteInput,
 };
+pub use agent_runner::{
+    build_isolated_prompt, build_team_lead_prompt, AgentPromptInput, run_agent_prompt,
+};
 pub use review_cmd::{run_review, run_review_from_report, ReportResumeInput, ReviewCmdInput};
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,

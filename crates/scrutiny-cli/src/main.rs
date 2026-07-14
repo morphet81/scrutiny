@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
-    load_plan_answers, partition_pack_paths, run_eval, run_findings_init, run_findings_resolve,
-    run_findings_triage, run_findings_validate, run_forge_brief, run_forge_context,
-    run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_plan_confirm, run_plan_write,
-    run_post_comments, run_review, run_review_session_write, run_scan, run_skills_install,
-    EvalInput, FindingsInitInput, ForgeFetchInput, ForgePlanWriteInput, PlanConfirmInput,
-    PlanWriteInput, PostCommentsInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
+    load_plan_answers, partition_pack_paths, run_agent_prompt, run_eval, run_findings_init,
+    run_findings_resolve, run_findings_triage, run_findings_validate, run_forge_brief,
+    run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_plan_confirm,
+    run_plan_write, run_post_comments, run_review, run_review_session_write, run_scan,
+    run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeFetchInput,
+    ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput, ReviewCmdInput,
+    ReviewSessionWriteInput, SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -163,6 +164,20 @@ enum Commands {
         pack: PathBuf,
         #[arg(long)]
         reviewers: u32,
+    },
+    /// Print agent prompt text (isolated role or team lead) for paste/debug
+    AgentPrompt {
+        /// reviewer|evangelist|security|performance|error_handling|lead
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        pack: PathBuf,
+        /// Confirmed plan JSON (flags/counts). Optional — defaults analyses on.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        /// Comma-separated paths for isolated role
+        #[arg(long)]
+        paths: Option<String>,
     },
     /// Record spawned review agents; validate counts vs plan; print session path
     ReviewSessionWrite {
@@ -449,6 +464,28 @@ fn run() -> Result<()> {
         Commands::PackPartition { pack, reviewers } => {
             let buckets = partition_pack_paths(&pack, reviewers)?;
             println!("{}", serde_json::to_string(&buckets)?);
+        }
+        Commands::AgentPrompt {
+            role,
+            pack,
+            plan,
+            paths,
+        } => {
+            let paths: Vec<String> = paths
+                .map(|s| {
+                    s.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let text = run_agent_prompt(AgentPromptInput {
+                role,
+                pack_path: pack,
+                plan_path: plan,
+                paths,
+            })?;
+            println!("{text}");
         }
         Commands::ReviewSessionWrite {
             plan,

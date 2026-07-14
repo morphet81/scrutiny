@@ -129,8 +129,15 @@ Config (`~/.scrutiny/config.toml`):
 
 ### Spawn modes
 
-- **isolated (default):** script runs reviewers + evangelists + analysis specialists in parallel; script collates, dedupes, builds the report.
-- **team:** one lead headless agent spawns its own team and returns the final findings JSON; script does not merge specialists.
+- **isolated (default):** script runs reviewers + evangelists + analysis specialists in parallel with shared `build_isolated_prompt` templates; script collates and dedupes.
+- **team:** one lead headless agent gets `build_team_lead_prompt`, which **embeds the same isolated role briefs verbatim**. Lead must paste those templates when spawning members (no inventing prompts), wait for all JSON returns, keep higher severity on conflicts, then return one findings JSON.
+
+Print a role or lead prompt for skill/debug:
+
+```bash
+./target/release/scrutiny agent-prompt --role reviewer --pack /tmp/…-pack.json [--plan /tmp/…-plan.json] [--paths a.rs,b.rs]
+./target/release/scrutiny agent-prompt --role lead --pack /tmp/…-pack.json --plan /tmp/…-plan.json
+```
 
 ### Review session
 

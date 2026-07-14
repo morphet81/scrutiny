@@ -444,33 +444,91 @@ Rules:
 }
 
 pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String {
+    let mut member_briefs = String::new();
+
+    if plan.reviewers > 0 {
+        let n = plan.reviewers;
+        // Template: entire pack; lead assigns partitioned path lists when spawning each reviewer.
+        let brief = build_isolated_prompt("reviewer", pack_path, &[], plan);
+        member_briefs.push_str(&format!(
+            "\n### reviewer × {n}\n\
+             Spawn **exactly {n}** reviewer(s). Partition pack paths across them.\n\
+             For each spawn: paste the template below VERBATIM, then replace the Paths section \
+             with that reviewer's assigned paths only.\n\
+             ```\n{brief}\n```\n"
+        ));
+    }
+
+    if plan.evangelists > 0 {
+        let n = plan.evangelists;
+        let brief = build_isolated_prompt("evangelist", pack_path, &[], plan);
+        member_briefs.push_str(&format!(
+            "\n### evangelist × {n}\n\
+             Spawn **exactly {n}** evangelist(s). Paste VERBATIM (entire pack):\n\
+             ```\n{brief}\n```\n"
+        ));
+    }
+
+    if plan.security {
+        let brief = build_isolated_prompt("security", pack_path, &[], plan);
+        member_briefs.push_str(&format!(
+            "\n### security × 1\nPaste VERBATIM:\n```\n{brief}\n```\n"
+        ));
+    }
+    if plan.performance {
+        let brief = build_isolated_prompt("performance", pack_path, &[], plan);
+        member_briefs.push_str(&format!(
+            "\n### performance × 1\nPaste VERBATIM:\n```\n{brief}\n```\n"
+        ));
+    }
+    if plan.error_handling {
+        let brief = build_isolated_prompt("error_handling", pack_path, &[], plan);
+        member_briefs.push_str(&format!(
+            "\n### error_handling × 1\nPaste VERBATIM:\n```\n{brief}\n```\n"
+        ));
+    }
+
+    if member_briefs.is_empty() {
+        member_briefs.push_str(
+            "\n(No member roles enabled — return {\"findings\":[]} or review pack yourself \
+             using the same JSON rules.)\n",
+        );
+    }
+
     format!(
         r#"Scrutiny lead. TEAM mode. You spawn team. You collate. You own final report.
 
 STYLE (mandatory):
 - Load + follow **caveman skill** if present on this machine (skill `name: caveman`, invoke `/caveman ultra` or equivalent).
 - Intensity: **ultra**. Terse. No fluff. Substance stay. Normal pronouns (`I`/`you`).
-- Brief team in caveman ultra. Finding text (title/explanation/proposed_fix) caveman ultra.
-- Never announce style.
+- Finding text in final JSON: caveman ultra. Never announce style.
 
 Pack: `{pack}`
-Team size guide:
+Team size (effective counts — honor exactly):
 - reviewers: {}
 - evangelists: {}
 - security specialist: {}
 - performance specialist: {}
 - error-handling specialist: {}
 
-You do:
-1. Spawn team (or equal parallel work)
-2. Collect findings
-3. Dedupe
-4. Return ONE final JSON
+## Member brief templates (MANDATORY)
+
+Do **NOT** invent alternate system prompts for teammates.
+When you spawn each member, the spawn message body MUST be the matching template below (verbatim), only adjusting the Paths section for reviewers as noted.
+{member_briefs}
+
+## Lead ops (mandatory)
+
+1. Spawn **exactly** the counts above (parallel when possible).
+2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
+3. Reject / re-ask any finding missing path+line, or whose line is not on that path's pack unified diff (GitHub-attachable). Pack-only: members must not fish outside pack / assigned paths.
+4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
+5. Return ONE final JSON on stdout (no prose outside JSON).
 
 Output: JSON ONLY.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
-Every finding: path + line. Line MUST be in that path's pack unified diff (GitHub-attachable). No out-of-diff lines. Clean: {{"findings":[]}}.
+Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
 "#,
         plan.reviewers,
         plan.evangelists,
@@ -478,6 +536,7 @@ Every finding: path + line. Line MUST be in that path's pack unified diff (GitHu
         plan.performance,
         plan.error_handling,
         pack = pack_path.display(),
+        member_briefs = member_briefs,
     )
 }
 
@@ -795,6 +854,56 @@ pub fn session_records_from_report(report: &ReviewReport) -> Vec<ReviewAgentReco
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentPromptInput {
+    pub role: String,
+    pub pack_path: PathBuf,
+    pub plan_path: Option<PathBuf>,
+    pub paths: Vec<String>,
+}
+
+/// Print isolated (or team-lead) prompt text for skill/debug paste.
+pub fn run_agent_prompt(input: AgentPromptInput) -> Result<String> {
+    let plan = if let Some(p) = &input.plan_path {
+        let text = fs::read_to_string(p)
+            .with_context(|| format!("read plan {}", p.display()))?;
+        serde_json::from_str(&text).context("parse ConfirmedPlan")?
+    } else {
+        minimal_plan_for_prompt(&input.pack_path)
+    };
+    let role = input.role.trim().to_ascii_lowercase();
+    let text = if role == "lead" || role == "team" || role == "team_lead" {
+        build_team_lead_prompt(&input.pack_path, &plan)
+    } else {
+        build_isolated_prompt(&role, &input.pack_path, &input.paths, &plan)
+    };
+    Ok(text)
+}
+
+fn minimal_plan_for_prompt(pack_path: &Path) -> ConfirmedPlan {
+    ConfirmedPlan {
+        version: 1,
+        client: "cursor".into(),
+        model: "default".into(),
+        security: true,
+        performance: true,
+        error_handling: true,
+        reviewers: 1,
+        evangelists: 1,
+        reviewers_requested: 1,
+        evangelists_requested: 1,
+        skip_ai: false,
+        skip_ai_reason: None,
+        eval_path: String::new(),
+        map_path: None,
+        pack_path: Some(pack_path.display().to_string()),
+        scan_path: None,
+        max_reviewers: 4,
+        spawn_evangelists: true,
+        spawn_mode: "isolated".into(),
+    }
+}
+
 fn severity_rank(s: &str) -> u8 {
     match normalize_severity(s).as_str() {
         "critical" => 3,
@@ -894,5 +1003,38 @@ mod tests {
         let f = parse_findings_json(raw, "reviewer").unwrap();
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].line, 3);
+    }
+
+    #[test]
+    fn team_lead_embeds_isolated_reviewer_brief() {
+        let plan = ConfirmedPlan {
+            version: 1,
+            client: "claude".into(),
+            model: "sonnet".into(),
+            security: true,
+            performance: false,
+            error_handling: false,
+            reviewers: 2,
+            evangelists: 1,
+            reviewers_requested: 2,
+            evangelists_requested: 1,
+            skip_ai: false,
+            skip_ai_reason: None,
+            eval_path: String::new(),
+            map_path: None,
+            pack_path: Some("/tmp/pack.json".into()),
+            scan_path: None,
+            max_reviewers: 2,
+            spawn_evangelists: true,
+            spawn_mode: "team".into(),
+        };
+        let p = build_team_lead_prompt(Path::new("/tmp/pack.json"), &plan);
+        assert!(p.contains("Member brief templates (MANDATORY)"));
+        assert!(p.contains("Scrutiny reviewer specialist"));
+        assert!(p.contains("Scrutiny evangelist specialist"));
+        assert!(p.contains("Scrutiny security specialist"));
+        assert!(!p.contains("Scrutiny performance specialist"));
+        assert!(p.contains("higher") && p.contains("severity"));
+        assert!(p.contains("Wait for **ALL** members"));
     }
 }
