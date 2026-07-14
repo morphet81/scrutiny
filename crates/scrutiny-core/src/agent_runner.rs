@@ -275,34 +275,35 @@ pub fn build_isolated_prompt(
             .join("\n")
     };
     let focus = match role {
-        "security" => "Focus ONLY on security issues (auth, injection, secrets, access control).",
-        "performance" => {
-            "Focus ONLY on performance (N+1, hot loops, unnecessary work, memory)."
-        }
-        "error_handling" => {
-            "Focus ONLY on error handling (swallowed errors, missing checks, bad retries)."
-        }
-        "evangelist" => "Focus on architecture / pattern consistency across the change.",
-        _ => "General code review on your assigned paths.",
+        "security" => "ONLY security: auth, injection, secrets, access control.",
+        "performance" => "ONLY performance: N+1, hot loops, waste work, memory.",
+        "error_handling" => "ONLY error handling: swallowed errors, missing checks, bad retries.",
+        "evangelist" => "Architecture / pattern consistency across change.",
+        _ => "General review on assigned paths.",
     };
     format!(
-        r#"You are a Scrutiny {role} specialist in ISOLATED mode.
-You must NOT spawn subagents. Read only the pack and related files as needed.
+        r#"Scrutiny {role} specialist. ISOLATED mode. No subagents. Pack (+ paths) only.
 
-Pack artifact: `{pack}`
-Assigned paths:
+STYLE (mandatory):
+- Load + follow **caveman skill** if present on this machine (skill `name: caveman`, invoke `/caveman ultra` or equivalent).
+- Intensity: **ultra**. Terse. No fluff. No filler. Substance stay. Normal pronouns (`I`/`you`).
+- title / explanation / proposed_fix / fix_options text: caveman ultra too.
+- Never announce style. Never add "Caveman:" wrapper.
+
+Pack: `{pack}`
+Paths:
 {paths_list}
 
-Model context analyses enabled: security={} performance={} error_handling={}
-{focus}
+Analyses on: security={} performance={} error_handling={}
+Focus: {focus}
 
-Return ONLY JSON matching this shape (no prose outside JSON):
+Output: JSON ONLY. No prose outside JSON.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|info","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
 Rules:
-- Every finding MUST include path + line (1-based) from the pack / head file.
-- If nothing to report, return {{"findings":[]}}.
-- Severity: critical | warning | info.
+- Every finding: path + line (1-based) from pack/head.
+- Nothing: {{"findings":[]}}
+- Severity: critical|warning|info
 "#,
         plan.security,
         plan.performance,
@@ -316,27 +317,32 @@ Rules:
 
 pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String {
     format!(
-        r#"You are the Scrutiny lead reviewer in TEAM mode.
-Spawn your own team of agents to review this change, then synthesize their work.
+        r#"Scrutiny lead. TEAM mode. You spawn team. You collate. You own final report.
 
-Pack artifact: `{pack}`
-Guidance for team size:
+STYLE (mandatory):
+- Load + follow **caveman skill** if present on this machine (skill `name: caveman`, invoke `/caveman ultra` or equivalent).
+- Intensity: **ultra**. Terse. No fluff. Substance stay. Normal pronouns (`I`/`you`).
+- Brief team in caveman ultra. Finding text (title/explanation/proposed_fix) caveman ultra.
+- Never announce style.
+
+Pack: `{pack}`
+Team size guide:
 - reviewers: {}
 - evangelists: {}
-- include security specialist: {}
-- include performance specialist: {}
-- include error-handling specialist: {}
+- security specialist: {}
+- performance specialist: {}
+- error-handling specialist: {}
 
-You are responsible for:
-1. Spawning the team (or equivalent parallel work)
-2. Collecting their findings
-3. Deduplicating
-4. Returning ONE final report
+You do:
+1. Spawn team (or equal parallel work)
+2. Collect findings
+3. Dedupe
+4. Return ONE final JSON
 
-Return ONLY JSON:
+Output: JSON ONLY.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|info","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
-Every finding must have path + line. If clean: {{"findings":[]}}.
+Every finding: path + line. Clean: {{"findings":[]}}.
 "#,
         plan.reviewers,
         plan.evangelists,
@@ -349,8 +355,11 @@ Every finding must have path + line. If clean: {{"findings":[]}}.
 
 pub fn build_ask_prompt(context: &str, question: &str) -> String {
     format!(
-        "You are helping clarify a code-review finding. Be concise and accurate.\n\n\
-         Context:\n{context}\n\nUser question:\n{question}\n"
+        "Clarify code-review finding.\n\n\
+         STYLE (mandatory): load + follow **caveman skill** if present (skill `name: caveman`, `/caveman ultra`). \
+         Intensity ultra. Terse. No fluff. Substance stay. Never announce style.\n\n\
+         Context:\n{context}\n\n\
+         Question:\n{question}\n"
     )
 }
 
