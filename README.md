@@ -16,11 +16,34 @@ Reviews a local branch or a GitHub PR. Prefer **`scrutiny review`** for script-o
 
 Implements a ticket from Jira, GitHub, GitLab, or an inline description. Scripts fetch and normalize the ticket, write a session plan (approach, team sizes, e2e, post-review counts—forceable in config), and produce a compact context pack plus caveman brief so implementers never re-hit the ticket CLIs. The agent then runs plan, TDD, or heads-down modes with PO/testers/developers as configured, and can reuse the scrutiny pack pipeline for post-implementation review.
 
-## Install skills
+## Install (Homebrew)
+
+Prebuilt `scrutiny` binary via the [`morphet81/homebrew-tools`](https://github.com/morphet81/homebrew-tools) tap (Apple Silicon macOS; Linux amd64/arm64):
+
+```bash
+brew tap morphet81/homebrew-tools
+brew install scrutiny
+
+# or one-shot without a prior tap:
+brew install morphet81/homebrew-tools/scrutiny
+```
+
+Upgrade later: `brew update && brew upgrade scrutiny`.
+
+Then install agent skills (binary already on PATH):
+
+```bash
+scrutiny skills-install -g -y --skill '*'
+# or: npx skills add morphet81/scrutiny -g -y --skill '*'
+```
+
+## Install skills only
+
+If the binary comes from elsewhere (`ensure-bin`, local build, etc.):
 
 ```bash
 # via CLI (wraps npx skills add — uses local checkout when available)
-./target/release/scrutiny skills-install -g -y --skill '*'
+scrutiny skills-install -g -y --skill '*'
 ./target/release/scrutiny skills-install --skill scrutiny --agent cursor
 
 # or npx directly
@@ -32,13 +55,14 @@ Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline 
 
 ### Prerequisites
 
+- Prefer: [Homebrew](https://brew.sh/) + [`morphet81/homebrew-tools`](https://github.com/morphet81/homebrew-tools) for the CLI
+- Or: network for GitHub Release binary / Rust toolchain for `cargo build --release`
 - `git`
-- Network for release binary **or** Rust toolchain for `cargo build --release`
 - Optional: `gh` (PR review + GitHub issues), `acli` (Jira), `glab` (GitLab), `fcli` (Figma)
 - For `scrutiny review`: headless agent CLI on PATH — `agent`/`cursor-agent`, `claude`, and/or `codex`
 - `npx` for `skills-install`
 - `SCRUTINY_GITHUB_REPO` overrides download/install repo (default `morphet81/scrutiny`)
-- Binary fetch uses GitHub Release **latest** by default (cache keyed by `bin/.scrutiny-version`; refreshes when tag changes). Set `SCRUTINY_VERSION=0.1.5` only to pin. `SCRUTINY_USE_LOCAL=1` forces local `cargo` build.
+- Binary fetch (when not using brew) uses GitHub Release **latest** by default (cache keyed by `bin/.scrutiny-version`; refreshes when tag changes). Set `SCRUTINY_VERSION=0.1.5` only to pin. `SCRUTINY_USE_LOCAL=1` forces local `cargo` build.
 
 ## Build (developers)
 
