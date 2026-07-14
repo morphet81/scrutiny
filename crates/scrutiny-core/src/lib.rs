@@ -18,8 +18,10 @@ pub mod review_session;
 pub mod runtime;
 pub mod scan;
 pub mod score;
+pub mod signals;
 pub mod skills_install;
 pub mod taxonomy;
+pub mod treesitter;
 
 pub use config::{ensure_config, load_config, Config};
 pub use eval::{run_eval, EvalInput, EvalReport};

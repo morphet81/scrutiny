@@ -102,7 +102,7 @@ Pack holds:
 - `needs_full_file` — **only** these paths may be full-file `Read`
 - `architecture_risk` — drives evangelist spawn
 
-**Hard rule:** review agents may **only** use pack paths / pack markdown. Forbid exploratory `Read` / `Grep` / full-file fishing unless pack marks `needs_full_file` for that path.
+**Hard rule:** review agents should **prefer pack** (and pack.md). Graduated exploration: allowlisted `fetch_cmd` / `explore.allowed_paths` first; then ≤`pack.explore.max_extra_reads` extra Reads of pack-hinted paths. No whole-repo fishing. Locale/i18n files are excluded from AI pack — parity is `scan.i18n`.
 
 ### 4. scan
 

@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use crate::config::{ensure_config, find_shipped_default, load_config, Config, SuggestedPlan};
 use crate::git::{self, DiffFile, RepoContext};
 use crate::paths::{temp_artifact_path, write_json_pretty};
-use crate::score::{compute_scatter, score_tier, ScoreSignals, Tier};
+use crate::score::{
+    compute_scatter, score_tier_detailed, ScoreBreakdown, ScoreSignals, Tier,
+};
 use crate::taxonomy::{
-    blast_stub_for_path, change_class, classify_path, is_risk_path, layer_for_path, PathKind,
+    aggregate_blast, blast_stub_for_path, change_class, classify_path, excluded_from_score,
+    is_risk_path, layer_for_path, PathKind,
 };
 
 #[derive(Debug, Clone)]
@@ -32,6 +35,8 @@ pub struct EvalReport {
     pub head: String,
     pub tier: Tier,
     pub score: u32,
+    #[serde(default)]
+    pub score_breakdown: ScoreBreakdown,
     pub signals: ScoreSignals,
     pub files: Vec<EvalFile>,
     pub excluded: Vec<ExcludedFile>,
@@ -139,7 +144,7 @@ fn build_report(
     let mut kinds = Vec::new();
     let mut layers = BTreeSet::new();
     let mut risk_hits = 0u32;
-    let mut blast = 0u32;
+    let mut blast_per_file = Vec::new();
     let mut added = 0u32;
     let mut deleted = 0u32;
     let mut file_locs = Vec::new();
@@ -160,8 +165,8 @@ fn build_report(
             risk,
             blast_stub: b,
         });
-        // Docs stay in report.files for map; do not score them.
-        if matches!(kind, PathKind::Doc) {
+        // Docs + i18n stay in report.files for map/scan; do not score them.
+        if excluded_from_score(&kind) {
             continue;
         }
         score_paths.push(f.path.clone());
@@ -176,9 +181,9 @@ fn build_report(
         }
     };
 
-    // Overwrite display/score LOC for non-docs with comment-stripped counts.
+    // Overwrite display/score LOC for scored paths with comment-stripped counts.
     for f in &mut files {
-        if f.kind == "doc" {
+        if f.kind == "doc" || f.kind == "i18n" {
             continue;
         }
         if let Some(&(a, d)) = code_counts.get(&f.path) {
@@ -188,26 +193,28 @@ fn build_report(
     }
 
     for f in &files {
-        if f.kind == "doc" {
+        let kind = classify_path(&f.path);
+        if excluded_from_score(&kind) {
             continue;
         }
-        let kind = classify_path(&f.path);
         kinds.push(kind);
         if let Some(layer) = layer_for_path(&f.path) {
-            if layer != "docs" {
+            if layer != "docs" && layer != "i18n" {
                 layers.insert(layer.to_string());
             }
         }
         if f.risk {
             risk_hits += 1;
         }
-        blast = blast.saturating_add(f.blast_stub);
+        blast_per_file.push(f.blast_stub);
 
         let loc = f.added + f.deleted;
         file_locs.push(loc);
         added += f.added;
         deleted += f.deleted;
     }
+
+    let blast = aggregate_blast(&blast_per_file);
 
     let signals = ScoreSignals {
         relevant_files: score_paths.len() as u32,
@@ -221,11 +228,19 @@ fn build_report(
         change_class: change_class(&kinds),
     };
 
-    let (tier, score) = score_tier(&signals);
+    let (tier, score, score_breakdown) = score_tier_detailed(&signals);
     let client = client_override
         .unwrap_or(cfg.default_client.as_str())
         .to_string();
-    let suggested_plan = cfg.suggested_plan(&client, tier);
+
+    // Unified diff of scored paths for content signals (security/perf/error).
+    let scored_diff = if score_paths.is_empty() {
+        String::new()
+    } else {
+        git::diff_unified_paths(&repo.root, base, head, &score_paths).unwrap_or_default()
+    };
+    let content_signals = crate::signals::detect_content_signals(cfg, &files, &scored_diff);
+    let suggested_plan = cfg.suggested_plan_with_signals(&client, tier, &content_signals);
 
     Ok(EvalReport {
         version: 1,
@@ -236,6 +251,7 @@ fn build_report(
         head: head.to_string(),
         tier,
         score,
+        score_breakdown,
         signals,
         files,
         excluded,
@@ -251,6 +267,7 @@ fn kind_str(k: &PathKind) -> &'static str {
         PathKind::Doc => "doc",
         PathKind::Noise => "noise",
         PathKind::Config => "config",
+        PathKind::I18n => "i18n",
         PathKind::Other => "other",
     }
 }

@@ -413,7 +413,7 @@ pub fn build_isolated_prompt(
         _ => "General review on assigned paths.",
     };
     format!(
-        r#"Scrutiny {role} specialist. ISOLATED mode. No subagents. Pack (+ paths) only.
+        r#"Scrutiny {role} specialist. ISOLATED mode. No subagents.
 
 STYLE (mandatory):
 - Load + follow **caveman skill** if present on this machine (skill `name: caveman`, invoke `/caveman ultra` or equivalent).
@@ -422,8 +422,20 @@ STYLE (mandatory):
 - Never announce style. Never add "Caveman:" wrapper.
 
 Pack: `{pack}`
-Paths:
+Prefer pack.md sibling if present (same stem). Paths:
 {paths_list}
+
+## Context policy (graduated — save tokens)
+
+Tier 0 (default): use pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
+Tier 1: if pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths`, you MAY Read that path (or run that exact fetch_cmd). Prefer Read over Bash.
+Tier 2: at most 6 extra Reads of head files whose path/symbol already appears in pack/xref/imports. No whole-repo rg/find. No writes.
+Stop when quota hit. Do NOT explore "to get oriented." Finding `line` MUST still be on that path's pack unified diff (GitHub-attachable). Exploration is for understanding only.
+
+Pack shape (v2):
+- `manifest[]`: outline of changed files; `dropped_regions` may already be inlined in annex.
+- `referenced_signatures[]`: cross-file defs (may include short body slice).
+- Locale/i18n files are NOT for AI review — deterministic scan owns them.
 
 Analyses on: security={} performance={} error_handling={}
 Focus: {focus}
@@ -526,9 +538,10 @@ When you spawn each member, the spawn message body MUST be the matching template
 
 1. Spawn **exactly** the counts above (parallel when possible).
 2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
-3. Reject / re-ask any finding missing path+line, or whose line is not on that path's pack unified diff (GitHub-attachable). Pack-only: members must not fish outside pack / assigned paths.
+3. Reject / re-ask any finding missing path+line, or whose line is not on that path's pack unified diff (GitHub-attachable). Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
 4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
-5. Return ONE final JSON on stdout (no prose outside JSON).
+5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on the path unified_diff.
+6. Return ONE final JSON on stdout (no prose outside JSON).
 
 Output: JSON ONLY.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}

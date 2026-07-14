@@ -7,7 +7,7 @@ use crate::eval::EvalReport;
 use crate::git;
 use crate::paths::{temp_artifact_path, write_json_pretty};
 use crate::score::Tier;
-use crate::taxonomy::{is_risk_path, suggested_scope_for_tier};
+use crate::taxonomy::{is_i18n, is_risk_path, suggested_scope_for_tier};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapReport {
@@ -71,6 +71,7 @@ pub fn run_map(eval_path: &Path, cwd: &Path) -> Result<(MapReport, PathBuf)> {
     let mut source_to_review = Vec::new();
     let mut docs_semantic = Vec::new();
     let mut tests_related = Vec::new();
+    let mut i18n_paths = Vec::new();
     let mut security_paths = Vec::new();
     let mut perf_paths = Vec::new();
     let mut err_paths = Vec::new();
@@ -92,6 +93,12 @@ pub fn run_map(eval_path: &Path, cwd: &Path) -> Result<(MapReport, PathBuf)> {
                     note: "Needs semantic analysis (meaning, accuracy, drift vs code)".into(),
                 });
             }
+            "i18n" => {
+                i18n_paths.push(NoiseEntry {
+                    path: f.path.clone(),
+                    reason: "i18n_deterministic".into(),
+                });
+            }
             "test" => {
                 tests_related.push(TestEntry {
                     path: f.path.clone(),
@@ -100,6 +107,14 @@ pub fn run_map(eval_path: &Path, cwd: &Path) -> Result<(MapReport, PathBuf)> {
                 });
             }
             "source" | "config" | "other" => {
+                // Locale-shaped "other" still diverted if globs say so
+                if is_i18n(&f.path) {
+                    i18n_paths.push(NoiseEntry {
+                        path: f.path.clone(),
+                        reason: "i18n_deterministic".into(),
+                    });
+                    continue;
+                }
                 let hotspots = extract_hotspots(&repo.root, &eval.base, &eval.head, &f.path)?;
                 let focus = if f.risk {
                     "Risk path — prioritize correctness + security".into()
@@ -131,7 +146,7 @@ pub fn run_map(eval_path: &Path, cwd: &Path) -> Result<(MapReport, PathBuf)> {
         }
     }
 
-    let noise_skipped: Vec<NoiseEntry> = eval
+    let mut noise_skipped: Vec<NoiseEntry> = eval
         .excluded
         .iter()
         .map(|e| NoiseEntry {
@@ -139,6 +154,7 @@ pub fn run_map(eval_path: &Path, cwd: &Path) -> Result<(MapReport, PathBuf)> {
             reason: e.reason.clone(),
         })
         .collect();
+    noise_skipped.extend(i18n_paths);
 
     let mut risk_tags = Vec::new();
     if !security_paths.is_empty() {

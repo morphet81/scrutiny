@@ -43,65 +43,93 @@ pub struct ScoreSignals {
     pub change_class: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScoreBreakdown {
+    pub loc: u32,
+    pub files: u32,
+    pub scatter: u32,
+    pub blast: u32,
+    pub risk: u32,
+    pub layers: u32,
+    pub class_adj: i32,
+    pub total_before_cap: u32,
+}
+
 /// Score and bucket into tier. Pure function — easy to test.
 pub fn score_tier(signals: &ScoreSignals) -> (Tier, u32) {
-    let mut score: u32 = 0;
+    let (tier, score, _) = score_tier_detailed(signals);
+    (tier, score)
+}
 
-    // Size after noise filter
-    score += match signals.relevant_loc {
+pub fn score_tier_detailed(signals: &ScoreSignals) -> (Tier, u32, ScoreBreakdown) {
+    let loc = match signals.relevant_loc {
         0..=20 => 5,
         21..=80 => 15,
-        81..=200 => 30,
-        201..=500 => 45,
-        501..=1200 => 60,
-        _ => 75,
+        81..=200 => 28,
+        201..=500 => 40,
+        501..=1200 => 50,
+        _ => 65,
     };
 
-    score += match signals.relevant_files {
+    // Softened file buckets — locale fan-out no longer in score; keep multi-file modest
+    let files = match signals.relevant_files {
         0..=2 => 0,
-        3..=5 => 8,
-        6..=12 => 16,
-        13..=25 => 28,
-        _ => 40,
+        3..=5 => 5,
+        6..=12 => 10,
+        13..=25 => 14,
+        _ => 22,
     };
 
-    // Scatter (0..1) — evenly spread changes cost more
-    score += (signals.scatter * 20.0).round() as u32;
+    let scatter = (signals.scatter * 12.0).round() as u32;
 
-    // Blast stub / fan-out
-    score += match signals.blast_stub {
+    let blast = match signals.blast_stub {
         0..=2 => 0,
-        3..=8 => 10,
-        9..=20 => 20,
-        _ => 30,
+        3..=8 => 6,
+        9..=20 => 12,
+        _ => 20,
     };
 
-    score += signals.risk_path_hits.saturating_mul(8).min(24);
+    let risk = signals.risk_path_hits.saturating_mul(8).min(24);
 
-    // Layer fan-out
-    let layers = signals.layers_touched.len() as u32;
-    score += match layers {
+    let layers = match signals.layers_touched.len() as u32 {
         0..=1 => 0,
-        2 => 8,
-        3 => 16,
-        _ => 24,
+        2 => 5,
+        3 => 8,
+        _ => 14,
     };
 
-    if signals.change_class == "docs" {
+    let mut score: u32 = loc + files + scatter + blast + risk + layers;
+    let mut class_adj: i32 = 0;
+    if signals.change_class == "docs" || signals.change_class == "i18n" {
+        let before = score;
         score = score / 3;
+        class_adj = score as i32 - before as i32;
     } else if signals.change_class == "mixed" {
         score = score.saturating_add(5);
+        class_adj = 5;
     }
+
+    let total_before_cap = score;
+    let breakdown = ScoreBreakdown {
+        loc,
+        files,
+        scatter,
+        blast,
+        risk,
+        layers,
+        class_adj,
+        total_before_cap,
+    };
 
     let tier = match score {
         0..=18 => Tier::Xs,
         19..=35 => Tier::S,
         36..=55 => Tier::M,
-        56..=75 => Tier::L,
+        56..=95 => Tier::L, // XL reserved for truly huge / high-risk fan-out
         _ => Tier::Xl,
     };
 
-    (tier, score.min(100))
+    (tier, score.min(100), breakdown)
 }
 
 /// Normalized entropy-ish scatter: 0 = all in one file, ~1 = even across many.
@@ -170,8 +198,30 @@ mod tests {
             change_class: "source".into(),
         };
         let (tier, score) = score_tier(&s);
-        assert!(score >= 76, "score={score}");
+        assert!(score >= 96, "score={score}");
         assert_eq!(tier, Tier::Xl);
+    }
+
+    #[test]
+    fn pr2292_like_not_xl() {
+        // ~17 AI-relevant files, ~800 LOC, hooks+ui, modest blast (after i18n exclusion)
+        let s = ScoreSignals {
+            relevant_files: 17,
+            relevant_loc: 760,
+            added: 750,
+            deleted: 10,
+            scatter: 0.7,
+            blast_stub: 6, // modest aggregate after blast fix (not 40×1)
+            risk_path_hits: 0,
+            layers_touched: vec!["hooks".into(), "ui".into()],
+            change_class: "source".into(),
+        };
+        let (tier, score, bd) = score_tier_detailed(&s);
+        assert!(
+            matches!(tier, Tier::M | Tier::L),
+            "expected M/L got {tier} score={score} bd={bd:?}"
+        );
+        assert_ne!(tier, Tier::Xl);
     }
 
     #[test]

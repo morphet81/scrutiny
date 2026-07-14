@@ -7,6 +7,8 @@ pub enum PathKind {
     Doc,
     Noise,
     Config,
+    /// Locale / translation files — deterministic scan only; not AI-scored.
+    I18n,
     Other,
 }
 
@@ -14,6 +16,9 @@ pub fn classify_path(path: &str) -> PathKind {
     let lower = path.to_ascii_lowercase();
     if is_doc(&lower) {
         return PathKind::Doc;
+    }
+    if is_i18n(&lower) {
+        return PathKind::I18n;
     }
     if is_test(&lower) {
         return PathKind::Test;
@@ -25,6 +30,11 @@ pub fn classify_path(path: &str) -> PathKind {
         return PathKind::Source;
     }
     PathKind::Other
+}
+
+/// True for paths that should not inflate AI review tier / pack.
+pub fn excluded_from_score(kind: &PathKind) -> bool {
+    matches!(kind, PathKind::Doc | PathKind::I18n | PathKind::Noise)
 }
 
 fn is_doc(p: &str) -> bool {
@@ -41,6 +51,19 @@ fn is_doc(p: &str) -> bool {
         || p.ends_with("readme.md")
         || p.contains("/.skills/")
         || p.contains("skill.md")
+}
+
+pub fn is_i18n(p: &str) -> bool {
+    let p = p.replace('\\', "/");
+    p.contains("/locales/")
+        || p.contains("/locale/")
+        || p.contains("/i18n/locales/")
+        || p.contains("/lang/")
+        || p.contains("/translations/")
+        || p.ends_with(".po")
+        || p.ends_with(".pot")
+        || p.ends_with(".xliff")
+        || p.ends_with(".xlf")
 }
 
 fn is_test(p: &str) -> bool {
@@ -61,7 +84,7 @@ fn is_config(p: &str) -> bool {
     p.ends_with(".toml")
         || p.ends_with(".yaml")
         || p.ends_with(".yml")
-        || p.ends_with(".json") && !p.contains("/locales/")
+        || (p.ends_with(".json") && !is_i18n(p))
         || p.ends_with(".lock")
         || p == "dockerfile"
         || p.ends_with("/dockerfile")
@@ -87,8 +110,12 @@ fn looks_source(p: &str) -> bool {
 
 pub fn layer_for_path(path: &str) -> Option<&'static str> {
     let p = path.replace('\\', "/");
-    if is_doc(&p.to_ascii_lowercase()) {
+    let lower = p.to_ascii_lowercase();
+    if is_doc(&lower) {
         return Some("docs");
+    }
+    if is_i18n(&lower) {
+        return Some("i18n");
     }
     if p.contains("/domain/") || p.starts_with("src/domain/") {
         return Some("domain");
@@ -111,7 +138,7 @@ pub fn layer_for_path(path: &str) -> Option<&'static str> {
     if p.contains("/native/") || p.contains("/android/") || p.contains("/ios/") {
         return Some("native");
     }
-    if looks_source(&p.to_ascii_lowercase()) {
+    if looks_source(&lower) {
         return Some("source");
     }
     None
@@ -119,18 +146,22 @@ pub fn layer_for_path(path: &str) -> Option<&'static str> {
 
 pub fn is_risk_path(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
+    // Avoid false positives on "token" inside i18n copy files
+    if is_i18n(&p) {
+        return false;
+    }
     p.contains("auth")
         || p.contains("permission")
         || p.contains("security")
         || p.contains("csp")
         || p.contains("password")
-        || p.contains("token")
         || p.contains("oauth")
         || p.contains("payment")
         || p.contains("billing")
         || p.contains("migrat")
         || p.contains("crypto")
         || p.contains("secret")
+        || (p.contains("token") && (p.contains("auth") || p.contains("jwt") || p.contains("session")))
 }
 
 pub fn change_class(kinds: &[PathKind]) -> String {
@@ -138,6 +169,13 @@ pub fn change_class(kinds: &[PathKind]) -> String {
         .iter()
         .any(|k| matches!(k, PathKind::Source | PathKind::Test | PathKind::Config));
     let has_doc = kinds.iter().any(|k| matches!(k, PathKind::Doc));
+    let only_i18n = !kinds.is_empty()
+        && kinds
+            .iter()
+            .all(|k| matches!(k, PathKind::I18n | PathKind::Doc));
+    if only_i18n && !has_source {
+        return if has_doc { "docs".into() } else { "i18n".into() };
+    }
     match (has_source, has_doc) {
         (false, true) => "docs".into(),
         (true, false) => "source".into(),
@@ -174,10 +212,15 @@ pub fn suggested_scope_for_tier(tier: Tier) -> Vec<String> {
     }
 }
 
-/// Crude blast stub: score higher for shared / root-ish paths.
+/// Blast score for one path. Base is **0** unless a boost rule matches.
+/// Never use sum-of-ones across files — that inflate tier on locale fan-out.
 pub fn blast_stub_for_path(path: &str) -> u32 {
     let p = path.replace('\\', "/");
-    let mut score = 1u32;
+    let lower = p.to_ascii_lowercase();
+    if is_i18n(&lower) || is_doc(&lower) {
+        return 0;
+    }
+    let mut score = 0u32;
     if p.contains("/domain/") || p.contains("/data/schemas/") || p.contains("/stores/") {
         score += 8;
     }
@@ -191,7 +234,17 @@ pub fn blast_stub_for_path(path: &str) -> u32 {
     if p.contains("/components/atoms/") {
         score += 3;
     }
+    if p.contains("/hooks/") {
+        score += 2;
+    }
     score
+}
+
+/// Aggregate per-file blast: max boost + small count of boosted paths (not sum of all).
+pub fn aggregate_blast(per_file: &[u32]) -> u32 {
+    let max = per_file.iter().copied().max().unwrap_or(0);
+    let boosted = per_file.iter().filter(|&&b| b > 0).count() as u32;
+    max.saturating_add(boosted.saturating_sub(1).saturating_mul(2)).min(40)
 }
 
 #[cfg(test)]
@@ -215,7 +268,38 @@ mod tests {
     }
 
     #[test]
+    fn classifies_locale_json_as_i18n() {
+        assert_eq!(
+            classify_path("src/i18n/locales/en.json"),
+            PathKind::I18n
+        );
+        assert_eq!(
+            classify_path("src/locales/ja.json"),
+            PathKind::I18n
+        );
+    }
+
+    #[test]
     fn risk_auth() {
         assert!(is_risk_path("src/hooks/useAuth.ts"));
+        assert!(!is_risk_path("src/i18n/locales/en.json"));
+    }
+
+    #[test]
+    fn blast_no_base_one() {
+        assert_eq!(blast_stub_for_path("src/components/Foo/Foo.tsx"), 0);
+        assert!(blast_stub_for_path("src/hooks/useX.ts") >= 2);
+        assert_eq!(blast_stub_for_path("src/i18n/locales/en.json"), 0);
+    }
+
+    #[test]
+    fn aggregate_blast_not_sum_ones() {
+        // 23 locale-like zeros + a few boosted
+        let mut v = vec![0u32; 23];
+        v.push(8);
+        v.push(2);
+        assert!(aggregate_blast(&v) < 30);
+        // Old bug: 40 files * 1 = 40 → max bucket
+        assert_eq!(aggregate_blast(&vec![0; 40]), 0);
     }
 }

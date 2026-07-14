@@ -112,7 +112,7 @@ Config (`~/.scrutiny/config.toml`):
 
 ```toml
 # force_client = "claude"    # skip client prompt (default_client is already claude)
-# force_spawn_mode = "team"  # or "isolated"
+# force_spawn_mode = "isolated"  # or "team"
 ```
 
 ### Step-by-step review pipeline
@@ -150,8 +150,8 @@ Config (`~/.scrutiny/config.toml`):
 
 ### Spawn modes
 
-- **team (default):** one lead headless agent gets `build_team_lead_prompt`, which **embeds the same isolated role briefs verbatim**. Lead must paste those templates when spawning members (no inventing prompts), wait for all JSON returns, keep higher severity on conflicts, then return one findings JSON.
-- **isolated:** script runs reviewers + evangelists + analysis specialists in parallel with shared `build_isolated_prompt` templates; script collates and dedupes.
+- **isolated (default):** script runs reviewers + evangelists + analysis specialists in parallel with shared `build_isolated_prompt` templates; script collates and dedupes. Prefer this for token cost.
+- **team:** one lead headless agent gets `build_team_lead_prompt`, which **embeds the same isolated role briefs verbatim**. Lead pastes those templates when spawning members, waits for all JSON returns, keeps higher severity on conflicts, then returns one findings JSON. Higher token cost (lead re-bills member transcripts).
 
 Print a role or lead prompt for skill/debug:
 
@@ -231,6 +231,13 @@ enable_lore = false
 ## Token-saving habits
 
 Same idea across both skills: artifact paths in, not raw CLI dumps; pack/brief instead of full-file fishing; config force knobs to skip prompts; turn off Figma/lore when unused; set reviewers/evangelists to `0` when you want static-only.
+
+Review specifics:
+- Prefer **isolated** spawn (default) over team.
+- Locale/i18n files are **not** AI-reviewed — `scan.i18n` flags missing keys across languages.
+- Security/performance defaults follow **content signals** (network/auth vs hooks/domain), not tier alone.
+- Agents use graduated exploration (pack → allowlisted fetch → capped extra Reads). Avoid whole-repo `rg`.
+- Tune `~/.scrutiny/config.toml`: `[review.signals]`, `[pack.explore]`, `[agents].max_agents_total`.
 
 ## Releases
 

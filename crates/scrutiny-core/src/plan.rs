@@ -37,12 +37,12 @@ pub struct ConfirmedPlan {
     pub max_reviewers: u32,
     pub spawn_evangelists: bool,
     /// isolated (script parallel) | team (one lead spawns team).
-    #[serde(default = "default_spawn_team")]
+    #[serde(default = "default_spawn_isolated")]
     pub spawn_mode: String,
 }
 
-fn default_spawn_team() -> String {
-    "team".into()
+fn default_spawn_isolated() -> String {
+    "isolated".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct PlanWriteInput {
     pub error_handling: bool,
     pub reviewers: u32,
     pub evangelists: u32,
-    #[serde(default = "default_spawn_team")]
+    #[serde(default = "default_spawn_isolated")]
     pub spawn_mode: String,
     pub eval_path: PathBuf,
     pub map_path: Option<PathBuf>,
@@ -72,7 +72,7 @@ pub struct PlanAnswers {
     pub error_handling: bool,
     pub reviewers: u32,
     pub evangelists: u32,
-    #[serde(default = "default_spawn_team")]
+    #[serde(default = "default_spawn_isolated")]
     pub spawn_mode: String,
 }
 
@@ -170,18 +170,35 @@ fn prompt_plan_answers(
         .context("model menu")?;
     let model = models[model_sel].clone();
 
+    eprintln!(
+        "scrutiny plan-confirm: tier signals — security={} | performance={} | error={}",
+        suggested.security_reason, suggested.performance_reason, suggested.error_handling_reason
+    );
+
     let security = Confirm::with_theme(&theme)
-        .with_prompt("2) Security analysis?")
+        .with_prompt(format!(
+            "2) Security analysis? (recommended: {} — {})",
+            if suggested.security { "yes" } else { "no" },
+            suggested.security_reason
+        ))
         .default(suggested.security)
         .interact()
         .context("security confirm")?;
     let performance = Confirm::with_theme(&theme)
-        .with_prompt("3) Performance analysis?")
+        .with_prompt(format!(
+            "3) Performance analysis? (recommended: {} — {})",
+            if suggested.performance { "yes" } else { "no" },
+            suggested.performance_reason
+        ))
         .default(suggested.performance)
         .interact()
         .context("performance confirm")?;
     let error_handling = Confirm::with_theme(&theme)
-        .with_prompt("4) Error-handling analysis?")
+        .with_prompt(format!(
+            "4) Error-handling analysis? (recommended: {} — {})",
+            if suggested.error_handling { "yes" } else { "no" },
+            suggested.error_handling_reason
+        ))
         .default(suggested.error_handling)
         .interact()
         .context("error-handling confirm")?;
@@ -201,8 +218,8 @@ fn prompt_plan_answers(
         crate::runtime::normalize_spawn_mode(m)?
     } else {
         let items = [
+            "isolated — parallel reviewers/evangelists/specialists (recommended)",
             "team — one lead agent spawns its own team",
-            "isolated — parallel reviewers/evangelists/specialists",
         ];
         let sel = Select::with_theme(&theme)
             .with_prompt("7) Spawn mode")
@@ -211,9 +228,9 @@ fn prompt_plan_answers(
             .interact()
             .context("spawn mode menu")?;
         if sel == 0 {
-            "team".into()
-        } else {
             "isolated".into()
+        } else {
+            "team".into()
         }
     };
 
@@ -287,7 +304,31 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
     let mut reviewers = input.reviewers;
     let mut evangelists = input.evangelists;
     let spawn_mode = crate::runtime::normalize_spawn_mode(&input.spawn_mode)
-        .unwrap_or_else(|_| "team".into());
+        .unwrap_or_else(|_| "isolated".into());
+
+    // Cap from shipped/user config when available
+    let agent_caps = {
+        let shipped = crate::config::find_shipped_default(
+            &std::env::current_exe().unwrap_or_else(|_| PathBuf::from(".")),
+        );
+        crate::config::ensure_config(&shipped)
+            .ok()
+            .and_then(|p| crate::config::load_config(&p).ok())
+            .map(|c| (c.agents.max_reviewers, c.agents.max_evangelists, c.agents.max_agents_total))
+    };
+    if let Some((max_r, max_e, max_total)) = agent_caps {
+        reviewers = reviewers.min(max_r);
+        evangelists = evangelists.min(max_e);
+        let specialists = (input.security as u32)
+            + (input.performance as u32)
+            + (input.error_handling as u32);
+        while reviewers + evangelists + specialists > max_total && evangelists > 0 {
+            evangelists -= 1;
+        }
+        while reviewers + evangelists + specialists > max_total && reviewers > 1 {
+            reviewers -= 1;
+        }
+    }
 
     // Cap agents by pack size
     let max_reviewers = if pack_chars < 4_000 {
@@ -483,7 +524,7 @@ mod tests {
         assert_eq!(answers.model, "opus");
         assert_eq!(answers.reviewers, 2);
         assert_eq!(answers.evangelists, 1);
-        assert_eq!(answers.spawn_mode, "team");
+        assert_eq!(answers.spawn_mode, "isolated");
         assert!(path.exists());
         assert!(!answers.error_handling);
         assert!(answers.performance);

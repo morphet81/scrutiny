@@ -1,8 +1,8 @@
 default_client = "claude"
 # When set, skip client prompt for `scrutiny review` (must be installed on PATH).
 # force_client = "claude"
-# When set, skip spawn-mode prompt: "team" (default) | "isolated"
-# force_spawn_mode = "team"
+# When set, skip spawn-mode prompt. Default when unset: isolated.
+# force_spawn_mode = "isolated"
 
 [models.cursor]
 xs = "composer-2-fast"
@@ -12,7 +12,6 @@ l = "claude-sonnet-5-thinking-high"
 xl = "claude-opus-4-8-thinking-high"
 
 # Claude Code: use aliases or pinned Anthropic ids only (not Cursor slugs).
-# Aliases like "sonnet"/"opus" resolve to *latest* — pin if you need 4.6 specifically.
 [models.claude]
 xs = "haiku"
 s = "haiku"
@@ -48,6 +47,62 @@ M = true
 L = true
 XL = true
 
+[review.signals]
+ignore_content_signals = false
+security_path_globs = [
+  "**/auth/**", "**/*auth*", "**/*oauth*", "**/*session*",
+  "**/permission*/**", "**/*permission*", "**/*rbac*", "**/*acl*",
+  "**/security/**", "**/*crypto*", "**/*secret*", "**/*credential*",
+  "**/payment*/**", "**/*billing*", "**/*checkout*",
+  "**/middleware/**", "**/api/**", "**/server/**", "**/backend/**",
+  "**/.env*", "**/secrets/**",
+]
+security_diff_patterns = [
+  '(?i)\b(fetch|axios|XMLHttpRequest|got\(|node-fetch|reqwest|ureq|httpx|RestClient|HttpClient)\b',
+  '(?i)\b(WebSocket|EventSource|graphql|apollo|trpc)\b',
+  '(?i)\b(Authorization|Bearer\s+|JWT|csrf|xsrf|Set-Cookie|document\.cookie)\b',
+  '(?i)\b(localStorage|sessionStorage|indexedDB)\.(get|set|remove)Item',
+  '(?i)\b(password|passwd|api[_-]?key|private[_-]?key|client[_-]?secret)\b',
+  '(?i)dangerouslySetInnerHTML|innerHTML\s*=|outerHTML\s*=',
+  '(?i)\beval\s*\(|new\s+Function\s*\(',
+  '(?i)\bexec\s*\(|child_process|Command::new|std::process::Command',
+  '(?i)\b(Access-Control-Allow-Origin|\bcors\b|window\.location)',
+]
+performance_path_globs = [
+  "**/hooks/**", "**/domain/**", "**/stores/**", "**/data/**",
+  "**/workers/**", "**/wasm/**", "**/native/**",
+  "**/*List*", "**/*Table*", "**/*Grid*", "**/*Virtual*",
+]
+performance_diff_patterns = [
+  '(?i)\b(useEffect|useLayoutEffect|useMemo|useCallback|useTransition|startTransition)\s*\(',
+  '(?i)\b(React\.memo|memo\s*\()',
+  '(?i)\.map\s*\(|\.filter\s*\(|\.reduce\s*\(|\.flatMap\s*\(',
+  '(?i)\bfor\s*\(|\bwhile\s*\(|\.forEach\s*\(',
+  '(?i)requestAnimationFrame|getBoundingClientRect|offsetWidth|offsetHeight|scrollTop',
+  '(?i)\b(will-change|contain:|content-visibility:)',
+  '(?i)\.clone\s*\(|to_vec\s*\(|collect::<Vec',
+  '(?i)\bMutex::|\bRwLock::|blocking_',
+]
+performance_css_path_globs = ["**/*.css", "**/*.scss", "**/*.sass", "**/*.less"]
+performance_css_patterns = [
+  '(?i):(nth-child|nth-of-type|has)\s*\(',
+  '(?i)@keyframes|\banimation:',
+  '(?i)[*]\s*[>+~]|[>+~]\s*[*]',
+  '(?i)\bfilter:|\bbackdrop-filter:',
+]
+error_handling_diff_patterns = [
+  '(?i)\btry\s*\{|\bcatch\s*\(|\.catch\s*\(|finally\s*\{',
+  '(?i)\basync\s+function|\basync\s*\(|await\s+',
+  '(?i)\bResult<|anyhow::|thiserror|Promise\.reject',
+  '(?i)\.unwrap\s*\(|\.expect\s*\(|panic!',
+  '(?i)\b(onError|errorBoundary|ErrorBoundary|toast\.error)\b',
+]
+
+[agents]
+max_agents_total = 4
+max_reviewers = 2
+max_evangelists = 1
+
 [agents.reviewers_by_tier]
 XS = 0
 S = 1
@@ -58,30 +113,52 @@ XL = 2
 [agents.evangelists_by_tier]
 XS = 0
 S = 0
-M = 1
+M = 0
 L = 1
-XL = 2
+XL = 1
 
 [pack]
 max_chars = 48000
 doc_digest_lines = 40
 symbol_context_lines = 3
+min_file_chars = 1200
+source_weight = 4
+test_weight = 2
+doc_weight = 1
+enable_xref = true
+xref_max_symbols = 40
+xref_max_files_scanned = 300
+xref_char_budget = 6000
+xref_body_lines = 40
+annex_char_budget = 12000
+
+[pack.explore]
+enable = true
+max_extra_reads = 6
+max_extra_chars = 24000
+prefer_read_over_bash = true
+allow_repo_grep = false
+require_pack_path_hint = true
 
 [scan]
 enable = true
 # commands = []  # optional project lint hooks, run in repo cwd
 
-# Forge (ticket implement skill). Omit/null force fields → prompt.
-# Set approach/e2e/agents/testers/reviewers/evangelists/model to skip prompts.
-[forge]
-# approach = "tdd"          # "tdd" | "heads_down" | "plan"
-# e2e = true
-# agents = 2
-# testers = 1
-# reviewers = 1
-# evangelists = 0
-# model = "sonnet"
+[scan.i18n]
+enable = true
+reference_locale = "en"
+path_globs = [
+  "**/i18n/locales/*.json",
+  "**/locales/*.json",
+  "**/locale/*.json",
+  "**/lang/*.json",
+  "**/translations/*.json",
+]
+check_placeholders = true
+check_empty_values = true
+full_catalog = false
 
+[forge]
 enable_figma = true
 enable_lore = true
 enable_ticket_writeback = true
@@ -93,14 +170,11 @@ default_testers = 1
 default_reviewers = 1
 default_evangelists = 0
 
-# Verify gate (host runs tests/lint/coverage after implement; AI only fixes).
-# verify_commands = []   # explicit test/lint/build cmds; empty → auto-derive from harness
-verify_max_loops = 2     # fix-loops before gate blocks the commit
-verify_coverage = true   # gate coverage % when measurable (auto-derived only)
+verify_max_loops = 2
+verify_coverage = true
 
-# Branch scaffolding (guessed prefix + optional branch/worktree, user confirms).
-enable_branch = true         # run the interactive branch step
-branch_headless = "auto"     # non-TTY: "auto" follow detection | "never" use current branch
+enable_branch = true
+branch_headless = "auto"
 
 [git]
 base_candidates = ["main", "master", "develop"]

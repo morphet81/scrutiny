@@ -12,6 +12,9 @@ use crate::pack::PackReport;
 use crate::paths::{temp_artifact_path, write_json_pretty};
 use crate::score::Tier;
 
+mod i18n;
+pub use i18n::is_i18n_path;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     pub version: u32,
@@ -111,6 +114,11 @@ pub fn run_scan(
     collect_missing_tests(&map, eval.as_ref(), &mut findings);
     collect_risk_without_test(&map, &mut findings);
     collect_large_hunks(eval.as_ref(), pack.as_ref(), &mut findings);
+
+    match i18n::collect_i18n_findings(&repo.root, &map, &cfg.scan.i18n) {
+        Ok(mut i18n_findings) => findings.append(&mut i18n_findings),
+        Err(e) => eprintln!("scrutiny scan: i18n parity warn: {e:#}"),
+    }
 
     for cmd in &cfg.scan.commands {
         if let Some(f) = run_lint_hook(cwd, cmd) {
