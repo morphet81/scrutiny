@@ -21,15 +21,24 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,
 mirrors ticket under `.scrutiny/forge-<id>/`, exports Figma via `fcli` when links
 exist, asks spawn (default **single**)|team, playwright (skip if missing), TDD,
-coverage, e2e → optional test-plan confirm → implement agent → ship step.
+coverage, e2e → **scaffolding** (guess+confirm prefix, optional branch/worktree)
+→ optional test-plan confirm → implement agent → verify gate → ship step.
+
+**Scaffolding (host-owned, before implement):** host guesses a conventional
+prefix from ticket type/labels/title → confirm via Select (guess first). If
+`enable_branch`, detect git state and offer *create branch* / *+worktree* /
+*use current* (default depends on whether you're on a base branch); worktree
+switches the working dir for implement+commit. Non-TTY follows
+`branch_headless` (`auto` = create only when on a base branch; `never` = current).
 
 Implement agent must write `.scrutiny/forge-<id>/pr.json`
-(`pr_title`, `pr_body` citing the ticket URL only, `commit_subject`,
-`commit_body`), delete non-implementation junk (e.g. playwright temp media),
-and must **not** commit/push/open a PR. After the agent exits, `scrutiny forge`
-commits from `pr.json`, then on a TTY asks whether to create a **draft PR**
-(base branch prompt; default = calculated base). `--yes` / non-TTY skips the
-PR prompt.
+(`pr_title`, `pr_body` citing the ticket URL only, `commit_subject` starting with
+the chosen prefix, `commit_body`), delete non-implementation junk (e.g. playwright
+temp media), and must **not** create branches, commit, push, or open a PR. After
+the agent exits, `scrutiny forge` confirms the commit subject (Input, default =
+AI value or guess), commits, then on a TTY asks whether to create a **draft PR**
+(PR-title Input + base branch prompt). `--yes` / non-TTY skips prompts and uses
+the defaults.
 
 Sibling of `/scrutiny` (same binary, `~/.scrutiny/config.toml`).
 
@@ -141,7 +150,10 @@ Read `markdown_path` from brief JSON. Pass brief path (+ ticket/session paths) t
 
 ### A1. Conventional commit prefix
 
-From ticket type/title/labels (and branch prefix hint): `feat|fix|docs|refactor|perf|test|chore|…`. Ambiguous → ask (skip ask in `heads_down` — pick best).
+`scrutiny forge` guesses the prefix (`feat|fix|docs|refactor|perf|test|chore`)
+from ticket type/labels/title and confirms it with the user before implement.
+The agent must **honor the provided prefix** (in `commit_subject`), not re-derive
+it. IDE chain (no `scrutiny forge`): derive as before, ask if ambiguous.
 
 ### A2. Figma (`session.enable_figma`)
 

@@ -16,6 +16,7 @@ use crate::forge::context::run_forge_context;
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::figma::export_figma_designs;
 use crate::forge::plan::{run_forge_plan_write, ForgePlanWriteInput, ForgeSessionPlan};
+use crate::forge::scaffold;
 use crate::forge::tools::playwright_cli_available;
 use crate::forge::verify::{
     build_verify_plan, coverage_gaps, measure_coverage, parse_test_failures, raw_tail, run_command,
@@ -95,7 +96,7 @@ fn default_testers() -> u32 {
 
 /// Run forge: fetch → figma → knobs → optional TDD plan → implement agent.
 pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
-    let cwd = input.cwd.clone();
+    let mut cwd = input.cwd.clone();
     prepare_artifacts(&cwd, None, &[])?;
 
     let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
@@ -201,6 +202,11 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
     let (_brief, brief_path) =
         run_forge_brief(&ticket_path, Some(&session_path), Some(&context_path))?;
 
+    let skip_prompts = input.non_interactive || input.from_json.is_some();
+    let scaffold = resolve_scaffold(&cfg, &ticket, &cwd, skip_prompts)?;
+    let prefix = scaffold.prefix;
+    cwd = scaffold.cwd;
+
     let verify_plan = build_verify_plan(
         &cwd,
         &cfg.forge.verify_commands,
@@ -244,6 +250,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         &ticket,
         &pr_meta_path,
         &verify_plan,
+        &prefix,
     )?;
 
     match run_verify_gate(
@@ -265,8 +272,15 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         }
     }
 
-    let skip_pr_prompt = input.non_interactive || input.from_json.is_some();
-    run_forge_ship(&cwd, &session_root, &pr_meta_path, &cfg, skip_pr_prompt)?;
+    run_forge_ship(
+        &cwd,
+        &session_root,
+        &pr_meta_path,
+        &cfg,
+        skip_prompts,
+        &prefix,
+        &ticket,
+    )?;
 
     eprintln!(
         "scrutiny forge: done. session={} ticket={} pr_meta={}",
@@ -275,6 +289,103 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         pr_meta_path.display()
     );
     Ok(session_path)
+}
+
+struct ScaffoldOutcome {
+    prefix: String,
+    cwd: PathBuf,
+}
+
+/// Guess+confirm the commit prefix, then optionally create a branch / worktree.
+/// Returns the chosen prefix and the (possibly worktree) cwd for later phases.
+fn resolve_scaffold(
+    cfg: &Config,
+    ticket: &TicketReport,
+    cwd: &Path,
+    skip_prompts: bool,
+) -> Result<ScaffoldOutcome> {
+    let theme = ColorfulTheme::default();
+    let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let interactive = tty && !skip_prompts;
+
+    let guess = scaffold::guess_prefix(ticket);
+    let prefix = if interactive {
+        let choices = scaffold::prefix_choices(guess);
+        let sel = Select::with_theme(&theme)
+            .with_prompt("Commit / PR prefix")
+            .items(&choices)
+            .default(0)
+            .interact()
+            .context("prefix select")?;
+        choices[sel].to_string()
+    } else {
+        guess.to_string()
+    };
+
+    let keep = |prefix: String| ScaffoldOutcome {
+        prefix,
+        cwd: cwd.to_path_buf(),
+    };
+
+    if !cfg.forge.enable_branch {
+        return Ok(keep(prefix));
+    }
+
+    let repo = match git::discover_repo(cwd) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("scrutiny forge: not a git repo — skip branch step");
+            return Ok(keep(prefix));
+        }
+    };
+    let branch_name = scaffold::branch_name(ticket, &prefix);
+    let on_base = git::is_base_branch(&repo.branch, &cfg.git.base_candidates);
+
+    if !interactive {
+        if cfg.forge.branch_headless == "never" || !on_base {
+            return Ok(keep(prefix));
+        }
+        eprintln!("scrutiny forge: headless auto-branch {branch_name}");
+        git::create_branch(&repo.root, &branch_name)?;
+        return Ok(keep(prefix));
+    }
+
+    let items = [
+        format!("Create branch: {branch_name}"),
+        format!("Create branch + worktree: {branch_name}"),
+        format!("No branch (use current: {})", repo.branch),
+    ];
+    let default_idx = if on_base { 0 } else { 2 };
+    let sel = Select::with_theme(&theme)
+        .with_prompt("Branch")
+        .items(&items)
+        .default(default_idx)
+        .interact()
+        .context("branch select")?;
+    match sel {
+        0 => {
+            git::create_branch(&repo.root, &branch_name)?;
+            eprintln!("scrutiny forge: branch {branch_name}");
+            Ok(keep(prefix))
+        }
+        1 => {
+            let dir = worktree_dir(&repo, &branch_name);
+            let wt = git::create_worktree(&repo.root, &branch_name, &dir)?;
+            eprintln!("scrutiny forge: worktree {} ({branch_name})", wt.display());
+            Ok(ScaffoldOutcome { prefix, cwd: wt })
+        }
+        _ => Ok(keep(prefix)),
+    }
+}
+
+fn worktree_dir(repo: &git::RepoContext, branch_name: &str) -> PathBuf {
+    let san = branch_name.replace('/', "-");
+    let base = repo
+        .root
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| repo.root.clone());
+    base.join(format!("{}-{}", repo.repo_slug, san))
 }
 
 fn prompt_forge_answers(client: &str, ticket: &TicketReport) -> Result<ForgeAnswers> {
@@ -518,6 +629,7 @@ fn run_implement_agent(
     ticket: &TicketReport,
     pr_meta_path: &Path,
     verify: &VerifyPlan,
+    prefix: &str,
 ) -> Result<()> {
     let prompt = build_implement_prompt(
         ticket_path,
@@ -528,6 +640,7 @@ fn run_implement_agent(
         ticket,
         pr_meta_path,
         verify,
+        prefix,
     );
     let label = if session.spawn_mode == "team" {
         "forge-po-team"
@@ -562,6 +675,7 @@ fn build_implement_prompt(
     ticket: &TicketReport,
     pr_meta_path: &Path,
     verify: &VerifyPlan,
+    prefix: &str,
 ) -> String {
     let mut p = String::new();
     if session.spawn_mode == "team" {
@@ -635,13 +749,14 @@ fn build_implement_prompt(
          \"commit_body\": \"…\"\n\
          }\n",
     );
-    p.push_str(
+    p.push_str(&format!(
         "- pr_title: short PR title for this branch.\n\
          - pr_body: PR description based on the ticket. Must reference the ticket URL below \
          (that URL only — do not invent or link a different ticket).\n\
          - commit_subject / commit_body: conventional commit message for one final commit \
-         the host script will create.\n",
-    );
+         the host script will create. commit_subject MUST start with the prefix `{prefix}:` \
+         (the host already picked this prefix).\n"
+    ));
     match ticket.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         Some(url) => {
             p.push_str(&format!("Ticket URL (cite this in pr_body): {url}\n"));
@@ -678,6 +793,7 @@ fn build_implement_prompt(
 
     p.push_str(
         "\n## Do NOT ship yourself\n\
+         Do NOT create or switch git branches — the host already put you on the right branch. \
          Do NOT run git commit, git push, or open a PR. The host script commits and may \
          create a draft PR after you finish.\n",
     );
@@ -881,14 +997,7 @@ fn load_pr_meta(path: &Path) -> Result<PrMeta> {
         .with_context(|| format!("read {}", path.display()))?;
     let meta: PrMeta = serde_json::from_str(&raw)
         .with_context(|| format!("parse pr.json at {}", path.display()))?;
-    if meta.pr_title.trim().is_empty()
-        || meta.commit_subject.trim().is_empty()
-    {
-        bail!(
-            "pr.json at {} missing pr_title or commit_subject",
-            path.display()
-        );
-    }
+    // pr_title / commit_subject may be empty — the host falls back to a guess.
     Ok(meta)
 }
 
@@ -897,13 +1006,41 @@ fn run_forge_ship(
     session_root: &Path,
     pr_meta_path: &Path,
     cfg: &Config,
-    skip_pr_prompt: bool,
+    skip_prompts: bool,
+    prefix: &str,
+    ticket: &TicketReport,
 ) -> Result<()> {
     let meta = load_pr_meta(pr_meta_path)?;
     eprintln!(
         "scrutiny forge: shipping metadata → {}",
         pr_meta_path.display()
     );
+
+    let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+
+    // Commit subject: AI value if present, else guess — user may edit on a TTY.
+    let subject_default = {
+        let ai = meta.commit_subject.trim();
+        if ai.is_empty() {
+            crate::forge::scaffold::guess_commit_subject(ticket, prefix)
+        } else {
+            ai.to_string()
+        }
+    };
+    let commit_subject = if skip_prompts || !tty {
+        subject_default
+    } else {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Commit subject")
+            .default(subject_default)
+            .interact_text()
+            .context("commit subject")?
+            .trim()
+            .to_string()
+    };
+    if commit_subject.is_empty() {
+        bail!("commit subject empty");
+    }
 
     let status = git_stdout(cwd, &["status", "--porcelain"])?;
     if status.trim().is_empty() {
@@ -921,7 +1058,7 @@ fn run_forge_ship(
             );
         }
 
-        let mut msg = meta.commit_subject.trim().to_string();
+        let mut msg = commit_subject.clone();
         let body = meta.commit_body.trim();
         if !body.is_empty() {
             msg.push_str("\n\n");
@@ -946,14 +1083,10 @@ fn run_forge_ship(
                 String::from_utf8_lossy(&commit.stderr).trim()
             );
         }
-        eprintln!(
-            "scrutiny forge: committed — {}",
-            meta.commit_subject.trim()
-        );
+        eprintln!("scrutiny forge: committed — {commit_subject}");
     }
 
-    let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    if skip_pr_prompt || !tty {
+    if skip_prompts || !tty {
         eprintln!(
             "scrutiny forge: skip draft PR prompt (non-interactive). \
              pr.json ready at {}",
@@ -1005,6 +1138,25 @@ fn run_forge_ship(
         }
     }
 
+    let title_default = {
+        let ai = meta.pr_title.trim();
+        if ai.is_empty() {
+            crate::forge::scaffold::guess_pr_title(ticket, prefix)
+        } else {
+            ai.to_string()
+        }
+    };
+    let pr_title: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("PR title")
+        .default(title_default)
+        .interact_text()
+        .context("pr title")?
+        .trim()
+        .to_string();
+    if pr_title.is_empty() {
+        bail!("pr title empty");
+    }
+
     let body_path = session_root.join("pr-body.md");
     fs::write(&body_path, meta.pr_body.as_bytes())
         .with_context(|| format!("write {}", body_path.display()))?;
@@ -1017,7 +1169,7 @@ fn run_forge_ship(
             "--base",
             &base,
             "--title",
-            meta.pr_title.trim(),
+            &pr_title,
             "--body-file",
         ])
         .arg(&body_path)

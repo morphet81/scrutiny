@@ -5,6 +5,7 @@ pub mod context;
 pub mod fetch;
 pub mod figma;
 pub mod plan;
+pub mod scaffold;
 pub mod tools;
 pub mod verify;
 

@@ -157,6 +157,52 @@ fn normalize_ref(r: &str) -> String {
         .to_string()
 }
 
+/// Uncommitted changes present?
+pub fn is_dirty(root: &Path) -> bool {
+    git_stdout(root, &["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Commits on HEAD not on `base` (0 if unknown).
+pub fn commits_ahead(root: &Path, base: &str) -> usize {
+    commit_count(root, &format!("{base}..HEAD")).unwrap_or(0)
+}
+
+/// Is `branch` one of the configured base candidates (prefix-normalized)?
+pub fn is_base_branch(branch: &str, candidates: &[String]) -> bool {
+    let b = normalize_ref(branch);
+    candidates.iter().any(|c| normalize_ref(c) == b)
+}
+
+/// Create + switch to `name` (switch to it if it already exists).
+pub fn create_branch(root: &Path, name: &str) -> Result<()> {
+    if ref_exists(root, name) {
+        if git_ok(root, &["switch", name]) || git_ok(root, &["checkout", name]) {
+            return Ok(());
+        }
+        bail!("could not switch to existing branch {name}");
+    }
+    if git_ok(root, &["switch", "-c", name]) || git_ok(root, &["checkout", "-b", name]) {
+        return Ok(());
+    }
+    bail!("could not create branch {name}");
+}
+
+/// Add a git worktree at `dir` on branch `name` (create the branch unless it exists).
+pub fn create_worktree(root: &Path, name: &str, dir: &Path) -> Result<PathBuf> {
+    let dir_str = dir.to_string_lossy().to_string();
+    let ok = if ref_exists(root, name) {
+        git_ok(root, &["worktree", "add", &dir_str, name])
+    } else {
+        git_ok(root, &["worktree", "add", &dir_str, "-b", name])
+    };
+    if !ok {
+        bail!("git worktree add failed for {} ({name})", dir.display());
+    }
+    Ok(dir.to_path_buf())
+}
+
 pub fn ref_exists(root: &Path, name: &str) -> bool {
     git_ok(root, &["rev-parse", "--verify", &format!("{name}^{{commit}}")])
         || git_ok(
@@ -288,5 +334,51 @@ mod tests {
     fn normalize_strips_prefixes() {
         assert_eq!(normalize_ref("refs/heads/main"), "main");
         assert_eq!(normalize_ref("origin/develop"), "develop");
+    }
+
+    #[test]
+    fn is_base_branch_matches_candidates() {
+        let cands = vec!["main".to_string(), "develop".to_string()];
+        assert!(is_base_branch("main", &cands));
+        assert!(is_base_branch("origin/develop", &cands));
+        assert!(!is_base_branch("feat/x", &cands));
+    }
+
+    #[test]
+    fn branch_dirty_ahead_on_temp_repo() {
+        let dir = std::env::temp_dir().join(format!("git-helpers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        assert!(is_dirty(&dir));
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+        assert!(!is_dirty(&dir));
+
+        create_branch(&dir, "feat/x-y").unwrap();
+        let cur = discover_repo(&dir).unwrap().branch;
+        assert_eq!(cur, "feat/x-y");
+        std::fs::write(dir.join("b.txt"), "2").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "second"]);
+        assert_eq!(commits_ahead(&dir, "main"), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -74,6 +74,12 @@ pub struct ForgeConfig {
     /// Gate on coverage % when measurable (auto-derived commands only).
     #[serde(default = "default_true")]
     pub verify_coverage: bool,
+    /// Run the interactive branch step (create branch / +worktree / none).
+    #[serde(default = "default_true")]
+    pub enable_branch: bool,
+    /// Headless branch behavior: "auto" (follow detection) | "never" (use current).
+    #[serde(default = "default_branch_headless")]
+    pub branch_headless: String,
 }
 
 fn default_true() -> bool {
@@ -93,6 +99,9 @@ fn default_reviewers_1() -> u32 {
 }
 fn default_verify_loops() -> u32 {
     2
+}
+fn default_branch_headless() -> String {
+    "auto".into()
 }
 
 impl Default for ForgeConfig {
@@ -117,6 +126,8 @@ impl Default for ForgeConfig {
             verify_commands: Vec::new(),
             verify_max_loops: default_verify_loops(),
             verify_coverage: true,
+            enable_branch: true,
+            branch_headless: default_branch_headless(),
         }
     }
 }
@@ -334,7 +345,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SuggestedForge {
     pub client: String,
     pub model: String,

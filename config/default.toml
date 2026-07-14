@@ -98,6 +98,10 @@ default_evangelists = 0
 verify_max_loops = 2     # fix-loops before gate blocks the commit
 verify_coverage = true   # gate coverage % when measurable (auto-derived only)
 
+# Branch scaffolding (guessed prefix + optional branch/worktree, user confirms).
+enable_branch = true         # run the interactive branch step
+branch_headless = "auto"     # non-TTY: "auto" follow detection | "never" use current branch
+
 [git]
 base_candidates = ["main", "master", "develop"]
 exclude_globs = [
