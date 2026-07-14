@@ -21,7 +21,15 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,
 mirrors ticket under `.scrutiny/forge-<id>/`, exports Figma via `fcli` when links
 exist, asks spawn (default **single**)|team, playwright (skip if missing), TDD,
-coverage, e2e → optional test-plan confirm → implement agent.
+coverage, e2e → optional test-plan confirm → implement agent → ship step.
+
+Implement agent must write `.scrutiny/forge-<id>/pr.json`
+(`pr_title`, `pr_body` citing the ticket URL only, `commit_subject`,
+`commit_body`), delete non-implementation junk (e.g. playwright temp media),
+and must **not** commit/push/open a PR. After the agent exits, `scrutiny forge`
+commits from `pr.json`, then on a TTY asks whether to create a **draft PR**
+(base branch prompt; default = calculated base). `--yes` / non-TTY skips the
+PR prompt.
 
 Sibling of `/scrutiny` (same binary, `~/.scrutiny/config.toml`).
 

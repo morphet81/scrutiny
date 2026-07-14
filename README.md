@@ -14,7 +14,7 @@ Reviews a local branch or a GitHub PR. Prefer **`scrutiny review`** for script-o
 
 ### `/forge`
 
-Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent. Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny review`.
+Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent (writes `pr.json`, script commits + optional draft PR). Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny review`.
 
 ## Install (Homebrew)
 
@@ -102,7 +102,7 @@ Artifacts live under **`<repo>/.scrutiny/<pr>/`** (or `.scrutiny/local/` without
 ./target/release/scrutiny forge --from-json '{"client":"claude","model":"sonnet","spawn_mode":"single","tdd":true,"e2e":true,"coverage_pct":100}' --yes --input KEY-1
 ```
 
-Flow: require source CLI (`acli`/`gh`/`glab`) with install links → ticket mirror under `.scrutiny/forge-<id>/` (attachments, full fields) → if Figma URLs require `fcli` and export screenshots+XML → ask spawn (**single** default|team), playwright (skipped if no `playwright-cli`), TDD, coverage%, e2e → optional TDD test-plan agent + confirm/comment → implement agent (prompt encodes choices).
+Flow: require source CLI (`acli`/`gh`/`glab`) with install links → ticket mirror under `.scrutiny/forge-<id>/` (attachments, full fields) → if Figma URLs require `fcli` and export screenshots+XML → ask spawn (**single** default|team), playwright (skipped if no `playwright-cli`), TDD, coverage%, e2e → optional TDD test-plan agent + confirm/comment → implement agent (prompt encodes choices; writes `.scrutiny/forge-<id>/pr.json` with PR title/body + commit message; cleans non-implementation junk; does **not** commit) → script commits from `pr.json` → TTY asks to create a **draft PR** (base branch defaults to calculated base; skipped with `--yes` / non-TTY).
 
 Install links when missing: [acli](https://developer.atlassian.com/cloud/acli/guides/install-acli/), [fcli](https://github.com/morphet81/figma-cli).
 
