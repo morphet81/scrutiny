@@ -184,7 +184,7 @@ Scan seeds are **change-scoped** (added lines / change map / large added surface
 
 If the authenticated user already has a **PENDING** review on that PR, the script asks:
 
-1. Add these comments to the pending review, then submit it  
+1. Add these comments to the pending review (GraphQL append — existing draft line anchors kept), then submit it  
 2. Close the pending review (choose event), then create a **new** review with the findings  
 
 Agents must not call `gh` review create/dismiss/delete — only `post-comments`.

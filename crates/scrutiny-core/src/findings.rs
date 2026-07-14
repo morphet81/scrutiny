@@ -1255,11 +1255,12 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
     let resp;
     let posted;
 
-    if let Some(pending_id) = pending {
+    if let Some(ref pending) = pending {
         let pending_drafts =
-            list_pending_review_comments(&input.cwd, &owner, &name, pr, pending_id)?;
+            list_pending_review_comments(&input.cwd, &owner, &name, pr, pending.id)?;
         eprintln!(
-            "scrutiny post-comments: pending review #{pending_id} — {} draft comment(s):",
+            "scrutiny post-comments: pending review #{} — {} draft comment(s):",
+            pending.id,
             pending_drafts.len()
         );
         for c in &pending_drafts {
@@ -1270,18 +1271,12 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                 eprintln!("  - {path} (file)");
             }
         }
-        if !pending_drafts.is_empty() {
-            eprintln!(
-                "scrutiny post-comments: WARNING — Replace deletes that pending review on GitHub.\n\
-                 A local backup is written first; if submit fails, drafts are restored as PENDING."
-            );
-        }
         let choice = {
             use std::io::{self, IsTerminal, Write};
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
                 use dialoguer::{theme::ColorfulTheme, Select};
                 let items = [
-                    "Replace pending review (backup → delete → recreate with pending drafts + new findings, then submit)",
+                    "Add findings to pending review, then submit (drafts kept)",
                     "Submit pending as-is, then post findings as a separate review",
                 ];
                 let sel = Select::with_theme(&ColorfulTheme::default())
@@ -1297,7 +1292,7 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                 }
             } else {
                 eprintln!(
-                    "  1) Replace pending review (backup → delete → recreate with pending drafts + new findings, then submit)"
+                    "  1) Add findings to pending review, then submit (drafts kept)"
                 );
                 eprintln!(
                     "  2) Submit pending as-is, then post findings as a separate review"
@@ -1317,12 +1312,10 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                     &owner,
                     &name,
                     pr,
-                    pending_id,
-                    &report,
+                    pending,
                     &event,
                     &review_body,
                     &api_comments,
-                    &pending_drafts,
                 )?;
                 resp = r;
                 posted = p;
@@ -1337,8 +1330,9 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                     &owner,
                     &name,
                     pr,
-                    pending_id,
+                    pending.id,
                     &close_event,
+                    None,
                 )?;
                 eprintln!("Pending review closed as {close_event}.");
                 event = resolve_review_event(&mut report, &input)?;
@@ -1505,40 +1499,6 @@ fn create_new_review(
     )?;
     post_file_level_comments(cwd, owner, name, pr, &report.head_oid, &file_comments)?;
     Ok((resp, line_n + file_comments.len() as u32))
-}
-
-/// Create a PENDING review (omit `event`) for restore-after-failed-replace.
-fn restore_pending_review(
-    cwd: &Path,
-    owner: &str,
-    name: &str,
-    pr: u64,
-    commit_id: &str,
-    review_body: &str,
-    comments: &[Value],
-) -> Result<u64> {
-    let (line_comments, file_comments) = split_line_and_file_comments(comments);
-    let body = review_body_with_file_notes(review_body, &file_comments);
-    let (resp, _) = post_pull_request_review(
-        cwd,
-        owner,
-        name,
-        pr,
-        commit_id,
-        &body,
-        None,
-        &line_comments,
-    )?;
-    let id = resp
-        .get("id")
-        .and_then(|v| v.as_u64())
-        .context("restored pending review missing id")?;
-    eprintln!(
-        "scrutiny post-comments: restored PENDING review #{id} ({} line draft(s); {} file note(s) in body)",
-        line_comments.len(),
-        file_comments.len()
-    );
-    Ok(id)
 }
 
 fn review_body_with_file_notes(review_body: &str, file_comments: &[Value]) -> String {
@@ -1727,12 +1687,17 @@ fn split_line_and_file_comments(comments: &[Value]) -> (Vec<Value>, Vec<Value>) 
     (line, file)
 }
 
+struct PendingReview {
+    id: u64,
+    node_id: String,
+}
+
 fn find_pending_review(
     cwd: &Path,
     owner: &str,
     name: &str,
     pr: u64,
-) -> Result<Option<u64>> {
+) -> Result<Option<PendingReview>> {
     let login = gh_json(cwd, &["api", "user", "-q", ".login"])?
         .as_str()
         .unwrap_or("")
@@ -1752,106 +1717,151 @@ fn find_pending_review(
             .and_then(|s| s.as_str())
             .unwrap_or("");
         if state.eq_ignore_ascii_case("PENDING") && user == login {
-            if let Some(id) = r.get("id").and_then(|i| i.as_u64()) {
-                return Ok(Some(id));
-            }
+            let id = r
+                .get("id")
+                .and_then(|i| i.as_u64())
+                .context("pending review missing id")?;
+            let node_id = r
+                .get("node_id")
+                .and_then(|n| n.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .with_context(|| {
+                    format!("pending review #{id} missing node_id (needed for GraphQL append)")
+                })?;
+            return Ok(Some(PendingReview { id, node_id }));
         }
     }
     Ok(None)
 }
 
-/// Replace a PENDING review: backup → delete → create submitted review with
-/// prior drafts + new findings. If create fails, restore PENDING from backup.
-///
-/// GitHub Create Review Comment rejects `pull_request_review_id` (422), so we
-/// cannot append into an existing PENDING review via REST.
+/// Append findings onto an existing PENDING review via GraphQL, then submit it.
+/// Existing draft comments stay on GitHub (no delete/recreate).
 fn finish_pending_with_comments(
     cwd: &Path,
     owner: &str,
     name: &str,
     pr: u64,
-    review_id: u64,
-    report: &FindingsReport,
+    pending: &PendingReview,
     event: &str,
     review_body: &str,
     api_comments: &[Value],
-    existing_drafts: &[Value],
 ) -> Result<(Value, u32)> {
-    let mut merged = existing_drafts.to_vec();
-    merged.extend(api_comments.iter().cloned());
-
-    let backup = json!({
-        "pending_review_id": review_id,
-        "head_oid": report.head_oid,
-        "review_body": review_body,
-        "event": event,
-        "merged_comments": merged,
-    });
-    let backup_path = temp_artifact_path(
-        &report.repo,
-        "review",
-        &format!("pending-backup-{review_id}"),
-    );
-    write_json_pretty(&backup_path, &backup).with_context(|| {
-        format!(
-            "refuse to delete pending #{review_id}: could not write backup {}",
-            backup_path.display()
-        )
-    })?;
     eprintln!(
-        "scrutiny post-comments: backed up {} draft comment(s) → {}",
-        merged.len(),
-        backup_path.display()
+        "scrutiny post-comments: appending {} comment(s) to pending #{} via GraphQL…",
+        api_comments.len(),
+        pending.id
     );
+    for (i, c) in api_comments.iter().enumerate() {
+        add_pending_review_thread(cwd, &pending.node_id, c).with_context(|| {
+            format!(
+                "failed appending comment {}/{} to pending #{}",
+                i + 1,
+                api_comments.len(),
+                pending.id
+            )
+        })?;
+    }
     eprintln!(
-        "scrutiny post-comments: replacing pending #{review_id} (delete → create {event})…"
+        "scrutiny post-comments: submitting pending #{} as {event}…",
+        pending.id
     );
-
-    delete_pending_review(cwd, owner, name, pr, review_id)?;
-
-    match create_new_review(
+    let resp = submit_review_event(
         cwd,
         owner,
         name,
         pr,
-        report,
+        pending.id,
         event,
-        review_body,
-        &merged,
-    ) {
-        Ok(ok) => {
-            eprintln!(
-                "scrutiny post-comments: replace ok — {} comment(s) submitted as {event}",
-                ok.1
-            );
-            Ok(ok)
-        }
-        Err(create_err) => {
-            eprintln!(
-                "scrutiny post-comments: create after delete FAILED — restoring PENDING from backup…"
-            );
-            match restore_pending_review(
-                cwd,
-                owner,
-                name,
-                pr,
-                &report.head_oid,
-                review_body,
-                &merged,
-            ) {
-                Ok(restored_id) => bail!(
-                    "create review failed after deleting pending #{review_id}; \
-                     PENDING restored as #{restored_id}. Backup: {}\ncreate error: {create_err:#}",
-                    backup_path.display()
-                ),
-                Err(restore_err) => bail!(
-                    "CRITICAL: create failed after delete AND restore FAILED. \
-                     Your drafts are ONLY in the local backup — open it and re-post manually.\n\
-                     backup: {}\ncreate error: {create_err:#}\nrestore error: {restore_err:#}",
-                    backup_path.display()
-                ),
+        Some(review_body),
+    )?;
+    let posted = api_comments.len() as u32;
+    eprintln!(
+        "scrutiny post-comments: append ok — {posted} comment(s) submitted as {event}"
+    );
+    Ok((resp, posted))
+}
+
+const ADD_THREAD_MUTATION: &str = r#"
+mutation($input: AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input: $input) {
+    thread { id }
+  }
+}
+"#;
+
+fn add_pending_review_thread(
+    cwd: &Path,
+    review_node_id: &str,
+    comment: &Value,
+) -> Result<()> {
+    let body = comment
+        .get("body")
+        .and_then(|b| b.as_str())
+        .filter(|s| !s.is_empty())
+        .context("comment body required")?;
+    let path = comment
+        .get("path")
+        .and_then(|p| p.as_str())
+        .filter(|s| !s.is_empty())
+        .context("comment path required")?;
+
+    let is_file = comment.get("subject_type").and_then(|s| s.as_str()) == Some("file")
+        || comment.get("line").and_then(|l| l.as_u64()).unwrap_or(0) == 0;
+
+    let mut input = json!({
+        "pullRequestReviewId": review_node_id,
+        "body": body,
+        "path": path,
+    });
+
+    if is_file {
+        input["subjectType"] = json!("FILE");
+    } else {
+        let line = comment
+            .get("line")
+            .and_then(|l| l.as_u64())
+            .context("line comment missing line")?;
+        input["subjectType"] = json!("LINE");
+        input["line"] = json!(line);
+        input["side"] = json!(comment
+            .get("side")
+            .and_then(|s| s.as_str())
+            .unwrap_or("RIGHT"));
+        if let Some(start) = comment.get("start_line").and_then(|l| l.as_u64()) {
+            if start > 0 && start < line {
+                input["startLine"] = json!(start);
+                if let Some(ss) = comment.get("start_side").and_then(|s| s.as_str()) {
+                    input["startSide"] = json!(ss);
+                }
             }
         }
+    }
+
+    let try_add = |input: &Value| -> Result<()> {
+        let data = gh_graphql(cwd, ADD_THREAD_MUTATION, &json!({ "input": input }))?;
+        if data
+            .pointer("/addPullRequestReviewThread/thread/id")
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
+            bail!("addPullRequestReviewThread returned no thread id: {data}");
+        }
+        Ok(())
+    };
+
+    match try_add(&input) {
+        Ok(()) => Ok(()),
+        Err(first_err) if input.get("startLine").is_some() => {
+            eprintln!("scrutiny post-comments: GraphQL retry without startLine/startSide…");
+            let mut stripped = input.clone();
+            if let Some(obj) = stripped.as_object_mut() {
+                obj.remove("startLine");
+                obj.remove("startSide");
+            }
+            try_add(&stripped).with_context(|| format!("after multiline strip: {first_err:#}"))
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -1905,29 +1915,6 @@ fn list_pending_review_comments(
     Ok(out)
 }
 
-fn delete_pending_review(
-    cwd: &Path,
-    owner: &str,
-    name: &str,
-    pr: u64,
-    review_id: u64,
-) -> Result<()> {
-    let endpoint = format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}");
-    let output = Command::new("gh")
-        .args(["api", "--method", "DELETE", &endpoint])
-        .current_dir(cwd)
-        .output()
-        .context("delete pending review")?;
-    if !output.status.success() {
-        bail!(
-            "failed to delete pending review #{review_id}: {} {}",
-            String::from_utf8_lossy(&output.stderr),
-            String::from_utf8_lossy(&output.stdout)
-        );
-    }
-    Ok(())
-}
-
 fn submit_review_event(
     cwd: &Path,
     owner: &str,
@@ -1935,10 +1922,14 @@ fn submit_review_event(
     pr: u64,
     review_id: u64,
     event: &str,
+    body: Option<&str>,
 ) -> Result<Value> {
     let endpoint =
         format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}/events");
-    let payload = json!({ "event": event });
+    let mut payload = json!({ "event": event });
+    if let Some(b) = body.filter(|s| !s.is_empty()) {
+        payload["body"] = json!(b);
+    }
     let payload_path = temp_artifact_path("scrutiny", "pending", "event");
     write_json_pretty(&payload_path, &payload)?;
     let output = Command::new("gh")
@@ -1955,6 +1946,42 @@ fn submit_review_event(
         );
     }
     serde_json::from_slice(&output.stdout).context("parse submit event resp")
+}
+
+fn gh_graphql(cwd: &Path, query: &str, variables: &Value) -> Result<Value> {
+    let payload = json!({
+        "query": query,
+        "variables": variables,
+    });
+    let payload_path = temp_artifact_path("scrutiny", "graphql", "payload");
+    write_json_pretty(&payload_path, &payload)?;
+    let output = Command::new("gh")
+        .args(["api", "graphql", "--input"])
+        .arg(&payload_path)
+        .current_dir(cwd)
+        .output()
+        .context("run gh api graphql")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        bail!("gh api graphql failed: {stderr} {stdout}");
+    }
+    let resp: Value = serde_json::from_str(stdout.trim()).context("parse graphql resp")?;
+    if let Some(errors) = resp.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            let msgs: Vec<String> = errors
+                .iter()
+                .map(|e| {
+                    e.get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                })
+                .collect();
+            bail!("graphql errors: {}", msgs.join("; "));
+        }
+    }
+    Ok(resp.get("data").cloned().unwrap_or(Value::Null))
 }
 
 fn gh_json(cwd: &Path, args: &[&str]) -> Result<Value> {

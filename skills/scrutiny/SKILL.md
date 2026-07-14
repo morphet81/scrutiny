@@ -299,7 +299,7 @@ RESULT="$("$SCRUTINY_BIN" post-comments --findings "$FINDINGS" --cwd <repo-root>
 
 Optional non-interactive: `post-comments --event COMMENT|REQUEST_CHANGES|APPROVE`.
 
-**`post-comments` owns GitHub review API.** Script prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE`. If your user already has a **PENDING** review, script asks add-vs-close (then event). Agent must **never** run `gh api` to create / dismiss / delete / submit reviews. If script fails, show stderr to user — do not improvise.
+**`post-comments` owns GitHub review API.** Script prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE`. If your user already has a **PENDING** review, script asks: (1) GraphQL-append findings onto that pending review then submit, or (2) submit pending as-is then create a separate findings review. Agent must **never** run `gh api` to create / dismiss / delete / submit reviews. If script fails, show stderr to user — do not improvise.
 
 Show result path / review `html_url` from the script output. Agent must **not** re-ask the review action in chat.
 
