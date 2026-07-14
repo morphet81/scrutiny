@@ -2,6 +2,7 @@
 
 pub mod agent_runner;
 pub mod config;
+pub mod diff_loc;
 pub mod eval;
 pub mod findings;
 pub mod forge;

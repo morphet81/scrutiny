@@ -144,23 +144,12 @@ fn build_report(
     let mut deleted = 0u32;
     let mut file_locs = Vec::new();
     let mut files = Vec::new();
+    let mut score_paths: Vec<String> = Vec::new();
 
     for f in &relevant {
         let kind = classify_path(&f.path);
-        kinds.push(kind.clone());
-        if let Some(layer) = layer_for_path(&f.path) {
-            layers.insert(layer.to_string());
-        }
         let risk = is_risk_path(&f.path);
-        if risk {
-            risk_hits += 1;
-        }
         let b = blast_stub_for_path(&f.path);
-        blast = blast.saturating_add(b);
-        let loc = f.added + f.deleted;
-        file_locs.push(loc);
-        added += f.added;
-        deleted += f.deleted;
         files.push(EvalFile {
             path: f.path.clone(),
             status: f.status.clone(),
@@ -171,10 +160,57 @@ fn build_report(
             risk,
             blast_stub: b,
         });
+        // Docs stay in report.files for map; do not score them.
+        if matches!(kind, PathKind::Doc) {
+            continue;
+        }
+        score_paths.push(f.path.clone());
+    }
+
+    let code_counts = if score_paths.is_empty() {
+        Default::default()
+    } else {
+        match git::diff_unified_paths(&repo.root, base, head, &score_paths) {
+            Ok(unified) => crate::diff_loc::code_counts_by_path(&unified),
+            Err(_) => Default::default(),
+        }
+    };
+
+    // Overwrite display/score LOC for non-docs with comment-stripped counts.
+    for f in &mut files {
+        if f.kind == "doc" {
+            continue;
+        }
+        if let Some(&(a, d)) = code_counts.get(&f.path) {
+            f.added = a;
+            f.deleted = d;
+        }
+    }
+
+    for f in &files {
+        if f.kind == "doc" {
+            continue;
+        }
+        let kind = classify_path(&f.path);
+        kinds.push(kind);
+        if let Some(layer) = layer_for_path(&f.path) {
+            if layer != "docs" {
+                layers.insert(layer.to_string());
+            }
+        }
+        if f.risk {
+            risk_hits += 1;
+        }
+        blast = blast.saturating_add(f.blast_stub);
+
+        let loc = f.added + f.deleted;
+        file_locs.push(loc);
+        added += f.added;
+        deleted += f.deleted;
     }
 
     let signals = ScoreSignals {
-        relevant_files: relevant.len() as u32,
+        relevant_files: score_paths.len() as u32,
         relevant_loc: added + deleted,
         added,
         deleted,

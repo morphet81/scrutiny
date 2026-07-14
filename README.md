@@ -123,6 +123,10 @@ Config (`~/.scrutiny/config.toml`):
 ./target/release/scrutiny post-comments --findings …
 ```
 
+### eval complexity
+
+`eval` scores XS…XL from diff size/scatter/risk/layers. **Not scored:** docs (`.md`, `docs/`, … — still listed for map). **LOC:** comment-only `+/-` lines stripped (e.g. `//`, `/* */`, `#`, `--`, `<!-- -->`). Noise globs still fully excluded.
+
 ### plan-confirm / plan-write
 
 `plan-confirm` asks (TTY ↑/↓ menus + confirms): model, security, performance, error-handling, reviewers, evangelists, **spawn_mode** (`team` default | `isolated`) — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or no agents/specialists.
