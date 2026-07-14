@@ -75,9 +75,10 @@ const MAX_COV_FILES: usize = 20;
 
 use crate::forge::context::TestHarnessHints;
 
-/// Build the gate plan. Config commands win verbatim; otherwise derive from the
-/// sniffed harness.
+/// Build the gate plan. Config commands win verbatim; otherwise derive tests,
+/// e2e, lint/build and coverage from the sniffed harness + project files.
 pub fn build_verify_plan(
+    cwd: &Path,
     cfg_commands: &[String],
     harness: &TestHarnessHints,
     e2e: bool,
@@ -121,6 +122,8 @@ pub fn build_verify_plan(
         }
     }
 
+    commands.extend(derive_lint_build(cwd));
+
     let cov_probe = if coverage {
         harness
             .unit_framework
@@ -154,6 +157,58 @@ fn e2e_command(framework: &str) -> Option<&'static str> {
         "playwright" => Some("npx playwright test --reporter=json"),
         "cypress" => Some("npx cypress run"),
         _ => None,
+    }
+}
+
+/// Lint / typecheck / build commands derived from project files. `framework:
+/// None` → failures land in `raw_tail` (lint tools already print `file:line`).
+fn derive_lint_build(cwd: &Path) -> Vec<VerifyCmd> {
+    let mut cmds = Vec::new();
+    let vc = |c: &str| VerifyCmd {
+        command: c.to_string(),
+        framework: None,
+    };
+
+    if cwd.join("Cargo.toml").exists() {
+        cmds.push(vc("cargo clippy --all-targets"));
+    }
+
+    match read_npm_scripts(cwd) {
+        Some(scripts) => {
+            let pm = detect_pm(cwd);
+            for name in ["typecheck", "lint", "build"] {
+                if scripts.iter().any(|s| s == name) {
+                    cmds.push(vc(&format!("{pm} run {name}")));
+                }
+            }
+            if !scripts.iter().any(|s| s == "typecheck") && cwd.join("tsconfig.json").exists() {
+                cmds.push(vc("npx tsc --noEmit"));
+            }
+        }
+        None => {
+            if cwd.join("tsconfig.json").exists() {
+                cmds.push(vc("npx tsc --noEmit"));
+            }
+        }
+    }
+
+    cmds
+}
+
+fn read_npm_scripts(cwd: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(cwd.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let scripts = v.get("scripts")?.as_object()?;
+    Some(scripts.keys().cloned().collect())
+}
+
+fn detect_pm(cwd: &Path) -> &'static str {
+    if cwd.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if cwd.join("yarn.lock").exists() {
+        "yarn"
+    } else {
+        "npm"
     }
 }
 
@@ -681,10 +736,16 @@ mod tests {
         }
     }
 
+    // Empty dir → no lint/build derivation, keeps command-count assertions exact.
+    fn empty_dir() -> std::path::PathBuf {
+        Path::new("/nonexistent-scrutiny-verify-test").to_path_buf()
+    }
+
     #[test]
     fn config_commands_win_and_disable_coverage() {
         let h = harness(Some("vitest"), None);
         let plan = build_verify_plan(
+            &empty_dir(),
             &["make test".into(), "make lint".into()],
             &h,
             false,
@@ -700,12 +761,13 @@ mod tests {
 
     #[test]
     fn derives_unit_and_gates_e2e() {
+        let d = empty_dir();
         let h = harness(Some("vitest"), Some("playwright"));
-        let no_e2e = build_verify_plan(&[], &h, false, false, 100, 2);
+        let no_e2e = build_verify_plan(&d, &[], &h, false, false, 100, 2);
         assert_eq!(no_e2e.commands.len(), 1);
         assert_eq!(no_e2e.commands[0].command, "npx vitest run --reporter=json");
 
-        let with_e2e = build_verify_plan(&[], &h, true, false, 100, 2);
+        let with_e2e = build_verify_plan(&d, &[], &h, true, false, 100, 2);
         assert_eq!(with_e2e.commands.len(), 2);
         assert_eq!(
             with_e2e.commands[1].command,
@@ -715,11 +777,12 @@ mod tests {
 
     #[test]
     fn coverage_probe_only_when_enabled() {
+        let d = empty_dir();
         let h = harness(Some("pytest"), None);
-        assert!(build_verify_plan(&[], &h, false, false, 100, 2)
+        assert!(build_verify_plan(&d, &[], &h, false, false, 100, 2)
             .coverage
             .is_none());
-        let p = build_verify_plan(&[], &h, false, true, 80, 2).coverage;
+        let p = build_verify_plan(&d, &[], &h, false, true, 80, 2).coverage;
         assert!(p.is_some());
         assert_eq!(p.unwrap().summary_file, "coverage.json");
     }
@@ -727,7 +790,35 @@ mod tests {
     #[test]
     fn unknown_framework_no_commands() {
         let h = harness(Some("mocha"), None);
-        assert!(build_verify_plan(&[], &h, false, true, 100, 2).is_empty());
+        assert!(build_verify_plan(&empty_dir(), &[], &h, false, true, 100, 2).is_empty());
+    }
+
+    #[test]
+    fn derives_lint_build_from_project_files() {
+        let dir = std::env::temp_dir().join(format!("verify-lb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"lint":"eslint .","build":"vite build","test":"vitest"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap();
+
+        let h = harness(None, None);
+        let cmds: Vec<String> = build_verify_plan(&dir, &[], &h, false, false, 100, 2)
+            .commands
+            .into_iter()
+            .map(|c| c.command)
+            .collect();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(cmds.iter().any(|c| c == "cargo clippy --all-targets"));
+        assert!(cmds.iter().any(|c| c == "pnpm run lint"));
+        assert!(cmds.iter().any(|c| c == "pnpm run build"));
+        // no typecheck script but tsconfig present → tsc fallback
+        assert!(cmds.iter().any(|c| c == "npx tsc --noEmit"));
     }
 
     #[test]

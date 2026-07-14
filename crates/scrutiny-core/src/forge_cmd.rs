@@ -202,6 +202,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         run_forge_brief(&ticket_path, Some(&session_path), Some(&context_path))?;
 
     let verify_plan = build_verify_plan(
+        &cwd,
         &cfg.forge.verify_commands,
         &ctx.test_harness,
         session.e2e,

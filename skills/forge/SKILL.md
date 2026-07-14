@@ -246,8 +246,9 @@ Spawn `agents` developers — production code to pass tests; **do not** weaken t
 decides "done". Do NOT re-implement this in the IDE chain.
 
 - Commands: `[forge].verify_commands` if set, else auto-derived from sniffed
-  harness (`vitest`→`npx vitest run --reporter=json`, `cargo-test`→`cargo test`, …;
-  e2e cmds only when `session.e2e`).
+  harness + project files: tests (`vitest`→`npx vitest run --reporter=json`,
+  `cargo-test`→`cargo test`, …; e2e only when `session.e2e`) **plus lint/build**
+  (`cargo clippy`; `<pm> run lint|typecheck|build` from package.json; `tsc --noEmit`).
 - Coverage: gated when `[forge].verify_coverage` and measurable (per-framework
   json summary); unmeasurable → warn, never block.
 - Loop: on red, host spawns `forge-verify-fix` with a **surgical** payload —
