@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::config::Config;
@@ -65,7 +65,12 @@ fn which(name: &str) -> Result<PathBuf> {
 }
 
 fn version_ok(bin: &PathBuf) -> bool {
-    let mut child = match Command::new(bin).arg("--version").spawn() {
+    let mut child = match Command::new(bin)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
         Ok(c) => c,
         Err(_) => return false,
     };

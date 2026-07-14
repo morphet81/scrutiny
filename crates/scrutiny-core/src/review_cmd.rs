@@ -4,10 +4,11 @@ use anyhow::{bail, Context, Result};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::agent_runner::{
     build_ask_prompt, run_headless, run_isolated_review, run_team_review,
-    session_records_from_report, HeadlessKind,
+    session_records_from_report, HeadlessKind, AGENT_WALL_SECS,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
@@ -269,14 +270,25 @@ fn concern_loop(
             pack_path.display()
         );
         let prompt = build_ask_prompt(&context, q);
-        let (stdout, stderr, code) =
-            run_headless(client, model, cwd, &prompt, HeadlessKind::Ask)?;
-        if code != 0 {
-            eprintln!("ask agent failed: {stderr}");
+        let out = run_headless(
+            client,
+            model,
+            cwd,
+            &prompt,
+            HeadlessKind::Ask,
+            &format!("ask-{id}"),
+            Duration::from_secs(AGENT_WALL_SECS),
+        )?;
+        if out.code != 0 && !out.timed_out {
+            eprintln!("ask agent failed: {}", out.stderr);
             continue;
         }
         // Prefer printable result
-        let answer = extract_text_answer(&stdout);
+        let answer = extract_text_answer(&out.stdout);
+        if answer.trim().is_empty() {
+            eprintln!("ask agent empty answer: {}", out.stderr);
+            continue;
+        }
         eprintln!("\n--- answer ---\n{answer}\n--------------");
 
         if report.pr_number.is_some() {

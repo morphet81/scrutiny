@@ -90,13 +90,25 @@ pub const FINDINGS_JSON_SCHEMA: &str = r#"{
   "required": ["findings"]
 }"#;
 
+pub const AGENT_WALL_SECS: u64 = 10 * 60;
+pub const PROGRESS_SECS: u64 = 15;
+
+pub struct HeadlessOutcome {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: i32,
+    pub timed_out: bool,
+}
+
 pub fn run_headless(
     client: &DetectedClient,
     model: &str,
     cwd: &Path,
     prompt: &str,
     kind: HeadlessKind,
-) -> Result<(String, String, i32)> {
+    label: &str,
+    wall: Duration,
+) -> Result<HeadlessOutcome> {
     let prompt_path = temp_artifact_path("scrutiny", "agent", "prompt");
     {
         let mut f = fs::File::create(&prompt_path)?;
@@ -104,7 +116,9 @@ pub fn run_headless(
     }
 
     let mut cmd = Command::new(&client.binary);
+    // Null stdin: Claude -p otherwise waits ~3s for piped input.
     cmd.current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -127,11 +141,23 @@ pub fn run_headless(
             cmd.arg(prompt);
         }
         "claude" => {
+            // --bare skips OAuth/keychain (needs ANTHROPIC_API_KEY). Default: use login session.
+            // SCRUTINY_CLAUDE_BARE=1 force bare; SCRUTINY_CLAUDE_NO_BARE=1 force OAuth even with API key.
+            let use_bare = if std::env::var_os("SCRUTINY_CLAUDE_BARE").is_some() {
+                true
+            } else if std::env::var_os("SCRUTINY_CLAUDE_NO_BARE").is_some() {
+                false
+            } else {
+                std::env::var_os("ANTHROPIC_API_KEY").is_some()
+            };
+
             cmd.arg("-p").arg("--output-format").arg("json");
+            if use_bare {
+                cmd.arg("--bare");
+            }
             match kind {
                 HeadlessKind::Isolated | HeadlessKind::Ask => {
-                    cmd.arg("--bare")
-                        .arg("--allowedTools")
+                    cmd.arg("--allowedTools")
                         .arg("Read")
                         .arg("--json-schema")
                         .arg(FINDINGS_JSON_SCHEMA);
@@ -153,18 +179,109 @@ pub fn run_headless(
     }
 
     eprintln!(
-        "scrutiny: running {} ({}) kind={kind:?}",
+        "scrutiny: start {label} via {} ({}) mode={kind:?}",
         client.client,
         client.binary.display()
     );
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("spawn {}", client.binary.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let code = output.status.code().unwrap_or(1);
-    Ok((stdout, stderr, code))
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_h = thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut r) = stdout_pipe {
+            let _ = std::io::Read::read_to_string(&mut r, &mut buf);
+        }
+        buf
+    });
+    let stderr_h = thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut r) = stderr_pipe {
+            let _ = std::io::Read::read_to_string(&mut r, &mut buf);
+        }
+        buf
+    });
+
+    let started = std::time::Instant::now();
+    let mut timed_out = false;
+    let mut last_tick = started;
+    let code = loop {
+        match child.try_wait().context("wait agent child")? {
+            Some(status) => break status.code().unwrap_or(1),
+            None => {
+                if started.elapsed() >= wall {
+                    eprintln!(
+                        "scrutiny: timeout {label} after {}s — killing",
+                        wall.as_secs()
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break 124; // conventional timeout exit
+                }
+                if last_tick.elapsed() >= Duration::from_secs(PROGRESS_SECS) {
+                    eprintln!(
+                        "scrutiny: still running {label} ({}s)",
+                        started.elapsed().as_secs()
+                    );
+                    last_tick = std::time::Instant::now();
+                }
+                thread::sleep(Duration::from_millis(400));
+            }
+        }
+    };
+
+    let stdout = stdout_h.join().unwrap_or_default();
+    let mut stderr = stderr_h.join().unwrap_or_default();
+
+    // Claude puts auth/API failures in stdout JSON (is_error), often with empty stderr.
+    if let Some(msg) = claude_error_message(&stdout) {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str(&msg);
+    }
+    if timed_out {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str(&format!(
+            "timed out after {}s — killed; parsing partial stdout if any",
+            wall.as_secs()
+        ));
+    }
+
+    if timed_out {
+        eprintln!("scrutiny: done {label} (TIMEOUT)");
+    } else if code == 0 {
+        eprintln!("scrutiny: done {label} (ok)");
+    } else {
+        eprintln!("scrutiny: done {label} (exit {code})");
+    }
+
+    Ok(HeadlessOutcome {
+        stdout,
+        stderr,
+        code,
+        timed_out,
+    })
+}
+
+/// Extract human-readable error from Claude `--output-format json` envelope.
+fn claude_error_message(stdout: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(stdout.trim()).ok()?;
+    let is_error = v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false);
+    if !is_error {
+        return None;
+    }
+    let result = v
+        .get("result")
+        .and_then(|x| x.as_str())
+        .unwrap_or("claude reported is_error");
+    Some(format!("claude: {result}"))
 }
 
 pub fn parse_findings_json(raw: &str, role: &str) -> Result<Vec<AgentFinding>> {
@@ -399,8 +516,28 @@ pub fn run_isolated_review(
         bail!("isolated mode: no agents to spawn (reviewers/evangelists/specialists all off)");
     }
 
+    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let pending: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(
+            jobs.iter()
+                .map(|(r, i, _)| format!("{r}#{i}"))
+                .collect(),
+        ));
+
+    eprintln!(
+        "scrutiny: spawning {} isolated agents (wall {}m): {}",
+        jobs.len(),
+        wall.as_secs() / 60,
+        pending
+            .lock()
+            .map(|p| p.join(", "))
+            .unwrap_or_default()
+    );
+
     let (tx, rx) = mpsc::channel();
     let job_count = jobs.len();
+    let batch_start = std::time::Instant::now();
+
     for (role, index, paths) in jobs {
         let tx = tx.clone();
         let client = client.clone();
@@ -408,27 +545,44 @@ pub fn run_isolated_review(
         let pack = pack_path.to_path_buf();
         let cwd = cwd.to_path_buf();
         let plan_c = plan.clone();
+        let pending = pending.clone();
+        let label = format!("{role}#{index}");
+        let label_done = label.clone();
         thread::spawn(move || {
             let prompt = build_isolated_prompt(&role, &pack, &paths, &plan_c);
+            let path_note = if paths.is_empty() {
+                "entire pack".into()
+            } else {
+                format!("{} paths", paths.len())
+            };
+            eprintln!("scrutiny: agent {label} focus={path_note}");
             let result = match run_headless(
                 &client,
                 &model,
                 &cwd,
                 &prompt,
                 HeadlessKind::Isolated,
+                &label,
+                wall,
             ) {
-                Ok((stdout, stderr, code)) => {
-                    let findings = if code == 0 {
-                        parse_findings_json(&stdout, &role).unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
+                Ok(out) => {
+                    let auth_err = claude_error_message(&out.stdout);
+                    let findings = parse_findings_json(&out.stdout, &role).unwrap_or_default();
+                    let ok = (out.code == 0 && auth_err.is_none()) || !findings.is_empty();
+                    let mut stderr = out.stderr;
+                    if let Some(a) = auth_err {
+                        if stderr.is_empty() {
+                            stderr = a;
+                        } else {
+                            stderr = format!("{stderr}\n{a}");
+                        }
+                    }
                     AgentRunResult {
                         role,
                         index,
                         paths,
                         findings,
-                        ok: code == 0,
+                        ok,
                         stderr,
                     }
                 }
@@ -441,25 +595,62 @@ pub fn run_isolated_review(
                     stderr: format!("{e:#}"),
                 },
             };
+            if let Ok(mut p) = pending.lock() {
+                p.retain(|x| x != &label_done);
+            }
             let _ = tx.send(result);
         });
     }
     drop(tx);
 
     let mut agents = Vec::with_capacity(job_count);
-    let deadline = std::time::Instant::now() + Duration::from_secs(60 * 45);
+    let mut last_progress = batch_start;
     while agents.len() < job_count {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            bail!("isolated review timed out waiting for agents");
-        }
-        match rx.recv_timeout(remaining) {
-            Ok(r) => agents.push(r),
+        let remaining_wall = wall.saturating_sub(batch_start.elapsed());
+        // Keep waiting a bit past wall so kill threads can flush/send.
+        let grace = Duration::from_secs(30);
+        let wait = remaining_wall
+            .checked_add(grace)
+            .unwrap_or(grace)
+            .max(Duration::from_secs(1));
+        match rx.recv_timeout(Duration::from_secs(PROGRESS_SECS).min(wait)) {
+            Ok(r) => {
+                let n = r.findings.len();
+                eprintln!(
+                    "scrutiny: collected {}#{} findings={n} ok={}",
+                    r.role, r.index, r.ok
+                );
+                agents.push(r);
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                bail!("isolated review timed out waiting for agents");
+                if last_progress.elapsed() >= Duration::from_secs(PROGRESS_SECS) {
+                    let still = pending
+                        .lock()
+                        .map(|p| p.join(", "))
+                        .unwrap_or_else(|_| "?".into());
+                    eprintln!(
+                        "scrutiny: in progress {}s — waiting: {}",
+                        batch_start.elapsed().as_secs(),
+                        if still.is_empty() {
+                            "(flushing…)".into()
+                        } else {
+                            still
+                        }
+                    );
+                    last_progress = std::time::Instant::now();
+                }
+                if batch_start.elapsed() > wall + grace {
+                    eprintln!("scrutiny: batch wall exceeded — using {} finished agents", agents.len());
+                    break;
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+
+    // Drain any late arrivals briefly
+    while let Ok(r) = rx.try_recv() {
+        agents.push(r);
     }
 
     for a in &agents {
@@ -471,6 +662,29 @@ pub fn run_isolated_review(
                 a.stderr.lines().next().unwrap_or("(no stderr)")
             );
         }
+    }
+
+    if agents.is_empty() {
+        bail!("isolated review: no agent results (all stuck/killed with no output)");
+    }
+
+    if agents.iter().all(|a| !a.ok && a.findings.is_empty()) {
+        let sample = agents
+            .iter()
+            .find_map(|a| {
+                let s = a.stderr.trim();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            })
+            .unwrap_or_else(|| "all headless agents failed with empty stderr".into());
+        bail!(
+            "isolated review: every agent failed. First error: {sample}\n\
+             Hint (claude): run `claude` once and /login, or set ANTHROPIC_API_KEY. \
+             Do not use SCRUTINY_CLAUDE_BARE without an API key."
+        );
     }
 
     let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum();
@@ -497,19 +711,34 @@ pub fn run_team_review(
     cwd: &Path,
 ) -> Result<(ReviewReport, PathBuf)> {
     let prompt = build_team_lead_prompt(pack_path, plan);
-    let (stdout, stderr, code) =
-        run_headless(client, &plan.model, cwd, &prompt, HeadlessKind::TeamLead)?;
-    if code != 0 {
-        bail!("team lead agent failed (exit {code}): {stderr}");
+    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let out = run_headless(
+        client,
+        &plan.model,
+        cwd,
+        &prompt,
+        HeadlessKind::TeamLead,
+        "lead#1",
+        wall,
+    )?;
+    if out.code != 0 && !out.timed_out {
+        bail!("team lead agent failed (exit {}): {}", out.code, out.stderr);
     }
-    let findings = parse_findings_json(&stdout, "lead")?;
+    let findings = parse_findings_json(&out.stdout, "lead").unwrap_or_default();
+    if findings.is_empty() && out.code != 0 {
+        bail!(
+            "team lead produced no findings (exit {}): {}",
+            out.code,
+            out.stderr
+        );
+    }
     let agent = AgentRunResult {
         role: "lead".into(),
         index: 1,
         paths: Vec::new(),
         findings: findings.clone(),
-        ok: true,
-        stderr,
+        ok: out.code == 0 || !findings.is_empty(),
+        stderr: out.stderr,
     };
     let report = ReviewReport {
         version: 1,
@@ -519,9 +748,9 @@ pub fn run_team_review(
         agents: vec![agent],
         deduped_from: 0,
     };
-    let out = temp_artifact_path(&plan.client, "review", "report");
-    write_json_pretty(&out, &report)?;
-    Ok((report, out))
+    let out_path = temp_artifact_path(&plan.client, "review", "report");
+    write_json_pretty(&out_path, &report)?;
+    Ok((report, out_path))
 }
 
 pub fn session_records_from_report(report: &ReviewReport) -> Vec<ReviewAgentRecord> {
@@ -591,6 +820,13 @@ fn normalize_title(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_error_from_stdout() {
+        let raw = r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
+        let msg = claude_error_message(raw).unwrap();
+        assert!(msg.contains("Not logged in"));
+    }
 
     #[test]
     fn dedupe_nearby() {

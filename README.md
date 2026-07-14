@@ -87,6 +87,8 @@ bash scripts/ensure-bin.sh
 
 Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **isolated** parallel headless agents (default) or **team** lead → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
 
+Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny review` does **not** pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth even with a key: `SCRUTINY_CLAUDE_NO_BARE=1`.
+
 Config (`~/.scrutiny/config.toml`):
 
 ```toml
