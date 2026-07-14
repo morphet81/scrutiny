@@ -460,6 +460,8 @@ mod tests {
         }"#;
         fs::write(&eval_path, eval).unwrap();
 
+        let _ = crate::paths::init_artifact_ctx(dir.path(), "local");
+
         let answers_json = r#"{
             "client": "claude",
             "model": "opus",

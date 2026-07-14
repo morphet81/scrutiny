@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
-    load_plan_answers, partition_pack_paths, run_agent_prompt, run_eval, run_findings_init,
-    run_findings_resolve, run_findings_triage, run_findings_validate, run_forge_brief,
-    run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_plan_confirm,
-    run_plan_write, run_post_comments, run_review, run_review_session_write, run_scan,
-    run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeFetchInput,
+    load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_eval,
+    run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate,
+    run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack,
+    run_plan_confirm, run_plan_write, run_post_comments, run_review, run_review_session_write,
+    run_scan, run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeFetchInput,
     ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput, ReviewCmdInput,
     ReviewSessionWriteInput, SkillsInstallInput,
 };
@@ -39,6 +39,9 @@ enum Commands {
         /// AI client key for suggested plan (cursor|claude|codex)
         #[arg(long)]
         client: Option<String>,
+        /// PR number/URL → artifacts under `.scrutiny/<pr>/` (else `local` or infer)
+        #[arg(long)]
+        pr: Option<String>,
     },
     /// Build change map from an eval JSON; write map JSON; print path
     Map {
@@ -195,7 +198,8 @@ enum Commands {
         findings: PathBuf,
         #[arg(long)]
         cwd: Option<PathBuf>,
-    },    /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
+    },
+    /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -327,8 +331,10 @@ fn run() -> Result<()> {
             base,
             head,
             client,
+            pr,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, pr.as_deref(), &[])?;
             let (_report, path) = run_eval(EvalInput {
                 cwd,
                 head,
@@ -339,11 +345,13 @@ fn run() -> Result<()> {
         }
         Commands::Map { eval, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[&eval])?;
             let (_report, path) = run_map(&eval, &cwd)?;
             println!("{}", path.display());
         }
         Commands::Pack { map, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[&map])?;
             let (_report, path) = run_pack(&map, &cwd)?;
             println!("{}", path.display());
         }
@@ -354,6 +362,14 @@ fn run() -> Result<()> {
             cwd,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let mut hints: Vec<&std::path::Path> = vec![map.as_path()];
+            if let Some(p) = &pack {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &eval {
+                hints.push(p.as_path());
+            }
+            prepare_artifacts(&cwd, None, &hints)?;
             let (_report, path) = run_scan(&map, pack.as_deref(), eval.as_deref(), &cwd)?;
             println!("{}", path.display());
         }
@@ -363,6 +379,8 @@ fn run() -> Result<()> {
             spawn_mode,
             from_json,
         } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            prepare_artifacts(&cwd, None, &[eval.as_path()])?;
             let (_answers, path) = run_plan_confirm(PlanConfirmInput {
                 eval_path: eval,
                 client,
@@ -387,6 +405,21 @@ fn run() -> Result<()> {
             answers,
             from_json,
         } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let mut hints = vec![eval.as_path()];
+            if let Some(p) = &map {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &pack {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &scan {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &answers {
+                hints.push(p.as_path());
+            }
+            prepare_artifacts(&cwd, None, &hints)?;
             let mut input = resolve_plan_write_input(
                 eval,
                 map,
@@ -452,6 +485,7 @@ fn run() -> Result<()> {
             cwd,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[])?;
             run_skills_install(SkillsInstallInput {
                 cwd,
                 global,
@@ -462,6 +496,8 @@ fn run() -> Result<()> {
             })?;
         }
         Commands::PackPartition { pack, reviewers } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            prepare_artifacts(&cwd, None, &[pack.as_path()])?;
             let buckets = partition_pack_paths(&pack, reviewers)?;
             println!("{}", serde_json::to_string(&buckets)?);
         }
@@ -471,6 +507,12 @@ fn run() -> Result<()> {
             plan,
             paths,
         } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let mut hints = vec![pack.as_path()];
+            if let Some(p) = &plan {
+                hints.push(p.as_path());
+            }
+            prepare_artifacts(&cwd, None, &hints)?;
             let paths: Vec<String> = paths
                 .map(|s| {
                     s.split(',')
@@ -492,6 +534,12 @@ fn run() -> Result<()> {
             pack,
             from_json,
         } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let mut hints = vec![plan.as_path()];
+            if let Some(p) = &pack {
+                hints.push(p.as_path());
+            }
+            prepare_artifacts(&cwd, None, &hints)?;
             let (_session, path) = run_review_session_write(ReviewSessionWriteInput {
                 plan_path: plan,
                 pack_path: pack,
@@ -501,6 +549,9 @@ fn run() -> Result<()> {
         }
         Commands::FindingsTriage { findings, cwd } => {
             let cwd = cwd.or_else(|| std::env::current_dir().ok());
+            if let Some(ref c) = cwd {
+                prepare_artifacts(c, None, &[findings.as_path()])?;
+            }
             let (_r, path) = run_findings_triage(&findings, cwd.as_deref(), None)?;
             println!("{}", path.display());
         }
@@ -514,6 +565,7 @@ fn run() -> Result<()> {
             title,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[])?;
             let input = input.or_else(|| {
                 if rest.is_empty() {
                     None
@@ -544,6 +596,10 @@ fn run() -> Result<()> {
             cwd,
             from_json,
         } => {
+            let cwd_path = cwd
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd_path, None, &[ticket.as_path()])?;
             let input = if let Some(raw) = from_json {
                 let mut v: ForgePlanWriteInput =
                     serde_json::from_str(&raw).context("parse --from-json for forge-plan-write")?;
@@ -570,6 +626,7 @@ fn run() -> Result<()> {
         }
         Commands::ForgeContext { ticket, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[ticket.as_path()])?;
             let (_report, path) = run_forge_context(&ticket, &cwd)?;
             println!("{}", path.display());
         }
@@ -578,6 +635,15 @@ fn run() -> Result<()> {
             session,
             context,
         } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            let mut hints = vec![ticket.as_path()];
+            if let Some(p) = &session {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &context {
+                hints.push(p.as_path());
+            }
+            prepare_artifacts(&cwd, None, &hints)?;
             let (_report, path) =
                 run_forge_brief(&ticket, session.as_deref(), context.as_deref())?;
             println!("{}", path.display());
@@ -591,6 +657,17 @@ fn run() -> Result<()> {
             pr,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let mut hints = vec![scan.as_path()];
+            if let Some(p) = &eval {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &pack {
+                hints.push(p.as_path());
+            }
+            if let Some(p) = &plan {
+                hints.push(p.as_path());
+            }
+            prepare_artifacts(&cwd, pr.as_deref(), &hints)?;
             let (_report, path) = run_findings_init(FindingsInitInput {
                 cwd,
                 scan_path: scan,
@@ -607,10 +684,13 @@ fn run() -> Result<()> {
             strict,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[findings.as_path()])?;
             let (_report, path) = run_findings_resolve(&findings, &cwd, strict)?;
             println!("{}", path.display());
         }
         Commands::FindingsValidate { findings } => {
+            let cwd = std::env::current_dir().expect("cwd");
+            prepare_artifacts(&cwd, None, &[findings.as_path()])?;
             let (_report, path) = run_findings_validate(&findings)?;
             println!("{}", path.display());
         }
@@ -621,6 +701,7 @@ fn run() -> Result<()> {
             event,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[findings.as_path()])?;
             let (_result, path) = run_post_comments(PostCommentsInput {
                 findings_path: findings,
                 cwd,

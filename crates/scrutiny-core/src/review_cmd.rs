@@ -50,6 +50,15 @@ pub struct ReportResumeInput {
 }
 
 pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
+    let cwd = input.cwd.clone();
+    let hints: Vec<&Path> = input
+        .from_report
+        .as_deref()
+        .into_iter()
+        .chain(input.scan_path.as_deref())
+        .collect();
+    crate::paths::prepare_artifacts(&cwd, input.pr.as_deref(), &hints)?;
+
     if let Some(report_path) = input.from_report.clone() {
         return run_review_from_report(ReportResumeInput {
             report_path,
@@ -62,7 +71,6 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         });
     }
 
-    let cwd = input.cwd.clone();
     let shipped = find_shipped_default(
         &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
     );
@@ -84,6 +92,11 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
     )?;
 
     let (base, head, pr_for_init) = resolve_pr_refs(&cwd, input.pr.as_deref())?;
+    if let Some(ref prn) = pr_for_init {
+        if let Some(n) = crate::paths::parse_pr_number(prn) {
+            crate::paths::init_artifact_ctx(&cwd, &n.to_string())?;
+        }
+    }
 
     eprintln!("scrutiny review: eval…");
     let (eval, eval_path) = run_eval(EvalInput {
@@ -227,6 +240,11 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
 
     let (_base, _head, pr_for_init) = resolve_pr_refs(&cwd, input.pr.as_deref())?;
     let pr_arg = pr_for_init.or(input.pr.clone());
+    if let Some(ref prn) = pr_arg {
+        if let Some(n) = crate::paths::parse_pr_number(prn) {
+            crate::paths::init_artifact_ctx(&cwd, &n.to_string())?;
+        }
+    }
 
     let findings_path = if let Some(scan_path) = &input.scan_path {
         eprintln!(

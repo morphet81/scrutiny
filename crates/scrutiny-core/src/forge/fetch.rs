@@ -86,6 +86,10 @@ pub fn run_forge_fetch(input: ForgeFetchInput) -> Result<(TicketReport, PathBuf)
     report.suggested_forge = suggested;
     report.figma_urls = extract_figma_urls(&report);
 
+    let _ = crate::paths::init_artifact_ctx(
+        &input.cwd,
+        &crate::paths::session_name(None, Some(&report.id)),
+    );
     let path = temp_artifact_path("forge", &slug_id(&report.id), "ticket");
     write_json_pretty(&path, &report)?;
     Ok((report, path))

@@ -33,7 +33,9 @@ pub use forge::{
 };
 pub use map::{run_map, MapReport};
 pub use pack::{run_pack, PackReport};
-pub use paths::temp_artifact_path;
+pub use paths::{
+    prepare_artifacts, temp_artifact_path, warn_if_scrutiny_unignored, init_artifact_ctx,
+};
 pub use plan::{
     load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
     PlanConfirmInput, PlanWriteInput,

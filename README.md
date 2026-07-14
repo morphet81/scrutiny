@@ -84,10 +84,12 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny review --client claude --spawn-mode isolated
 ./target/release/scrutiny review --from-json '{"client":"claude","model":"sonnet","security":true,"performance":false,"error_handling":true,"reviewers":1,"evangelists":0,"spawn_mode":"isolated"}' --yes
 # resume triage/post from an existing AI review-report.json (skip eval/agents):
-./target/release/scrutiny review --from-report /tmp/…-report.json [--pr 42] [--scan /tmp/…-scan.json]
+./target/release/scrutiny review --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutiny/42/scan.json]
 ```
 
 Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **team** lead (default) or **isolated** parallel headless agents → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
+
+Artifacts live under **`<repo>/.scrutiny/<pr>/`** (or `.scrutiny/local/` without a PR): `eval.json`, `map.json`, `pack.json`, `scan.json`, `plan.json`, `findings.json`, `report.json`, …. Config stays in `~/.scrutiny/config.toml`. Each CLI run warns if `.scrutiny/` is missing from `.gitignore`.
 
 `--from-report` skips analyze/agents: loads the AI report’s `findings`, inits a findings shell (from `--scan` if given, else empty), merges AI findings, then triage → post.
 
@@ -104,23 +106,25 @@ Config (`~/.scrutiny/config.toml`):
 
 ```bash
 ./target/release/scrutiny eval
-./target/release/scrutiny eval --base main --head abcdef0 --client claude
-./target/release/scrutiny map --eval /tmp/scrutiny-…-eval.json
-./target/release/scrutiny pack --map /tmp/scrutiny-…-map.json
-./target/release/scrutiny scan --map … --pack … --eval …
+./target/release/scrutiny eval --base main --head abcdef0 --client claude --pr 42
+./target/release/scrutiny map --eval .scrutiny/42/eval.json
+./target/release/scrutiny pack --map .scrutiny/42/map.json
+./target/release/scrutiny scan --map .scrutiny/42/map.json --pack .scrutiny/42/pack.json --eval .scrutiny/42/eval.json
 # interactive: knobs in one session (or --from-json for CI)
-./target/release/scrutiny plan-confirm --eval …
-./target/release/scrutiny plan-write --eval … --map … --pack … --scan … \
-  --answers /tmp/…-plan-answers.json
+./target/release/scrutiny plan-confirm --eval .scrutiny/42/eval.json
+./target/release/scrutiny plan-write --eval .scrutiny/42/eval.json --map .scrutiny/42/map.json \
+  --pack .scrutiny/42/pack.json --scan .scrutiny/42/scan.json \
+  --answers .scrutiny/42/plan-answers.json
 # after spawning reviewers/evangelists:
-./target/release/scrutiny pack-partition --pack … --reviewers 2
-./target/release/scrutiny review-session-write --plan … --pack … \
+./target/release/scrutiny pack-partition --pack .scrutiny/42/pack.json --reviewers 2
+./target/release/scrutiny review-session-write --plan .scrutiny/42/plan.json --pack .scrutiny/42/pack.json \
   --from-json '[{"role":"reviewer","index":1,"paths":["a.rs"],"findings_count":2}]'
-./target/release/scrutiny findings-init --scan … --eval … --pack … --plan … [--pr 42]
-./target/release/scrutiny findings-triage --findings …
-./target/release/scrutiny findings-resolve --findings …
-./target/release/scrutiny findings-validate --findings …
-./target/release/scrutiny post-comments --findings …
+./target/release/scrutiny findings-init --scan .scrutiny/42/scan.json --eval .scrutiny/42/eval.json \
+  --pack .scrutiny/42/pack.json --plan .scrutiny/42/plan.json --pr 42
+./target/release/scrutiny findings-triage --findings .scrutiny/42/findings.json
+./target/release/scrutiny findings-resolve --findings .scrutiny/42/findings.json
+./target/release/scrutiny findings-validate --findings .scrutiny/42/findings.json
+./target/release/scrutiny post-comments --findings .scrutiny/42/findings.json
 ```
 
 ### eval complexity
@@ -139,8 +143,8 @@ Config (`~/.scrutiny/config.toml`):
 Print a role or lead prompt for skill/debug:
 
 ```bash
-./target/release/scrutiny agent-prompt --role reviewer --pack /tmp/…-pack.json [--plan /tmp/…-plan.json] [--paths a.rs,b.rs]
-./target/release/scrutiny agent-prompt --role lead --pack /tmp/…-pack.json --plan /tmp/…-plan.json
+./target/release/scrutiny agent-prompt --role reviewer --pack .scrutiny/42/pack.json [--plan .scrutiny/42/plan.json] [--paths a.rs,b.rs]
+./target/release/scrutiny agent-prompt --role lead --pack .scrutiny/42/pack.json --plan .scrutiny/42/plan.json
 ```
 
 ### Review session

@@ -47,7 +47,7 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 - Env: `SCRUTINY_GITHUB_REPO` (default `morphet81/scrutiny`). Optional `SCRUTINY_VERSION` to pin. `SCRUTINY_USE_LOCAL=1` → local target/release.
 - Install skills: `"$SCRUTINY_BIN" skills-install -g -y` (wraps `npx skills add`)
 
-Config: `~/.scrutiny/config.toml` (created on first run from shipped `config/default.toml`).
+Config: `~/.scrutiny/config.toml` (user settings). **Artifacts:** `<repo>/.scrutiny/<pr>/` (or `local/`) — eval/map/pack/scan/plan/findings/report JSON. Never `/tmp`. Add `.scrutiny/` to the repo `.gitignore` (CLI warns if missing).
 Optional: `force_client`, `force_spawn_mode` (`isolated` | `team`).
 
 Sibling skill: `/forge` (ticket implement) — same binary.
@@ -70,8 +70,8 @@ SKILL_ROOT="<absolute-path-to-folder-containing-this-SKILL.md>"
 SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 ```
 
-**Local:** `"$SCRUTINY_BIN" eval --cwd <repo-root>`  
-**PR:** `"$SCRUTINY_BIN" eval --cwd <repo-root> --base <baseRefName> --head <headRefOid>`
+**Local:** `"$SCRUTINY_BIN" eval --cwd <repo-root>` → `.scrutiny/local/eval.json`  
+**PR:** `"$SCRUTINY_BIN" eval --cwd <repo-root> --base <baseRefName> --head <headRefOid> --pr <n>` → `.scrutiny/<n>/eval.json`
 
 - Prints one path: eval JSON — **show user**
 - Detect client for plan: Cursor → `cursor`, Claude Code → `claude`, Codex → `codex`; else `default_client`. Pass `--client <key>` when known.
