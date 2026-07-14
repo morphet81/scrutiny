@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_eval,
-    run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate,
+    run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate, run_forge,
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack,
     run_plan_confirm, run_plan_write, run_post_comments, run_review, run_review_session_write,
-    run_scan, run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeFetchInput,
-    ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput, ReviewCmdInput,
-    ReviewSessionWriteInput, SkillsInstallInput,
+    run_scan, run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeCmdInput,
+    ForgeFetchInput, ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
+    ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -198,6 +198,31 @@ enum Commands {
         findings: PathBuf,
         #[arg(long)]
         cwd: Option<PathBuf>,
+    },
+    /// Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
+    Forge {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// URL, issue key/number, or description
+        #[arg(long)]
+        input: Option<String>,
+        /// Positional alias for --input
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        inline: bool,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        /// Skip menus; pass ForgeAnswers JSON
+        #[arg(long)]
+        from_json: Option<String>,
+        /// Non-interactive defaults (no TTY menus)
+        #[arg(long, default_value_t = false)]
+        yes: bool,
     },
     /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
@@ -555,6 +580,37 @@ fn run() -> Result<()> {
             let (_r, path) = run_findings_triage(&findings, cwd.as_deref(), None)?;
             println!("{}", path.display());
         }
+        Commands::Forge {
+            cwd,
+            input,
+            rest,
+            inline,
+            source,
+            client,
+            title,
+            from_json,
+            yes,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let input = input.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            let path = run_forge(ForgeCmdInput {
+                cwd,
+                input,
+                inline,
+                source,
+                client,
+                title,
+                from_json,
+                non_interactive: yes,
+            })?;
+            println!("{}", path.display());
+        }
         Commands::ForgeFetch {
             cwd,
             input,
@@ -612,13 +668,19 @@ fn run() -> Result<()> {
                     ticket_path: ticket,
                     client,
                     model,
-                    approach,
+                    approach: approach.clone(),
                     e2e,
                     agents,
                     testers,
                     reviewers,
                     evangelists,
                     cwd,
+                    spawn_mode: "single".into(),
+                    use_playwright: false,
+                    coverage_pct: 100,
+                    tdd: approach.eq_ignore_ascii_case("tdd"),
+                    tdd_plan_path: None,
+                    figma_dir: None,
                 }
             };
             let (_plan, path) = run_forge_plan_write(input)?;

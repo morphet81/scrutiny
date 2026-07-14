@@ -1,18 +1,27 @@
 ---
 name: forge
 description: >-
-  Implement a ticket or description with a multi-agent team. Fetches Jira,
-  GitHub, or GitLab via Rust forge-fetch → tmp JSON; prompts (or config-forces)
-  model, agents, testers, approach (tdd|heads_down|plan), e2e, reviewers,
-  evangelists; PO/designers/TDD/writeback with optional Figma/lore. Reuses
-  scrutiny pack for post-impl review.
+  Implement a ticket or description. Prefer `scrutiny forge` (fetch mirror,
+  fcli, knobs, TDD plan confirm, single|team implement). Or chain forge-fetch /
+  plan-write / context / brief. Reuses scrutiny review for post-impl.
 argument-hint: "[URL | issue-id | --inline description]"
 ---
 
 # Forge
 
-Ticket implement skill. **Scripts (Rust)** fetch ticket, write session plan,
-context pack, brief. Agent judgment starts after artifacts exist.
+**Preferred (script-orchestrated):**
+
+```bash
+SKILL_ROOT="<absolute-path-to-folder-containing-this-SKILL.md>"
+SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
+"$SCRUTINY_BIN" forge [--cwd <repo-root>] [--client <client>] <URL|KEY|#N>
+# or: forge --inline --input "<desc>"
+```
+
+That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,
+mirrors ticket under `.scrutiny/forge-<id>/`, exports Figma via `fcli` when links
+exist, asks spawn (default **single**)|team, playwright (skip if missing), TDD,
+coverage, e2e → optional test-plan confirm → implement agent.
 
 Sibling of `/scrutiny` (same binary, `~/.scrutiny/config.toml`).
 
@@ -38,13 +47,13 @@ Config: `~/.scrutiny/config.toml` → `[forge]` (see shipped `config/default.tom
 
 **Hard token rules**
 
-- Agents read **ticket JSON + session JSON + brief markdown** (and pack after impl). No re-run `acli` / `gh` / `glab`.
+- Agents read **ticket JSON + session JSON + brief markdown** (and pack after impl). No re-run `acli` / `gh` / `glab` / `fcli`.
 - No dump full config into prompts — use `suggested_forge` / session fields.
 - Caveman I/O. Partition workstreams. No full-repo fish when context paths exist.
 
 ---
 
-## Agent workflow (mandatory order)
+## Agent workflow (IDE chaining — only if not using `scrutiny forge`)
 
 ### 0. Parse args
 
@@ -52,6 +61,8 @@ Config: `~/.scrutiny/config.toml` → `[forge]` (see shipped `config/default.tom
 - URL / key / number → remote
 - Empty → ask user for URL or description; STOP until provided
 - Detect client: Cursor → `cursor`, Claude Code → `claude`, Codex → `codex`; else config `default_client`
+
+Prefer jumping to **`$SCRUTINY_BIN forge`** instead of step 1+.
 
 ### 1. ensure-bin → forge-fetch
 

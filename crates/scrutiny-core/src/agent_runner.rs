@@ -25,6 +25,8 @@ pub enum HeadlessKind {
     TeamLead,
     /// Follow-up Q&A.
     Ask,
+    /// Forge implement / test-plan: full tools, no findings JSON schema.
+    Forge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +147,7 @@ pub fn run_headless(
                 HeadlessKind::Isolated | HeadlessKind::Ask => {
                     cmd.arg("--mode").arg("ask");
                 }
-                HeadlessKind::TeamLead => {}
+                HeadlessKind::TeamLead | HeadlessKind::Forge => {}
             }
             cmd.arg(prompt);
         }
@@ -173,6 +175,9 @@ pub fn run_headless(
                 }
                 HeadlessKind::TeamLead => {
                     cmd.arg("--json-schema").arg(FINDINGS_JSON_SCHEMA);
+                }
+                HeadlessKind::Forge => {
+                    // Full tools; no findings schema (ticket implement / test plan).
                 }
             }
             cmd.arg("--model").arg(model).arg(prompt);

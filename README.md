@@ -14,7 +14,7 @@ Reviews a local branch or a GitHub PR. Prefer **`scrutiny review`** for script-o
 
 ### `/forge`
 
-Implements a ticket from Jira, GitHub, GitLab, or an inline description. Scripts fetch and normalize the ticket, write a session plan (approach, team sizes, e2e, post-review counts—forceable in config), and produce a compact context pack plus caveman brief so implementers never re-hit the ticket CLIs. The agent then runs plan, TDD, or heads-down modes with PO/testers/developers as configured, and can reuse the scrutiny pack pipeline for post-implementation review.
+Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent. Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny review`.
 
 ## Install (Homebrew)
 
@@ -92,6 +92,19 @@ Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **team** lead
 Artifacts live under **`<repo>/.scrutiny/<pr>/`** (or `.scrutiny/local/` without a PR): `eval.json`, `map.json`, `pack.json`, `scan.json`, `plan.json`, `findings.json`, `report.json`, …. Config stays in `~/.scrutiny/config.toml`. Each CLI run warns if `.scrutiny/` is missing from `.gitignore`.
 
 `--from-report` skips analyze/agents: loads the AI report’s `findings`, inits a findings shell (from `--scan` if given, else empty), merges AI findings, then triage → post.
+
+### One-shot forge (preferred)
+
+```bash
+./target/release/scrutiny forge PROJ-123
+./target/release/scrutiny forge "https://…/browse/PROJ-123"
+./target/release/scrutiny forge --inline --input "Add dark mode toggle"
+./target/release/scrutiny forge --from-json '{"client":"claude","model":"sonnet","spawn_mode":"single","tdd":true,"e2e":true,"coverage_pct":100}' --yes --input KEY-1
+```
+
+Flow: require source CLI (`acli`/`gh`/`glab`) with install links → ticket mirror under `.scrutiny/forge-<id>/` (attachments, full fields) → if Figma URLs require `fcli` and export screenshots+XML → ask spawn (**single** default|team), playwright (skipped if no `playwright-cli`), TDD, coverage%, e2e → optional TDD test-plan agent + confirm/comment → implement agent (prompt encodes choices).
+
+Install links when missing: [acli](https://developer.atlassian.com/cloud/acli/guides/install-acli/), [fcli](https://github.com/morphet81/figma-cli).
 
 Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny review` does **not** pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth even with a key: `SCRUTINY_CLAUDE_NO_BARE=1`.
 

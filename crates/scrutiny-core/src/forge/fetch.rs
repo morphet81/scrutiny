@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{ensure_config, find_shipped_default, load_config, SuggestedForge};
+use crate::forge::tools::{require_acli, require_gh, require_glab};
 use crate::paths::{temp_artifact_path, write_json_pretty};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +48,9 @@ pub struct TicketReport {
     pub comments: Vec<TicketComment>,
     pub attachments_dir: Option<String>,
     pub figma_urls: Vec<String>,
+    /// Local dir with fcli screenshots + XML (set by forge orchestrator).
+    #[serde(default)]
+    pub figma_dir: Option<String>,
     pub fields: Value,
     pub raw_path: Option<String>,
     pub fetched_at: String,
@@ -258,6 +262,7 @@ fn fetch_inline(body: &str, title: Option<&str>) -> Result<TicketReport> {
         comments: vec![],
         attachments_dir: None,
         figma_urls: vec![],
+        figma_dir: None,
         fields: Value::Object(Default::default()),
         raw_path: None,
         fetched_at: Utc::now().to_rfc3339(),
@@ -300,7 +305,7 @@ fn first_line_title(body: &str) -> String {
 
 fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
     let key = jira_key_from_url_or_raw(raw)?;
-    ensure_cmd("acli")?;
+    require_acli()?;
     let output = Command::new("acli")
         .args(["jira", "workitem", "view", &key, "--fields", "*all", "--json"])
         .current_dir(cwd)
@@ -351,6 +356,7 @@ fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
         comments,
         attachments_dir,
         figma_urls: vec![],
+        figma_dir: None,
         fields: raw_json.get("fields").cloned().unwrap_or(Value::Null),
         raw_path: Some(raw_path.display().to_string()),
         fetched_at: Utc::now().to_rfc3339(),
@@ -476,7 +482,12 @@ fn download_jira_attachments(cwd: &Path, key: &str, raw: &Value) -> Result<Optio
     if attachments.is_empty() {
         return Ok(None);
     }
-    let dir = std::env::temp_dir().join(format!("{key}-attachments"));
+    // Prefer active forge session dir
+    let root = crate::paths::init_artifact_ctx(
+        cwd,
+        &crate::paths::session_name(None, Some(key)),
+    )?;
+    let dir = root.join("attachments");
     fs::create_dir_all(&dir).context("create attachments dir")?;
 
     let token = Command::new("acli")
@@ -519,7 +530,7 @@ fn download_jira_attachments(cwd: &Path, key: &str, raw: &Value) -> Result<Optio
 }
 
 fn fetch_github(cwd: &Path, raw: &str) -> Result<TicketReport> {
-    ensure_cmd("gh")?;
+    require_gh()?;
     let (repo, number) = parse_github_ref(cwd, raw)?;
     let mut args = vec![
         "issue".into(),
@@ -612,6 +623,7 @@ fn fetch_github(cwd: &Path, raw: &str) -> Result<TicketReport> {
         comments,
         attachments_dir: None,
         figma_urls: vec![],
+        figma_dir: None,
         fields: raw_json,
         raw_path: Some(raw_path.display().to_string()),
         fetched_at: Utc::now().to_rfc3339(),
@@ -646,7 +658,7 @@ fn parse_github_ref(cwd: &Path, raw: &str) -> Result<(Option<String>, String)> {
 }
 
 fn fetch_gitlab(cwd: &Path, raw: &str) -> Result<TicketReport> {
-    ensure_cmd("glab")?;
+    require_glab()?;
     let (project, iid) = parse_gitlab_ref(raw)?;
     let mut cmd = Command::new("glab");
     cmd.args(["issue", "view", &iid, "-F", "json"]);
@@ -706,6 +718,7 @@ fn fetch_gitlab(cwd: &Path, raw: &str) -> Result<TicketReport> {
         comments: vec![],
         attachments_dir: None,
         figma_urls: vec![],
+        figma_dir: None,
         fields: raw_json,
         raw_path: Some(raw_path.display().to_string()),
         fetched_at: Utc::now().to_rfc3339(),
@@ -767,27 +780,25 @@ fn extract_figma_urls(report: &TicketReport) -> Vec<String> {
     for c in &report.comments {
         scan(&c.body);
     }
+    scan_value_for_figma(&report.fields, &mut scan);
     urls
 }
 
-fn ensure_cmd(name: &str) -> Result<()> {
-    let status = Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !status {
-        // Windows: where
-        let status = Command::new(name)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !status {
-            bail!("{name} not found on PATH. Install and authenticate it before forge-fetch.");
+fn scan_value_for_figma(v: &Value, scan: &mut dyn FnMut(&str)) {
+    match v {
+        Value::String(s) => scan(s),
+        Value::Array(a) => {
+            for x in a {
+                scan_value_for_figma(x, scan);
+            }
         }
+        Value::Object(m) => {
+            for x in m.values() {
+                scan_value_for_figma(x, scan);
+            }
+        }
+        _ => {}
     }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -25,6 +25,29 @@ pub struct ForgeSessionPlan {
     pub ticket_path: String,
     pub skip_ai_review: bool,
     pub skip_ai_review_reason: Option<String>,
+    /// single (default) | team
+    #[serde(default = "default_spawn_single")]
+    pub spawn_mode: String,
+    #[serde(default)]
+    pub use_playwright: bool,
+    #[serde(default = "default_coverage")]
+    pub coverage_pct: u32,
+    #[serde(default = "default_true")]
+    pub tdd: bool,
+    #[serde(default)]
+    pub tdd_plan_path: Option<String>,
+    #[serde(default)]
+    pub figma_dir: Option<String>,
+}
+
+fn default_spawn_single() -> String {
+    "single".into()
+}
+fn default_coverage() -> u32 {
+    100
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +62,18 @@ pub struct ForgePlanWriteInput {
     pub reviewers: u32,
     pub evangelists: u32,
     pub cwd: Option<PathBuf>,
+    #[serde(default = "default_spawn_single")]
+    pub spawn_mode: String,
+    #[serde(default)]
+    pub use_playwright: bool,
+    #[serde(default = "default_coverage")]
+    pub coverage_pct: u32,
+    #[serde(default = "default_true")]
+    pub tdd: bool,
+    #[serde(default)]
+    pub tdd_plan_path: Option<String>,
+    #[serde(default)]
+    pub figma_dir: Option<String>,
 }
 
 pub fn run_forge_plan_write(input: ForgePlanWriteInput) -> Result<(ForgeSessionPlan, PathBuf)> {
@@ -55,28 +90,33 @@ pub fn run_forge_plan_write(input: ForgePlanWriteInput) -> Result<(ForgeSessionP
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
-    // Prefer explicit flags; fall back to config feature toggles
     let enable_figma = cfg.forge.enable_figma;
     let enable_lore = cfg.forge.enable_lore;
     let enable_ticket_writeback = cfg.forge.enable_ticket_writeback;
     let enable_po = cfg.forge.enable_po;
 
-    let approach = normalize_approach(&input.approach)?;
+    let approach = if input.tdd {
+        "tdd".into()
+    } else {
+        "heads_down".into()
+    };
+
     let mut reviewers = input.reviewers;
     let mut evangelists = input.evangelists;
-    let (skip_ai_review, skip_ai_review_reason) =
-        if reviewers == 0 && evangelists == 0 {
-            (
-                true,
-                Some("reviewers=evangelists=0; skip post-impl AI review".into()),
-            )
-        } else {
-            (false, None)
-        };
+    let (skip_ai_review, skip_ai_review_reason) = if reviewers == 0 && evangelists == 0 {
+        (
+            true,
+            Some("reviewers=evangelists=0; skip post-impl AI review".into()),
+        )
+    } else {
+        (false, None)
+    };
     if skip_ai_review {
         reviewers = 0;
         evangelists = 0;
     }
+
+    let spawn_mode = normalize_spawn(&input.spawn_mode)?;
 
     let plan = ForgeSessionPlan {
         version: 1,
@@ -95,20 +135,27 @@ pub fn run_forge_plan_write(input: ForgePlanWriteInput) -> Result<(ForgeSessionP
         ticket_path: input.ticket_path.display().to_string(),
         skip_ai_review,
         skip_ai_review_reason,
+        spawn_mode,
+        use_playwright: input.use_playwright,
+        coverage_pct: input.coverage_pct.min(100),
+        tdd: input.tdd,
+        tdd_plan_path: input.tdd_plan_path,
+        figma_dir: input.figma_dir.or(ticket.figma_dir.clone()),
     };
 
+    let _ = crate::paths::init_artifact_ctx(
+        &cwd,
+        &crate::paths::session_name(None, Some(&ticket.id)),
+    );
     let path = temp_artifact_path("forge", &ticket.id, "session");
     write_json_pretty(&path, &plan)?;
-    // silence unused when ticket only used for id
-    let _ = ticket.title;
     Ok((plan, path))
 }
 
-fn normalize_approach(raw: &str) -> Result<String> {
+fn normalize_spawn(raw: &str) -> Result<String> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "tdd" => Ok("tdd".into()),
-        "heads_down" | "heads-down" | "headless" | "auto" => Ok("heads_down".into()),
-        "plan" | "plan_mode" | "plan-mode" => Ok("plan".into()),
-        other => anyhow::bail!("unknown approach {other} (tdd|heads_down|plan)"),
+        "single" | "solo" | "isolated" => Ok("single".into()),
+        "team" => Ok("team".into()),
+        other => bail!("spawn_mode must be single|team, got {other}"),
     }
 }

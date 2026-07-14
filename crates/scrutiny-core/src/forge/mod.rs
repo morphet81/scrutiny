@@ -3,7 +3,9 @@
 pub mod brief;
 pub mod context;
 pub mod fetch;
+pub mod figma;
 pub mod plan;
+pub mod tools;
 
 pub use brief::run_forge_brief;
 pub use context::run_forge_context;
