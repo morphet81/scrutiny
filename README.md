@@ -87,7 +87,7 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny review --from-report /tmp/…-report.json [--pr 42] [--scan /tmp/…-scan.json]
 ```
 
-Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **isolated** parallel headless agents (default) or **team** lead → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
+Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **team** lead (default) or **isolated** parallel headless agents → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
 
 `--from-report` skips analyze/agents: loads the AI report’s `findings`, inits a findings shell (from `--scan` if given, else empty), merges AI findings, then triage → post.
 
@@ -96,8 +96,8 @@ Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny review` d
 Config (`~/.scrutiny/config.toml`):
 
 ```toml
-# force_client = "claude"       # skip client prompt
-# force_spawn_mode = "isolated" # or "team"
+# force_client = "claude"    # skip client prompt (default_client is already claude)
+# force_spawn_mode = "team"  # or "isolated"
 ```
 
 ### Step-by-step review pipeline
@@ -125,12 +125,12 @@ Config (`~/.scrutiny/config.toml`):
 
 ### plan-confirm / plan-write
 
-`plan-confirm` asks (stdin): model, security, performance, error-handling, reviewers, evangelists, **spawn_mode** (`isolated` default | `team`) — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or no agents/specialists.
+`plan-confirm` asks (TTY ↑/↓ menus + confirms): model, security, performance, error-handling, reviewers, evangelists, **spawn_mode** (`team` default | `isolated`) — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or no agents/specialists.
 
 ### Spawn modes
 
-- **isolated (default):** script runs reviewers + evangelists + analysis specialists in parallel with shared `build_isolated_prompt` templates; script collates and dedupes.
-- **team:** one lead headless agent gets `build_team_lead_prompt`, which **embeds the same isolated role briefs verbatim**. Lead must paste those templates when spawning members (no inventing prompts), wait for all JSON returns, keep higher severity on conflicts, then return one findings JSON.
+- **team (default):** one lead headless agent gets `build_team_lead_prompt`, which **embeds the same isolated role briefs verbatim**. Lead must paste those templates when spawning members (no inventing prompts), wait for all JSON returns, keep higher severity on conflicts, then return one findings JSON.
+- **isolated:** script runs reviewers + evangelists + analysis specialists in parallel with shared `build_isolated_prompt` templates; script collates and dedupes.
 
 Print a role or lead prompt for skill/debug:
 
@@ -147,7 +147,7 @@ Print a role or lead prompt for skill/debug:
 
 After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `suggestion`.
 
-`findings-triage` (and `scrutiny review`) prompts Post/Ignore (or fix options) on stdin (critical first). Type a free-text question instead of a letter to clarify that finding; the agent revises it and the script re-shows **only that finding** before you decide. No ask loop after posting.
+`findings-triage` (and `scrutiny review`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. Agent revises that finding only; menu reappears. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
 
 On a TTY, severity/title use ANSI colors (`NO_COLOR` or non-TTY disables). Each finding shows a short code snippet from `git show <head>:<path>` when a path exists.
 

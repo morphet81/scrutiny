@@ -1,8 +1,8 @@
-default_client = "cursor"
+default_client = "claude"
 # When set, skip client prompt for `scrutiny review` (must be installed on PATH).
 # force_client = "claude"
-# When set, skip spawn-mode prompt: "isolated" (default) | "team"
-# force_spawn_mode = "isolated"
+# When set, skip spawn-mode prompt: "team" (default) | "isolated"
+# force_spawn_mode = "team"
 
 [models.cursor]
 xs = "composer-2-fast"

@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::eval::EvalReport;
@@ -37,12 +37,12 @@ pub struct ConfirmedPlan {
     pub max_reviewers: u32,
     pub spawn_evangelists: bool,
     /// isolated (script parallel) | team (one lead spawns team).
-    #[serde(default = "default_spawn_isolated")]
+    #[serde(default = "default_spawn_team")]
     pub spawn_mode: String,
 }
 
-fn default_spawn_isolated() -> String {
-    "isolated".into()
+fn default_spawn_team() -> String {
+    "team".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,7 +54,7 @@ pub struct PlanWriteInput {
     pub error_handling: bool,
     pub reviewers: u32,
     pub evangelists: u32,
-    #[serde(default = "default_spawn_isolated")]
+    #[serde(default = "default_spawn_team")]
     pub spawn_mode: String,
     pub eval_path: PathBuf,
     pub map_path: Option<PathBuf>,
@@ -72,7 +72,7 @@ pub struct PlanAnswers {
     pub error_handling: bool,
     pub reviewers: u32,
     pub evangelists: u32,
-    #[serde(default = "default_spawn_isolated")]
+    #[serde(default = "default_spawn_team")]
     pub spawn_mode: String,
 }
 
@@ -125,7 +125,9 @@ fn prompt_plan_answers(
     suggested: &crate::config::SuggestedPlan,
     spawn_mode_preset: Option<&str>,
 ) -> Result<PlanAnswers> {
+    use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
     use std::io::IsTerminal;
+
     if !io::stdin().is_terminal() {
         bail!(
             "plan-confirm needs an interactive TTY (or pass --from-json with explicit answers).\n\
@@ -135,7 +137,8 @@ fn prompt_plan_answers(
         );
     }
 
-    eprintln!("scrutiny plan-confirm: answer all knobs in this session (stdin).");
+    let theme = ColorfulTheme::default();
+    eprintln!("scrutiny plan-confirm: ↑/↓ select, Enter confirm.");
     eprintln!("Client: {client}");
     eprintln!();
 
@@ -145,44 +148,72 @@ fn prompt_plan_answers(
         suggested.available_models.clone()
     };
 
-    eprintln!("1) Model (recommended: {})", suggested.model);
-    for (i, m) in models.iter().enumerate() {
-        let mark = if m == &suggested.model {
-            "  <- recommended"
-        } else {
-            ""
-        };
-        eprintln!("   [{}] {m}{mark}", i + 1);
-    }
-    eprint!(
-        "Enter number 1-{} or model id [default {}]: ",
-        models.len(),
-        suggested.model
-    );
-    let _ = io::stderr().flush();
-    let model = read_model_choice(&models, &suggested.model)?;
+    let default_model_idx = models
+        .iter()
+        .position(|m| m == &suggested.model)
+        .unwrap_or(0);
+    let model_labels: Vec<String> = models
+        .iter()
+        .map(|m| {
+            if m == &suggested.model {
+                format!("{m}  (recommended)")
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
+    let model_sel = Select::with_theme(&theme)
+        .with_prompt("1) Model")
+        .items(&model_labels)
+        .default(default_model_idx)
+        .interact()
+        .context("model menu")?;
+    let model = models[model_sel].clone();
 
-    let security = prompt_bool("2) Security analysis?", suggested.security)?;
-    let performance = prompt_bool("3) Performance analysis?", suggested.performance)?;
-    let error_handling = prompt_bool("4) Error-handling analysis?", suggested.error_handling)?;
-    let reviewers = prompt_u32("5) Reviewer agents (count)", suggested.reviewers)?;
-    let evangelists = prompt_u32("6) Evangelist agents (count)", suggested.evangelists)?;
+    let security = Confirm::with_theme(&theme)
+        .with_prompt("2) Security analysis?")
+        .default(suggested.security)
+        .interact()
+        .context("security confirm")?;
+    let performance = Confirm::with_theme(&theme)
+        .with_prompt("3) Performance analysis?")
+        .default(suggested.performance)
+        .interact()
+        .context("performance confirm")?;
+    let error_handling = Confirm::with_theme(&theme)
+        .with_prompt("4) Error-handling analysis?")
+        .default(suggested.error_handling)
+        .interact()
+        .context("error-handling confirm")?;
+
+    let reviewers: u32 = Input::with_theme(&theme)
+        .with_prompt("5) Reviewer agents (count)")
+        .default(suggested.reviewers)
+        .interact_text()
+        .context("reviewers input")?;
+    let evangelists: u32 = Input::with_theme(&theme)
+        .with_prompt("6) Evangelist agents (count)")
+        .default(suggested.evangelists)
+        .interact_text()
+        .context("evangelists input")?;
 
     let spawn_mode = if let Some(m) = spawn_mode_preset {
         crate::runtime::normalize_spawn_mode(m)?
     } else {
-        eprintln!("7) Spawn mode");
-        eprintln!("   [1] isolated — parallel reviewers/evangelists/specialists (default)");
-        eprintln!("   [2] team     — one lead agent spawns its own team");
-        eprint!("Enter 1 or 2 [default 1]: ");
-        let _ = io::stderr().flush();
-        let line = read_line()?;
-        if line.is_empty() || line == "1" || line.eq_ignore_ascii_case("isolated") {
-            "isolated".into()
-        } else if line == "2" || line.eq_ignore_ascii_case("team") {
+        let items = [
+            "team — one lead agent spawns its own team",
+            "isolated — parallel reviewers/evangelists/specialists",
+        ];
+        let sel = Select::with_theme(&theme)
+            .with_prompt("7) Spawn mode")
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("spawn mode menu")?;
+        if sel == 0 {
             "team".into()
         } else {
-            bail!("expected 1/2/isolated/team, got {line}");
+            "isolated".into()
         }
     };
 
@@ -196,58 +227,6 @@ fn prompt_plan_answers(
         evangelists,
         spawn_mode,
     })
-}
-
-fn read_line() -> Result<String> {
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .context("read stdin")?;
-    Ok(line.trim().to_string())
-}
-
-fn read_model_choice(models: &[String], default: &str) -> Result<String> {
-    let line = read_line()?;
-    if line.is_empty() {
-        return Ok(default.to_string());
-    }
-    if let Ok(n) = line.parse::<usize>() {
-        if n >= 1 && n <= models.len() {
-            return Ok(models[n - 1].clone());
-        }
-        bail!("model number out of range 1-{}", models.len());
-    }
-    if models.iter().any(|m| m == &line) {
-        return Ok(line);
-    }
-    // Allow typing an id not in the list (escape hatch)
-    Ok(line)
-}
-
-fn prompt_bool(label: &str, default: bool) -> Result<bool> {
-    let def = if default { "Y/n" } else { "y/N" };
-    eprint!("{label} [{def}]: ");
-    let _ = io::stderr().flush();
-    let line = read_line()?;
-    if line.is_empty() {
-        return Ok(default);
-    }
-    match line.to_ascii_lowercase().as_str() {
-        "y" | "yes" | "true" | "1" => Ok(true),
-        "n" | "no" | "false" | "0" => Ok(false),
-        other => bail!("expected y/n, got {other}"),
-    }
-}
-
-fn prompt_u32(label: &str, default: u32) -> Result<u32> {
-    eprint!("{label} [default {default}]: ");
-    let _ = io::stderr().flush();
-    let line = read_line()?;
-    if line.is_empty() {
-        return Ok(default);
-    }
-    line.parse::<u32>()
-        .with_context(|| format!("expected integer, got {line}"))
 }
 
 pub fn load_plan_answers(path: &Path) -> Result<PlanAnswers> {
@@ -308,7 +287,7 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
     let mut reviewers = input.reviewers;
     let mut evangelists = input.evangelists;
     let spawn_mode = crate::runtime::normalize_spawn_mode(&input.spawn_mode)
-        .unwrap_or_else(|_| "isolated".into());
+        .unwrap_or_else(|_| "team".into());
 
     // Cap agents by pack size
     let max_reviewers = if pack_chars < 4_000 {
@@ -502,7 +481,7 @@ mod tests {
         assert_eq!(answers.model, "opus");
         assert_eq!(answers.reviewers, 2);
         assert_eq!(answers.evangelists, 1);
-        assert_eq!(answers.spawn_mode, "isolated");
+        assert_eq!(answers.spawn_mode, "team");
         assert!(path.exists());
         assert!(!answers.error_handling);
         assert!(answers.performance);

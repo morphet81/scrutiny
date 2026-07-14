@@ -124,7 +124,7 @@ enum Commands {
         rest: Vec<String>,
         #[arg(long)]
         client: Option<String>,
-        /// isolated (default) | team
+        /// team (default) | isolated
         #[arg(long)]
         spawn_mode: Option<String>,
         #[arg(long)]
@@ -716,7 +716,7 @@ fn resolve_plan_write_input(
             .context("plan-write requires --error-handling (or --answers / --from-json)")?,
         reviewers: reviewers.unwrap_or(0),
         evangelists: evangelists.unwrap_or(0),
-        spawn_mode: "isolated".into(),
+        spawn_mode: "team".into(),
         eval_path: eval,
         map_path: map,
         pack_path: pack,

@@ -18,8 +18,8 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 ```
 
 That probes `agent`/`claude`/`codex`, asks plan knobs, runs headless review
-(`isolated` parallel specialists by default, or `team` lead with **verbatim
-isolated member briefs embedded** in the lead prompt), triage, and posts.
+(`team` lead by default with **verbatim isolated member briefs embedded** in
+the lead prompt, or `isolated` parallel specialists), triage, and posts.
 
 This skill is for **IDE agent sessions** that still chain discrete steps below.
 Complexity, map, pack, and scan stay scripts. Review agents read **pack only**.
@@ -142,7 +142,7 @@ CI / user-provided JSON only:
 
 ```bash
 # ONLY when user/CI already chose the knobs:
-ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL" --from-json '{"client":"claude","model":"opus","security":true,"performance":true,"error_handling":true,"reviewers":2,"evangelists":1,"spawn_mode":"isolated"}')"
+ANSWERS="$("$SCRUTINY_BIN" plan-confirm --eval "$EVAL" --from-json '{"client":"claude","model":"opus","security":true,"performance":true,"error_handling":true,"reviewers":2,"evangelists":1,"spawn_mode":"team"}')"
 ```
 
 Then write plan from answers JSON (paths from earlier steps):
@@ -269,14 +269,16 @@ Each issue: **number**, **title**, **path:line**, **explanation**, **proposed fi
 
 ### 8. Interactive triage → edit findings JSON → hand off to script
 
-**Hard rule — one triage prompt.** Ask **all finding decisions in a single** multi-question form. Never split by severity. Never a second menu. **Do not** ask Request changes / Comment / Approve — that is `post-comments`'s job.
+**Prefer the script.** Run `$SCRUTINY_BIN findings-triage` (or full `scrutiny review`): TTY uses **↑/↓ menus** — Post / Ignore / Ask a question… (or fix option). Ask is a **separate** menu row, then a follow-up question — never "type P or free text" on one prompt (that misreads `P` as a question).
 
-In that one form, for **each** finding `F1…Fn`:
+If the agent host cannot attach a TTY to the binary, use **one** multi-choice form (Post/Ignore/options per finding; no free-text action field). Never split by severity. Never a second decision menu after posting. **Do not** ask Request changes / Comment / Approve — that is `post-comments`'s job.
 
-- If it has `fix_options` → choices: each option **or Ignore**
-- Else → choices: **Post** or **Ignore**
+In that form, for **each** finding `F1…Fn`:
 
-After that **one** answer set, agent work ends with file edits + starting the script:
+- If it has `fix_options` → choices: each option **or Ignore** (optional separate **Ask**)
+- Else → choices: **Post** or **Ignore** (optional separate **Ask**)
+
+After triage answers land in findings JSON (script or agent edits), hand off:
 
 1. Set `include` / `chosen_option` from answers
 2. For each `include=true`: draft `comment_body` (why + chosen fix). Anchors already present from reviewers — do not invent lines. Script appends `[AI Agent]` if missing.

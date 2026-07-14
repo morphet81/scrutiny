@@ -15,7 +15,7 @@ pub struct Config {
     /// Force headless client for `scrutiny review` (cursor|claude|codex). Omit → detect + prompt.
     #[serde(default)]
     pub force_client: Option<String>,
-    /// Force spawn mode: isolated | team. Omit → prompt (default isolated).
+    /// Force spawn mode: isolated | team. Omit → prompt (default team).
     #[serde(default)]
     pub force_spawn_mode: Option<String>,
     pub models: BTreeMap<String, ClientModels>,
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn parses_default_toml() {
         let cfg: Config = toml::from_str(DEFAULT_TOML).expect("parse default");
-        assert_eq!(cfg.default_client, "cursor");
+        assert_eq!(cfg.default_client, "claude");
         assert_eq!(cfg.agents.reviewers_by_tier.get(Tier::Xs), 0);
         assert!(!cfg.review.security_by_tier.get(Tier::S));
         assert!(cfg.review.security_by_tier.get(Tier::M));

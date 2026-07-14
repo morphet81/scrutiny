@@ -371,14 +371,23 @@ pub struct TriageAskCtx<'a> {
     pub pack_hint: &'a str,
 }
 
-/// Interactive stdin triage: Post/Ignore/Ask (free text) per finding.
+/// One finding triage decision (menu or line fallback).
+enum TriagePick {
+    Post,
+    Option(usize),
+    Ignore,
+    Ask(String),
+}
+
+/// Interactive triage: Post/Ignore/Ask per finding.
+/// TTY: arrow-key menu (Ask is an explicit item — never free-text on same prompt).
+/// Non-TTY: letter line; ask only via `ask <question>` or multi-word free text (never bare P/I/A…).
 /// Order: critical → warning → suggestion, then renumber F1…
 pub fn run_findings_triage(
     findings_path: &Path,
     cwd: Option<&Path>,
     ask: Option<&mut TriageAskCtx<'_>>,
 ) -> Result<(FindingsReport, PathBuf)> {
-    use std::io::{self, Write};
     let mut ask = ask;
     let mut report: FindingsReport = read_json(findings_path)?;
     if report.findings.is_empty() {
@@ -415,7 +424,7 @@ pub fn run_findings_triage(
         n_warn,
         n_sug
     );
-    eprintln!("Post / Ignore each finding — or type a question to clarify before deciding.\n");
+    eprintln!("↑/↓ select Post / Ignore / Ask (or a fix option), Enter confirm.\n");
 
     let color = want_color();
     let mut last_sev = String::new();
@@ -451,154 +460,279 @@ pub fn run_findings_triage(
 
             print_finding_block(f, cwd, &head_oid, &snapshot, color);
 
-            eprintln!();
-            if !f.fix_options.is_empty() {
-                eprint!(
-                    "{}Option letter, I=Ignore, or type a question:{} ",
-                    style_bold(),
-                    style_reset()
-                );
-            } else {
-                eprint!(
-                    "{}P=Post, I=Ignore, or type a question:{} ",
-                    style_bold(),
-                    style_reset()
-                );
-            }
-            let _ = io::stderr().flush();
-            let mut line_in = String::new();
-            io::stdin()
-                .read_line(&mut line_in)
-                .context("read triage choice")?;
-            let choice = line_in.trim();
+            let pick = match prompt_finding_decision(f) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("  triage prompt failed: {e:#}");
+                    continue;
+                }
+            };
 
-            if choice.is_empty()
-                || choice.eq_ignore_ascii_case("i")
-                || choice.eq_ignore_ascii_case("ignore")
-            {
-                f.include = Some(false);
-                f.status = "skipped".into();
-                break;
-            }
-
-            if !f.fix_options.is_empty() {
-                let idx_opt = if choice.len() == 1 {
-                    let c = choice.chars().next().unwrap().to_ascii_uppercase();
-                    if c >= 'A' && c < (b'A' + f.fix_options.len() as u8) as char {
-                        Some((c as u8 - b'A') as usize)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some(i) = idx_opt {
+            match pick {
+                TriagePick::Ignore => {
+                    f.include = Some(false);
+                    f.status = "skipped".into();
+                    break;
+                }
+                TriagePick::Post => {
                     f.include = Some(true);
-                    f.chosen_option = Some(f.fix_options[i].clone());
                     f.comment_body = Some(format!(
                         "**{}**\n\n{}\n\n**Fix:** {}\n\n{}",
-                        f.title, f.explanation, f.fix_options[i], AI_AGENT_TAG
+                        f.title, f.explanation, f.proposed_fix, AI_AGENT_TAG
                     ));
                     f.status = "ready".into();
                     break;
                 }
-                // free-text ask (or unrecognized)
-            } else if choice.eq_ignore_ascii_case("p")
-                || choice.eq_ignore_ascii_case("post")
-                || choice.eq_ignore_ascii_case("y")
-            {
-                f.include = Some(true);
-                f.comment_body = Some(format!(
-                    "**{}**\n\n{}\n\n**Fix:** {}\n\n{}",
-                    f.title, f.explanation, f.proposed_fix, AI_AGENT_TAG
-                ));
-                f.status = "ready".into();
-                break;
-            }
+                TriagePick::Option(opt_i) => {
+                    let text = f.fix_options[opt_i].clone();
+                    f.include = Some(true);
+                    f.chosen_option = Some(text.clone());
+                    f.comment_body = Some(format!(
+                        "**{}**\n\n{}\n\n**Fix:** {}\n\n{}",
+                        f.title, f.explanation, text, AI_AGENT_TAG
+                    ));
+                    f.status = "ready".into();
+                    break;
+                }
+                TriagePick::Ask(question) => {
+                    let Some(ask_ctx) = ask.as_mut() else {
+                        eprintln!("  (ask not available here — pick Post / Ignore / option)");
+                        continue;
+                    };
+                    let pack_hint = ask_ctx.pack_hint.to_string();
+                    let model = ask_ctx.model.to_string();
+                    let override_cli = ask_ctx.client_override.clone();
+                    let client_ref = ask_ctx.client.cloned();
 
-            // Free-text → clarify
-            let Some(ask_ctx) = ask.as_mut() else {
-                eprintln!("  (ask not available here — use P/I or option letter)");
-                continue;
-            };
-            let pack_hint = ask_ctx.pack_hint.to_string();
-            let model = ask_ctx.model.to_string();
-            let override_cli = ask_ctx.client_override.clone();
-            let client_ref = if let Some(c) = ask_ctx.client {
-                Some(c.clone())
-            } else {
-                None
-            };
-
-            let client = if let Some(c) = client_ref {
-                c
-            } else if let Some(c) = resolved_client.clone() {
-                c
-            } else {
-                let cwd_path = cwd.unwrap_or_else(|| Path::new("."));
-                match resolve_ask_client(cwd_path, override_cli.as_deref()) {
-                    Ok(c) => {
-                        resolved_client = Some(c.clone());
+                    let client = if let Some(c) = client_ref {
                         c
-                    }
-                    Err(e) => {
-                        eprintln!("  ask needs agent CLI: {e:#}");
+                    } else if let Some(c) = resolved_client.clone() {
+                        c
+                    } else {
+                        let cwd_path = cwd.unwrap_or_else(|| Path::new("."));
+                        match resolve_ask_client(cwd_path, override_cli.as_deref()) {
+                            Ok(c) => {
+                                resolved_client = Some(c.clone());
+                                c
+                            }
+                            Err(e) => {
+                                eprintln!("  ask needs agent CLI: {e:#}");
+                                continue;
+                            }
+                        }
+                    };
+
+                    let ask_model = if model.is_empty() {
+                        match client.client.as_str() {
+                            "claude" => "sonnet",
+                            "codex" => "o4-mini",
+                            _ => "composer-2-fast",
+                        }
+                    } else {
+                        model.as_str()
+                    };
+
+                    let context = format!(
+                        "Finding {} (`{:?}`:{:?})\nTitle: {}\nWhy: {}\nFix: {}\nOptions: {:?}\nPack: {}\n\n\
+                         When revising anchors: path+line MUST stay on a line present in the PR/pack unified diff \
+                         (GitHub review comment attachable). Prefer an added (+) line. Do not invent out-of-diff lines.",
+                        f.id,
+                        f.anchor.path,
+                        f.anchor.line,
+                        f.title,
+                        f.explanation,
+                        f.proposed_fix,
+                        f.fix_options,
+                        pack_hint
+                    );
+                    let prompt =
+                        crate::agent_runner::build_ask_revise_prompt(&context, &question);
+                    let out = crate::agent_runner::run_headless(
+                        &client,
+                        ask_model,
+                        cwd.unwrap_or_else(|| Path::new(".")),
+                        &prompt,
+                        crate::agent_runner::HeadlessKind::Ask,
+                        &format!("ask-{}", f.id),
+                        std::time::Duration::from_secs(crate::agent_runner::AGENT_WALL_SECS),
+                    )?;
+                    if out.code != 0 && !out.timed_out {
+                        eprintln!("  ask agent failed: {}", out.stderr);
                         continue;
                     }
+                    let answer = extract_ask_text(&out.stdout);
+                    if answer.trim().is_empty() {
+                        eprintln!("  ask empty: {}", out.stderr);
+                        continue;
+                    }
+                    apply_ask_revision(f, &answer);
+                    eprintln!("  (updated — decide again for {})", f.id);
+                    // loop re-shows this finding only
                 }
-            };
-
-            let ask_model = if model.is_empty() {
-                match client.client.as_str() {
-                    "claude" => "sonnet",
-                    "codex" => "o4-mini",
-                    _ => "composer-2-fast",
-                }
-            } else {
-                model.as_str()
-            };
-
-            let context = format!(
-                "Finding {} (`{:?}`:{:?})\nTitle: {}\nWhy: {}\nFix: {}\nOptions: {:?}\nPack: {}\n\n\
-                 When revising anchors: path+line MUST stay on a line present in the PR/pack unified diff \
-                 (GitHub review comment attachable). Prefer an added (+) line. Do not invent out-of-diff lines.",
-                f.id,
-                f.anchor.path,
-                f.anchor.line,
-                f.title,
-                f.explanation,
-                f.proposed_fix,
-                f.fix_options,
-                pack_hint
-            );
-            let prompt = crate::agent_runner::build_ask_revise_prompt(&context, choice);
-            let out = crate::agent_runner::run_headless(
-                &client,
-                ask_model,
-                cwd.unwrap_or_else(|| Path::new(".")),
-                &prompt,
-                crate::agent_runner::HeadlessKind::Ask,
-                &format!("ask-{}", f.id),
-                std::time::Duration::from_secs(crate::agent_runner::AGENT_WALL_SECS),
-            )?;
-            if out.code != 0 && !out.timed_out {
-                eprintln!("  ask agent failed: {}", out.stderr);
-                continue;
             }
-            let answer = extract_ask_text(&out.stdout);
-            if answer.trim().is_empty() {
-                eprintln!("  ask empty: {}", out.stderr);
-                continue;
-            }
-            apply_ask_revision(f, &answer);
-            eprintln!("  (updated — decide again for {})", f.id);
-            // loop re-shows this finding only
         }
     }
 
     write_json_pretty(findings_path, &report)?;
     Ok((report, findings_path.to_path_buf()))
 }
+
+fn prompt_finding_decision(f: &TriageFinding) -> Result<TriagePick> {
+    use std::io::{self, IsTerminal};
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        prompt_finding_decision_menu(f)
+    } else {
+        prompt_finding_decision_line(f)
+    }
+}
+
+fn prompt_finding_decision_menu(f: &TriageFinding) -> Result<TriagePick> {
+    use dialoguer::{theme::ColorfulTheme, Input, Select};
+
+    let mut labels: Vec<String> = Vec::new();
+    let mut kinds: Vec<&'static str> = Vec::new();
+    let mut option_idxs: Vec<usize> = Vec::new();
+
+    if f.fix_options.is_empty() {
+        labels.push("Post".into());
+        kinds.push("post");
+        option_idxs.push(0);
+    } else {
+        for (i, opt) in f.fix_options.iter().enumerate() {
+            labels.push(format!(
+                "{}) {}",
+                (b'A' + i as u8) as char,
+                truncate(opt, 100)
+            ));
+            kinds.push("option");
+            option_idxs.push(i);
+        }
+    }
+    labels.push("Ignore".into());
+    kinds.push("ignore");
+    option_idxs.push(0);
+    labels.push("Ask a question…".into());
+    kinds.push("ask");
+    option_idxs.push(0);
+
+    let sel = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Decision")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .context("triage menu")?;
+
+    match kinds[sel] {
+        "post" => Ok(TriagePick::Post),
+        "option" => Ok(TriagePick::Option(option_idxs[sel])),
+        "ignore" => Ok(TriagePick::Ignore),
+        "ask" => {
+            let q: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Your question")
+                .allow_empty(false)
+                .interact_text()
+                .context("triage ask input")?;
+            let q = q.trim().to_string();
+            if q.is_empty() {
+                bail!("empty question");
+            }
+            Ok(TriagePick::Ask(q))
+        }
+        _ => bail!("internal menu kind"),
+    }
+}
+
+/// Non-TTY fallback: letters for actions; `ask <q>` or multi-word free text for ask.
+/// Never treat single reserved letter (P/I/A…) as ask.
+fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
+    use std::io::{self, Write};
+
+    eprintln!();
+    if !f.fix_options.is_empty() {
+        eprint!(
+            "{}Option letter / I=Ignore / ask <question>:{} ",
+            style_bold(),
+            style_reset()
+        );
+    } else {
+        eprint!(
+            "{}P=Post / I=Ignore / ask <question>:{} ",
+            style_bold(),
+            style_reset()
+        );
+    }
+    let _ = io::stderr().flush();
+    let mut line_in = String::new();
+    io::stdin()
+        .read_line(&mut line_in)
+        .context("read triage choice")?;
+    let choice = line_in.trim();
+
+    if choice.is_empty()
+        || choice.eq_ignore_ascii_case("i")
+        || choice.eq_ignore_ascii_case("ignore")
+    {
+        return Ok(TriagePick::Ignore);
+    }
+
+    if !f.fix_options.is_empty() {
+        if choice.len() == 1 {
+            let c = choice.chars().next().unwrap().to_ascii_uppercase();
+            if c >= 'A' && c < (b'A' + f.fix_options.len() as u8) as char {
+                return Ok(TriagePick::Option((c as u8 - b'A') as usize));
+            }
+            if c == 'P' || c == 'Y' {
+                eprintln!("  pick option letter A…, Ignore, or: ask <question>");
+                return prompt_finding_decision_line(f);
+            }
+            eprintln!("  unknown letter — pick A…, I, or: ask <question>");
+            return prompt_finding_decision_line(f);
+        }
+    } else if choice.eq_ignore_ascii_case("p")
+        || choice.eq_ignore_ascii_case("post")
+        || choice.eq_ignore_ascii_case("y")
+    {
+        return Ok(TriagePick::Post);
+    }
+
+    let question = if let Some(rest) = choice
+        .strip_prefix("ask ")
+        .or_else(|| choice.strip_prefix("ask:"))
+        .or_else(|| {
+            if choice.eq_ignore_ascii_case("ask") {
+                Some("")
+            } else {
+                None
+            }
+        })
+    {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            eprint!("  question: ");
+            let _ = io::stderr().flush();
+            let mut q = String::new();
+            io::stdin().read_line(&mut q).context("read ask question")?;
+            q.trim().to_string()
+        } else {
+            rest.to_string()
+        }
+    } else if choice.len() > 1
+        && !choice.eq_ignore_ascii_case("post")
+        && !choice.eq_ignore_ascii_case("ignore")
+    {
+        choice.to_string()
+    } else {
+        eprintln!("  use P/I (or option letter), or: ask <question>");
+        return prompt_finding_decision_line(f);
+    };
+
+    if question.is_empty() {
+        eprintln!("  empty question — try again");
+        return prompt_finding_decision_line(f);
+    }
+    Ok(TriagePick::Ask(question))
+}
+
 
 fn print_finding_block(
     f: &TriageFinding,
@@ -1123,12 +1257,31 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
 
     if let Some(pending_id) = pending {
         eprintln!("scrutiny post-comments: pending review #{pending_id} found.");
-        eprintln!("  1) Add comments to that pending review, then submit it");
-        eprintln!("  2) Close the pending review first, then post a new review with these findings");
-        eprint!("Enter 1 or 2: ");
-        use std::io::Write;
-        let _ = std::io::stderr().flush();
-        let choice = read_stdin_line()?;
+        let choice = {
+            use std::io::{self, IsTerminal, Write};
+            if io::stdin().is_terminal() && io::stderr().is_terminal() {
+                use dialoguer::{theme::ColorfulTheme, Select};
+                let items = [
+                    "Add comments to that pending review, then submit it",
+                    "Close the pending review first, then post a new review",
+                ];
+                let sel = Select::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Pending review")
+                    .items(&items)
+                    .default(0)
+                    .interact()
+                    .context("pending review menu")?;
+                if sel == 0 { "1".to_string() } else { "2".to_string() }
+            } else {
+                eprintln!("  1) Add comments to that pending review, then submit it");
+                eprintln!(
+                    "  2) Close the pending review first, then post a new review with these findings"
+                );
+                eprint!("Enter 1 or 2: ");
+                let _ = io::stderr().flush();
+                read_stdin_line()?
+            }
+        };
         match choice.trim() {
             "1" => {
                 add_comments_to_pending(
@@ -1569,24 +1722,48 @@ fn read_stdin_line() -> Result<String> {
 }
 
 fn prompt_event_choice(extra: &str) -> Result<String> {
+    use std::io::{self, IsTerminal};
+
     eprintln!("scrutiny post-comments: review action?");
     if !extra.is_empty() {
         eprintln!("{extra}");
     }
-    eprintln!("  1) COMMENT       — comments only");
-    eprintln!("  2) REQUEST_CHANGES — block the PR");
-    eprintln!("  3) APPROVE       — approve");
-    eprint!("Enter 1, 2, 3 (or COMMENT / REQUEST_CHANGES / APPROVE): ");
-    use std::io::Write;
-    let _ = std::io::stderr().flush();
-    let choice = read_stdin_line()?;
-    let event = match choice.as_str() {
-        "1" | "c" | "C" => "COMMENT",
-        "2" | "r" | "R" => "REQUEST_CHANGES",
-        "3" | "a" | "A" => "APPROVE",
-        other => other,
+
+    let event = if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        use dialoguer::{theme::ColorfulTheme, Select};
+        let items = [
+            "COMMENT — comments only",
+            "REQUEST_CHANGES — block the PR",
+            "APPROVE — approve",
+        ];
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Review event")
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("review event menu")?;
+        match sel {
+            0 => "COMMENT",
+            1 => "REQUEST_CHANGES",
+            _ => "APPROVE",
+        }
+        .to_string()
+    } else {
+        eprintln!("  1) COMMENT       — comments only");
+        eprintln!("  2) REQUEST_CHANGES — block the PR");
+        eprintln!("  3) APPROVE       — approve");
+        eprint!("Enter 1, 2, 3 (or COMMENT / REQUEST_CHANGES / APPROVE): ");
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        let choice = read_stdin_line()?;
+        match choice.as_str() {
+            "1" | "c" | "C" => "COMMENT".into(),
+            "2" | "r" | "R" => "REQUEST_CHANGES".into(),
+            "3" | "a" | "A" => "APPROVE".into(),
+            other => other.to_string(),
+        }
     };
-    normalize_event(event)
+    normalize_event(&event)
 }
 
 fn finalize_post(
