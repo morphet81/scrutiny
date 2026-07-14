@@ -135,6 +135,12 @@ enum Commands {
         /// Skip interactive client/spawn/triage prompts
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// Resume from AI review-report.json (skip eval/map/pack/scan/agents)
+        #[arg(long, alias = "form-report")]
+        from_report: Option<PathBuf>,
+        /// Optional scan JSON when using --from-report (else empty findings shell)
+        #[arg(long)]
+        scan: Option<PathBuf>,
     },
     /// Install scrutiny skills via `npx skills add` (global or project)
     SkillsInstall {
@@ -172,6 +178,8 @@ enum Commands {
     FindingsTriage {
         #[arg(long)]
         findings: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },    /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
         #[arg(long)]
@@ -395,6 +403,8 @@ fn run() -> Result<()> {
             skip_agents,
             event,
             yes,
+            from_report,
+            scan,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             let pr = pr.or_else(|| {
@@ -413,6 +423,8 @@ fn run() -> Result<()> {
                 skip_agents,
                 event,
                 non_interactive: yes,
+                from_report,
+                scan_path: scan,
             })?;
             println!("{}", findings.display());
         }
@@ -450,8 +462,9 @@ fn run() -> Result<()> {
             })?;
             println!("{}", path.display());
         }
-        Commands::FindingsTriage { findings } => {
-            let (_r, path) = run_findings_triage(&findings)?;
+        Commands::FindingsTriage { findings, cwd } => {
+            let cwd = cwd.or_else(|| std::env::current_dir().ok());
+            let (_r, path) = run_findings_triage(&findings, cwd.as_deref(), None)?;
             println!("{}", path.display());
         }
         Commands::ForgeFetch {

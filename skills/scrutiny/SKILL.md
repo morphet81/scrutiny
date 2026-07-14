@@ -196,7 +196,7 @@ Other:
 
 - `path` (repo-relative)
 - `line` (1-based, from pack `symbol_slices` / diff hunk new-file lines — the agent is reading that text)
-- optional `start_line`, `severity` (`critical|warning|info`), `title`, `explanation`, `proposed_fix` / `fix_options`
+- optional `start_line`, `severity` (`critical|warning|suggestion`), `title`, `explanation`, `proposed_fix` / `fix_options`
 
 No finding without a line. “I’ll figure out the line later” is forbidden. The lead agent must **reject and re-ask** any finding missing `path`+`line`.
 
@@ -229,11 +229,11 @@ Read `$FINDINGS`. Print caveman list **grouped**. Include **`path:line`** on eve
 ## Warning
 2. …
 
-## Info
+## Suggestion
 3. …
 ```
 
-Each issue: **number**, **title**, **path:line**, **explanation**, **proposed fix** (options `A`, `B`, … when present).
+Each issue: **number**, **title**, **path:line**, **explanation**, **proposed fix** (options `A`, `B`, … when present). Triage order: critical → warning → suggestion.
 
 ### 8. Interactive triage → edit findings JSON → hand off to script
 

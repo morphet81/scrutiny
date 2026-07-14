@@ -37,6 +37,11 @@ pub struct Finding {
     pub source: String,
     pub paths: Vec<String>,
     pub bucket: String,
+    /// Optional 1-based line (when known).
+    #[serde(default)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    pub start_line: Option<u32>,
 }
 
 pub fn run_scan(
@@ -310,26 +315,69 @@ fn collect_large_hunks(
         }
     }
     if let Some(p) = pack {
+        const LARGE_ADDED: usize = 120;
         for s in &p.slices {
-            for sym in &s.symbol_slices {
-                let lines = sym.content.lines().count();
-                if lines >= 120 {
-                    out.push(finding(
-                        "God-function sized symbol slice",
-                        format!(
-                            "`{}` slice ~{lines} lines — possible god function.",
-                            sym.label
-                        ),
-                        "Extract helpers; keep reviewable unit size.",
-                        "low",
-                        "scan.god_fn",
-                        vec![s.path.clone()],
-                        "Architecture & clean code",
-                    ));
-                }
+            let added = count_added_lines_in_unified_diff(&s.unified_diff);
+            if added < LARGE_ADDED {
+                continue;
             }
+            let Some(first_plus) = first_added_line_in_unified_diff(&s.unified_diff) else {
+                continue;
+            };
+            let mut f = finding(
+                "Very large added surface in changed file",
+                format!(
+                    "`{}` adds ~{added} lines in this change — hard to review.",
+                    s.path
+                ),
+                "Split the change or extract helpers so the PR stays reviewable.",
+                "low",
+                "scan.god_fn",
+                vec![s.path.clone()],
+                "Architecture & clean code",
+            );
+            f.line = Some(first_plus);
+            f.start_line = Some(first_plus);
+            out.push(f);
         }
     }
+}
+
+/// Count `+` (added) lines in a unified diff, excluding `+++` file headers.
+fn count_added_lines_in_unified_diff(diff: &str) -> usize {
+    diff.lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .count()
+}
+
+/// First new-file line number corresponding to an added (`+`) line in the patch.
+fn first_added_line_in_unified_diff(diff: &str) -> Option<u32> {
+    let mut new_line: u32 = 0;
+    for diff_line in diff.lines() {
+        if let Some(rest) = diff_line.strip_prefix("@@") {
+            if let Some(plus) = rest.split('+').nth(1) {
+                let start = plus
+                    .split(|c: char| c == ',' || c == ' ')
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                new_line = start.saturating_sub(1);
+            }
+            continue;
+        }
+        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+            continue;
+        }
+        if diff_line.starts_with('+') {
+            new_line += 1;
+            return Some(new_line);
+        } else if diff_line.starts_with('-') {
+            // old only
+        } else if diff_line.starts_with(' ') || diff_line.is_empty() {
+            new_line += 1;
+        }
+    }
+    None
 }
 
 fn run_lint_hook(cwd: &Path, cmd: &str) -> Option<Finding> {
@@ -380,15 +428,17 @@ fn finding(
         source: source.into(),
         paths,
         bucket: bucket.into(),
+        line: None,
+        start_line: None,
     }
 }
 
-/// Map legacy / free-form severities to critical | warning | info.
+/// Map legacy / free-form severities to critical | warning | suggestion.
 pub fn normalize_severity(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "critical" | "high" | "error" | "blocker" => "critical".into(),
         "warning" | "medium" | "warn" => "warning".into(),
-        "info" | "low" | "note" | "nit" => "info".into(),
+        "suggestion" | "info" | "low" | "note" | "nit" => "suggestion".into(),
         other if other.is_empty() => "warning".into(),
         _ => "warning".into(),
     }
@@ -425,5 +475,19 @@ mod tests {
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["title"], "t");
         assert!(v["fix_options"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn added_lines_from_unified_diff() {
+        let diff = "\
+@@ -1,2 +1,4 @@
+ context
+-old
++new1
++new2
+ more
+";
+        assert_eq!(count_added_lines_in_unified_diff(diff), 2);
+        assert_eq!(first_added_line_in_unified_diff(diff), Some(2)); // +1 start → context=1, +new1=2
     }
 }

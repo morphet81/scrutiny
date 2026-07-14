@@ -58,12 +58,21 @@ pub struct AgentRunResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewReport {
+    #[serde(default = "default_report_version")]
     pub version: u32,
+    #[serde(default)]
     pub spawn_mode: String,
+    #[serde(default)]
     pub model: String,
     pub findings: Vec<AgentFinding>,
+    #[serde(default)]
     pub agents: Vec<AgentRunResult>,
+    #[serde(default)]
     pub deduped_from: u32,
+}
+
+fn default_report_version() -> u32 {
+    1
 }
 
 pub const FINDINGS_JSON_SCHEMA: &str = r#"{
@@ -415,12 +424,14 @@ Analyses on: security={} performance={} error_handling={}
 Focus: {focus}
 
 Output: JSON ONLY. No prose outside JSON.
-{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|info","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
+{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
 Rules:
-- Every finding: path + line (1-based) from pack/head.
+- Every finding: path + line (1-based).
+- **CRITICAL:** `line` MUST be a new-side line present in that path's pack unified diff (added `+` preferred; context ` ` only if issue is clearly there). GitHub will reject out-of-diff lines — never invent them from the full file.
+- If the issue is not on a PR/pack diff line → omit that finding.
 - Nothing: {{"findings":[]}}
-- Severity: critical|warning|info
+- Severity: critical|warning|suggestion
 "#,
         plan.security,
         plan.performance,
@@ -457,9 +468,9 @@ You do:
 4. Return ONE final JSON
 
 Output: JSON ONLY.
-{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|info","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
+{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
-Every finding: path + line. Clean: {{"findings":[]}}.
+Every finding: path + line. Line MUST be in that path's pack unified diff (GitHub-attachable). No out-of-diff lines. Clean: {{"findings":[]}}.
 "#,
         plan.reviewers,
         plan.evangelists,
@@ -477,6 +488,24 @@ pub fn build_ask_prompt(context: &str, question: &str) -> String {
          Intensity ultra. Terse. No fluff. Substance stay. Never announce style.\n\n\
          Context:\n{context}\n\n\
          Question:\n{question}\n"
+    )
+}
+
+/// Triage-time revise: return updated finding fields as JSON.
+pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
+    format!(
+        "Revise code-review finding after reviewer question.\n\n\
+         STYLE (mandatory): load + follow **caveman skill** if present (`/caveman ultra`). \
+         Intensity ultra. Terse. Never announce style.\n\n\
+         Context:\n{context}\n\n\
+         Question:\n{question}\n\n\
+         Output: JSON ONLY (no prose outside JSON):\n\
+         {{\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
+\"path\":\"rel/path\",\"line\":1}}\n\
+         Rules:\n\
+         - Keep or fix path+line so line is still on the PR/pack unified diff (GitHub-attachable).\n\
+         - Prefer an added (+) line. Never invent out-of-diff lines.\n\
+         - fix_options may be empty.\n"
     )
 }
 
@@ -770,7 +799,7 @@ fn severity_rank(s: &str) -> u8 {
     match normalize_severity(s).as_str() {
         "critical" => 3,
         "warning" => 2,
-        _ => 1,
+        _ => 1, // suggestion
     }
 }
 
@@ -861,7 +890,7 @@ mod tests {
 
     #[test]
     fn parse_findings_array() {
-        let raw = r#"{"findings":[{"path":"x.ts","line":3,"title":"t","severity":"info"}]}"#;
+        let raw = r#"{"findings":[{"path":"x.ts","line":3,"title":"t","severity":"suggestion"}]}"#;
         let f = parse_findings_json(raw, "reviewer").unwrap();
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].line, 3);

@@ -21,9 +21,10 @@ pub mod taxonomy;
 pub use config::{ensure_config, load_config, Config};
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
-    merge_ai_findings, run_findings_init, run_findings_resolve, run_findings_triage,
-    run_findings_validate, run_post_comments, FindingsInitInput, FindingsReport, PostCommentsInput,
-    PostResult,
+    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,
+    run_findings_init_empty, run_findings_resolve, run_findings_triage, run_findings_validate,
+    run_post_comments, FindingsInitInput, FindingsReport, PostCommentsInput, PostResult,
+    TriageAskCtx,
 };
 pub use forge::{
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, ForgeFetchInput,
@@ -36,7 +37,7 @@ pub use plan::{
     load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
     PlanConfirmInput, PlanWriteInput,
 };
-pub use review_cmd::{run_review, ReviewCmdInput};
+pub use review_cmd::{run_review, run_review_from_report, ReportResumeInput, ReviewCmdInput};
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
 };

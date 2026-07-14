@@ -83,9 +83,13 @@ bash scripts/ensure-bin.sh
 ./target/release/scrutiny review --pr 42
 ./target/release/scrutiny review --client claude --spawn-mode isolated
 ./target/release/scrutiny review --from-json '{"client":"claude","model":"sonnet","security":true,"performance":false,"error_handling":true,"reviewers":1,"evangelists":0,"spawn_mode":"isolated"}' --yes
+# resume triage/post from an existing AI review-report.json (skip eval/agents):
+./target/release/scrutiny review --from-report /tmp/…-report.json [--pr 42] [--scan /tmp/…-scan.json]
 ```
 
 Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **isolated** parallel headless agents (default) or **team** lead → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
+
+`--from-report` skips analyze/agents: loads the AI report’s `findings`, inits a findings shell (from `--scan` if given, else empty), merges AI findings, then triage → post.
 
 Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny review` does **not** pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth even with a key: `SCRUTINY_CLAUDE_NO_BARE=1`.
 
@@ -134,9 +138,21 @@ Config (`~/.scrutiny/config.toml`):
 
 ### Findings / post-comments
 
-After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `info`.
+After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `suggestion`.
 
-`findings-triage` prompts Post/Ignore (or fix options) on stdin. `post-comments` requires a GitHub PR (`--pr` on init or `gh pr view` for the current branch). It **prompts** for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or pass `--event`), then creates one PR review with line comments; bodies end with `[AI Agent]`.
+`findings-triage` (and `scrutiny review`) prompts Post/Ignore (or fix options) on stdin (critical first). Type a free-text question instead of a letter to clarify that finding; the agent revises it and the script re-shows **only that finding** before you decide. No ask loop after posting.
+
+On a TTY, severity/title use ANSI colors (`NO_COLOR` or non-TTY disables). Each finding shows a short code snippet from `git show <head>:<path>` when a path exists.
+
+`post-comments` requires a GitHub PR. It prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or `--event`), then creates one PR review with **inline comments** (one per included finding with a diff line). Bodies end with `[AI Agent]`.
+
+Comment placement:
+
+- **Line** — path + line on the **PR/pack unified diff** → GitHub review comment (`path`/`line`/`side`)
+- **File** — path but no commentable line (missing line, or line not on the PR patch) → `"subject_type": "file"` (post still succeeds; demotes automatically)
+- **Global** — no path → `### Global notes` in the review body
+
+Scan seeds are **change-scoped** (added lines / change map / large added surface in the pack diff). Agents should still cite PR-diff lines; if a Post’d finding has a non-commentable line, scrutiny posts a file comment instead of failing the run. Failed GitHub review creates do **not** silently dump comments into the review body.
 
 If the authenticated user already has a **PENDING** review on that PR, the script asks:
 
@@ -145,7 +161,7 @@ If the authenticated user already has a **PENDING** review on that PR, the scrip
 
 Agents must not call `gh` review create/dismiss/delete — only `post-comments`.
 
-Line anchors are verified with `git show <head_oid>:<path>` — never invent line numbers.
+Line anchors are verified with `git show <head_oid>:<path>` and PR file patches.
 
 ### Forge pipeline
 
