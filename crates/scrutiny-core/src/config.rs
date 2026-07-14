@@ -65,6 +65,15 @@ pub struct ForgeConfig {
     pub default_reviewers: u32,
     #[serde(default)]
     pub default_evangelists: u32,
+    /// Explicit verify-gate commands (test/lint/build). Empty → auto-derive from harness.
+    #[serde(default)]
+    pub verify_commands: Vec<String>,
+    /// Max fix-loops the verify gate runs before it stops and gates the commit.
+    #[serde(default = "default_verify_loops")]
+    pub verify_max_loops: u32,
+    /// Gate on coverage % when measurable (auto-derived commands only).
+    #[serde(default = "default_true")]
+    pub verify_coverage: bool,
 }
 
 fn default_true() -> bool {
@@ -81,6 +90,9 @@ fn default_testers_1() -> u32 {
 }
 fn default_reviewers_1() -> u32 {
     1
+}
+fn default_verify_loops() -> u32 {
+    2
 }
 
 impl Default for ForgeConfig {
@@ -102,6 +114,9 @@ impl Default for ForgeConfig {
             default_testers: default_testers_1(),
             default_reviewers: default_reviewers_1(),
             default_evangelists: 0,
+            verify_commands: Vec::new(),
+            verify_max_loops: default_verify_loops(),
+            verify_coverage: true,
         }
     }
 }

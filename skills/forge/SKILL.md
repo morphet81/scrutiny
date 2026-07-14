@@ -240,9 +240,21 @@ If testers = 0: developers own tests while implementing.
 
 Spawn `agents` developers — production code to pass tests; **do not** weaken tests. Partition by independent files/areas. Resolve same-file conflicts. Lint/compile sanity.
 
-### C3. Verify
+### C3. Verify — host-owned gate (not the agent)
 
-Run unit (+ e2e if `session.e2e`). Fail → fix production (or genuine test defect). Max 2 fix loops then report remaining failures.
+`scrutiny forge` runs the verify gate itself after implement; the agent no longer
+decides "done". Do NOT re-implement this in the IDE chain.
+
+- Commands: `[forge].verify_commands` if set, else auto-derived from sniffed
+  harness (`vitest`→`npx vitest run --reporter=json`, `cargo-test`→`cargo test`, …;
+  e2e cmds only when `session.e2e`).
+- Coverage: gated when `[forge].verify_coverage` and measurable (per-framework
+  json summary); unmeasurable → warn, never block.
+- Loop: on red, host spawns `forge-verify-fix` with a **surgical** payload —
+  failing test `file:line` + message, uncovered line ranges — up to
+  `verify_max_loops` (default 2).
+- Commit gate: green → commit; still red + TTY → ask "commit anyway?"; still red +
+  non-TTY → no commit, exit non-zero.
 
 ---
 

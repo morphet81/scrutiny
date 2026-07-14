@@ -6,6 +6,7 @@ pub mod fetch;
 pub mod figma;
 pub mod plan;
 pub mod tools;
+pub mod verify;
 
 pub use brief::run_forge_brief;
 pub use context::run_forge_context;

@@ -17,6 +17,10 @@ use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::figma::export_figma_designs;
 use crate::forge::plan::{run_forge_plan_write, ForgePlanWriteInput, ForgeSessionPlan};
 use crate::forge::tools::playwright_cli_available;
+use crate::forge::verify::{
+    build_verify_plan, coverage_gaps, measure_coverage, parse_test_failures, raw_tail, run_command,
+    FailureReport, VerifyPlan,
+};
 use crate::git::{self, git_ok, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
@@ -193,9 +197,18 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
     )?;
 
     eprintln!("scrutiny forge: context + brief…");
-    let (_ctx, context_path) = run_forge_context(&ticket_path, &cwd)?;
+    let (ctx, context_path) = run_forge_context(&ticket_path, &cwd)?;
     let (_brief, brief_path) =
         run_forge_brief(&ticket_path, Some(&session_path), Some(&context_path))?;
+
+    let verify_plan = build_verify_plan(
+        &cfg.forge.verify_commands,
+        &ctx.test_harness,
+        session.e2e,
+        cfg.forge.verify_coverage,
+        session.coverage_pct,
+        cfg.forge.verify_max_loops,
+    );
 
     if session.tdd {
         let plan_path = run_tdd_plan_loop(
@@ -229,7 +242,27 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         &session,
         &ticket,
         &pr_meta_path,
+        &verify_plan,
     )?;
+
+    match run_verify_gate(
+        &detected,
+        &session.model,
+        &cwd,
+        &ticket_path,
+        &session_path,
+        &brief_path,
+        &context_path,
+        &verify_plan,
+    )? {
+        GateOutcome::Green => {}
+        GateOutcome::Red { proceed: true } => {
+            eprintln!("scrutiny forge: verify gate red — committing anyway per user");
+        }
+        GateOutcome::Red { proceed: false } => {
+            bail!("verify gate failed — see output above; not committing");
+        }
+    }
 
     let skip_pr_prompt = input.non_interactive || input.from_json.is_some();
     run_forge_ship(&cwd, &session_root, &pr_meta_path, &cfg, skip_pr_prompt)?;
@@ -483,6 +516,7 @@ fn run_implement_agent(
     session: &ForgeSessionPlan,
     ticket: &TicketReport,
     pr_meta_path: &Path,
+    verify: &VerifyPlan,
 ) -> Result<()> {
     let prompt = build_implement_prompt(
         ticket_path,
@@ -492,6 +526,7 @@ fn run_implement_agent(
         session,
         ticket,
         pr_meta_path,
+        verify,
     );
     let label = if session.spawn_mode == "team" {
         "forge-po-team"
@@ -516,6 +551,7 @@ fn run_implement_agent(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_implement_prompt(
     ticket_path: &Path,
     session_path: &Path,
@@ -524,6 +560,7 @@ fn build_implement_prompt(
     session: &ForgeSessionPlan,
     ticket: &TicketReport,
     pr_meta_path: &Path,
+    verify: &VerifyPlan,
 ) -> String {
     let mut p = String::new();
     if session.spawn_mode == "team" {
@@ -621,10 +658,212 @@ fn build_implement_prompt(
          (e.g. playwright-cli screenshots/videos, ad-hoc temp assets created while testing). \
          Keep source changes and forge session artifacts under .scrutiny/.\n",
     );
+    if !verify.is_empty() {
+        p.push_str("\n## Verification gate (host will enforce)\n");
+        p.push_str(
+            "After you finish, the host runs these and will NOT commit until they pass:\n",
+        );
+        for c in &verify.commands {
+            p.push_str(&format!("- `{}`\n", c.command));
+        }
+        if verify.coverage.is_some() {
+            p.push_str(&format!(
+                "- line coverage must reach ~{}%\n",
+                verify.coverage_target
+            ));
+        }
+        p.push_str("Make your changes actually pass these locally before finishing.\n");
+    }
+
     p.push_str(
         "\n## Do NOT ship yourself\n\
          Do NOT run git commit, git push, or open a PR. The host script commits and may \
          create a draft PR after you finish.\n",
+    );
+    p
+}
+
+enum GateOutcome {
+    Green,
+    Red { proceed: bool },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_verify_gate(
+    client: &crate::runtime::DetectedClient,
+    model: &str,
+    cwd: &Path,
+    ticket_path: &Path,
+    session_path: &Path,
+    brief_path: &Path,
+    context_path: &Path,
+    plan: &VerifyPlan,
+) -> Result<GateOutcome> {
+    if plan.is_empty() {
+        eprintln!("scrutiny forge: no verify commands — skip gate");
+        return Ok(GateOutcome::Green);
+    }
+
+    let mut cov_unmeasurable_warned = false;
+    let max = plan.max_loops.max(1);
+    for attempt in 1..=max {
+        eprintln!(
+            "scrutiny forge: verify gate (attempt {attempt}/{max})…"
+        );
+        let mut report = FailureReport::default();
+
+        for cmd in &plan.commands {
+            eprintln!("scrutiny forge:   run `{}`", cmd.command);
+            let (code, out, err) = run_command(cwd, &cmd.command);
+            if code != 0 {
+                let fails = parse_test_failures(cmd.framework.as_deref(), &out, &err);
+                if fails.is_empty() && report.raw_tail.is_none() {
+                    report.raw_tail = Some(raw_tail(&out, &err));
+                }
+                report.failed_tests.extend(fails);
+            }
+        }
+
+        if let Some(probe) = &plan.coverage {
+            match measure_coverage(cwd, probe) {
+                Some(pct) => {
+                    if pct + 0.5 < plan.coverage_target as f64 {
+                        eprintln!(
+                            "scrutiny forge:   coverage {pct:.1}% < target {}%",
+                            plan.coverage_target
+                        );
+                        report.uncovered = coverage_gaps(&probe.framework, cwd);
+                    }
+                }
+                None => {
+                    if !cov_unmeasurable_warned {
+                        eprintln!(
+                            "scrutiny forge:   coverage unmeasurable — skipping coverage gate"
+                        );
+                        cov_unmeasurable_warned = true;
+                    }
+                }
+            }
+        }
+
+        if report.is_clean() {
+            eprintln!("scrutiny forge: verify gate green");
+            return Ok(GateOutcome::Green);
+        }
+
+        if attempt == max {
+            eprintln!(
+                "scrutiny forge: verify gate still red after {max} attempt(s):\n{}",
+                summarize_report(&report)
+            );
+            let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            if !tty {
+                return Ok(GateOutcome::Red { proceed: false });
+            }
+            let proceed = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Verify gate failed — commit anyway?")
+                .default(false)
+                .interact()
+                .context("verify gate confirm")?;
+            return Ok(GateOutcome::Red { proceed });
+        }
+
+        let prompt = build_verify_fix_prompt(
+            ticket_path,
+            session_path,
+            brief_path,
+            context_path,
+            &report,
+            plan.coverage_target,
+        );
+        eprintln!("scrutiny forge: spawning fix agent…");
+        let out = run_headless(
+            client,
+            model,
+            cwd,
+            &prompt,
+            HeadlessKind::Forge,
+            "forge-verify-fix",
+            Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
+        )?;
+        if out.code != 0 && !out.timed_out {
+            eprintln!("scrutiny forge: fix agent exit {} — re-checking", out.code);
+        }
+    }
+
+    unreachable!("loop returns on final attempt")
+}
+
+fn summarize_report(report: &FailureReport) -> String {
+    let mut s = String::new();
+    for f in &report.failed_tests {
+        let loc = match (&f.file, f.line) {
+            (Some(file), Some(line)) => format!("{file}:{line} — "),
+            (Some(file), None) => format!("{file} — "),
+            _ => String::new(),
+        };
+        s.push_str(&format!("  ✗ {loc}{}: {}\n", f.name, f.message));
+    }
+    for g in &report.uncovered {
+        s.push_str(&format!("  ○ {} — lines {}\n", g.file, g.lines));
+    }
+    if let Some(tail) = &report.raw_tail {
+        s.push_str(&format!("  (unparsed output)\n{tail}\n"));
+    }
+    s
+}
+
+fn build_verify_fix_prompt(
+    ticket_path: &Path,
+    session_path: &Path,
+    brief_path: &Path,
+    context_path: &Path,
+    report: &FailureReport,
+    coverage_target: u32,
+) -> String {
+    let mut p = String::new();
+    p.push_str(
+        "The previous attempt failed the verify gate. Fix ONLY what is listed below.\n\
+         Do NOT weaken, skip, or delete tests. Do NOT commit, push, or open a PR.\n",
+    );
+    p.push_str("\nContext (already on disk — read only if needed):\n");
+    p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
+    p.push_str(&format!("- session: {}\n", session_path.display()));
+    p.push_str(&format!("- brief: {}\n", brief_path.display()));
+    p.push_str(&format!("- context: {}\n", context_path.display()));
+
+    if !report.failed_tests.is_empty() {
+        p.push_str("\n### Failing tests\n");
+        for f in &report.failed_tests {
+            let loc = match (&f.file, f.line) {
+                (Some(file), Some(line)) => format!("`{file}:{line}` — "),
+                (Some(file), None) => format!("`{file}` — "),
+                _ => String::new(),
+            };
+            p.push_str(&format!("- {loc}{}: {}\n", f.name, f.message));
+        }
+    }
+
+    if !report.uncovered.is_empty() {
+        p.push_str(&format!(
+            "\n### Uncovered lines (coverage target {coverage_target}%)\n"
+        ));
+        for g in &report.uncovered {
+            p.push_str(&format!("- `{}` — lines {}\n", g.file, g.lines));
+        }
+    }
+
+    if let Some(tail) = &report.raw_tail {
+        p.push_str(
+            "\n### Raw output (structured parsing unavailable — inspect manually)\n```\n",
+        );
+        p.push_str(tail);
+        p.push_str("\n```\n");
+    }
+
+    p.push_str(
+        "\nOpen only the files named above. Add/fix code and tests so these pass \
+         and the listed lines are covered, then stop.\n",
     );
     p
 }
