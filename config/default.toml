@@ -1,5 +1,5 @@
 default_client = "claude"
-# When set, skip client prompt for `scrutiny review` (must be installed on PATH).
+# When set, skip client prompt for `scrutiny probe` (must be installed on PATH).
 # force_client = "claude"
 # When set, skip spawn-mode prompt. Default when unset: isolated.
 # force_spawn_mode = "isolated"

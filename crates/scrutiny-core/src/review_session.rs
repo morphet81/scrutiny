@@ -137,7 +137,7 @@ pub fn run_review_session_write(
 
     if !session.valid {
         bail!(
-            "review-session-write invalid:\n  - {}",
+            "probe-session-write invalid:\n  - {}",
             session.validation_errors.join("\n  - ")
         );
     }

@@ -1,4 +1,4 @@
-//! Headless agent CLI runner + finding collation for `scrutiny review`.
+//! Headless agent CLI runner + finding collation for `scrutiny probe`.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

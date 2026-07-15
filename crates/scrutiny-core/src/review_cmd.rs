@@ -1,4 +1,4 @@
-//! Orchestrate end-to-end `scrutiny review` (script-driven).
+//! Orchestrate end-to-end `scrutiny probe` (script-driven).
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -98,7 +98,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         }
     }
 
-    eprintln!("scrutiny review: eval…");
+    eprintln!("scrutiny probe: eval…");
     let (eval, eval_path) = run_eval(EvalInput {
         cwd: cwd.clone(),
         head: head.clone(),
@@ -107,19 +107,19 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
     })?;
     eprintln!("  {}", eval_path.display());
 
-    eprintln!("scrutiny review: map…");
+    eprintln!("scrutiny probe: map…");
     let (_map, map_path) = run_map(&eval_path, &cwd)?;
     eprintln!("  {}", map_path.display());
 
-    eprintln!("scrutiny review: pack…");
+    eprintln!("scrutiny probe: pack…");
     let (_pack, pack_path) = run_pack(&map_path, &cwd)?;
     eprintln!("  {}", pack_path.display());
 
-    eprintln!("scrutiny review: scan…");
+    eprintln!("scrutiny probe: scan…");
     let (_scan, scan_path) = run_scan(&map_path, Some(&pack_path), Some(&eval_path), &cwd)?;
     eprintln!("  {}", scan_path.display());
 
-    eprintln!("scrutiny review: plan-confirm…");
+    eprintln!("scrutiny probe: plan-confirm…");
     let (answers, answers_path) = run_plan_confirm(PlanConfirmInput {
         eval_path: eval_path.clone(),
         client: Some(detected.client.clone()),
@@ -142,16 +142,16 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         pack_path: Some(pack_path.clone()),
         scan_path: Some(scan_path.clone()),
     })?;
-    eprintln!("scrutiny review: plan {}", plan_path.display());
+    eprintln!("scrutiny probe: plan {}", plan_path.display());
 
     let mut report_path: Option<PathBuf> = None;
 
     if !plan.skip_ai && !input.skip_agents {
         let (report, rpath) = if plan.spawn_mode == "team" {
-            eprintln!("scrutiny review: team lead agent…");
+            eprintln!("scrutiny probe: team lead agent…");
             run_team_review(&detected, &plan, &pack_path, &cwd)?
         } else {
-            eprintln!("scrutiny review: isolated parallel agents…");
+            eprintln!("scrutiny probe: isolated parallel agents…");
             run_isolated_review(&detected, &plan, &pack_path, &cwd)?
         };
         eprintln!(
@@ -169,10 +169,10 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
             from_json: agents_json,
         }) {
             Ok((_, sp)) => eprintln!("  session {}", sp.display()),
-            Err(e) => eprintln!("scrutiny review: warn: review-session-write: {e:#}"),
+            Err(e) => eprintln!("scrutiny probe: warn: probe-session-write: {e:#}"),
         }
 
-        eprintln!("scrutiny review: findings-init…");
+        eprintln!("scrutiny probe: findings-init…");
         let (_fr, findings_path) = run_findings_init(FindingsInitInput {
             cwd: cwd.clone(),
             scan_path: scan_path.clone(),
@@ -183,7 +183,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         })?;
         merge_ai_findings(&findings_path, &report.findings)?;
         eprintln!(
-            "scrutiny review: merged {} AI findings → {}",
+            "scrutiny probe: merged {} AI findings → {}",
             report.findings.len(),
             findings_path.display()
         );
@@ -200,7 +200,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         return Ok((findings_path, report_path));
     }
 
-    eprintln!("scrutiny review: skip AI — findings-init from scan");
+    eprintln!("scrutiny probe: skip AI — findings-init from scan");
     let (_fr, findings_path) = run_findings_init(FindingsInitInput {
         cwd: cwd.clone(),
         scan_path: scan_path.clone(),
@@ -233,7 +233,7 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
         serde_json::from_str(&text).context("parse ReviewReport (need findings array)")?;
     if report.findings.is_empty() {
         eprintln!(
-            "scrutiny review: warn: report has 0 findings ({})",
+            "scrutiny probe: warn: report has 0 findings ({})",
             input.report_path.display()
         );
     }
@@ -248,7 +248,7 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
 
     let findings_path = if let Some(scan_path) = &input.scan_path {
         eprintln!(
-            "scrutiny review: --from-report + scan {}",
+            "scrutiny probe: --from-report + scan {}",
             scan_path.display()
         );
         let (_fr, path) = run_findings_init(FindingsInitInput {
@@ -261,14 +261,14 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
         })?;
         path
     } else {
-        eprintln!("scrutiny review: --from-report (empty findings shell, AI only)");
+        eprintln!("scrutiny probe: --from-report (empty findings shell, AI only)");
         let (_fr, path) = run_findings_init_empty(&cwd, pr_arg.as_deref())?;
         path
     };
 
     merge_ai_findings(&findings_path, &report.findings)?;
     eprintln!(
-        "scrutiny review: merged {} AI findings → {}",
+        "scrutiny probe: merged {} AI findings → {}",
         report.findings.len(),
         findings_path.display()
     );
@@ -281,7 +281,7 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
     } else {
         let fr = prompt_pr_if_missing(&findings_path, &cwd)?;
         if let Some(n) = fr.pr_number {
-            eprintln!("scrutiny review: linked PR #{n}");
+            eprintln!("scrutiny probe: linked PR #{n}");
         }
     }
 
@@ -315,7 +315,7 @@ fn finish_triage_and_post(
     client_override: Option<String>,
 ) -> Result<()> {
     if non_interactive {
-        eprintln!("scrutiny review: non-interactive — skip triage/post (edit findings JSON manually)");
+        eprintln!("scrutiny probe: non-interactive — skip triage/post (edit findings JSON manually)");
         return Ok(());
     }
 
@@ -335,7 +335,7 @@ fn finish_triage_and_post(
         report.pr_number.is_some()
     };
     if !has_pr {
-        eprintln!("scrutiny review: no PR — skip post-comments. Open a PR or re-run with --pr.");
+        eprintln!("scrutiny probe: no PR — skip post-comments. Open a PR or re-run with --pr.");
         return Ok(());
     }
 
@@ -346,7 +346,7 @@ fn finish_triage_and_post(
         event,
     })?;
     eprintln!(
-        "scrutiny review: posted {} comments → {}",
+        "scrutiny probe: posted {} comments → {}",
         result.posted_comments,
         post_path.display()
     );

@@ -1,9 +1,9 @@
 ---
 name: scrutiny
 description: >-
-  Code review skill. Prefer `scrutiny review` for script-orchestrated runs
+  Probe skill (code review). Prefer `scrutiny probe` for script-orchestrated runs
   (headless agents, isolated|team spawn). Or chain Rust eval → map → pack → scan,
-  plan-confirm, optional Task agents, review-session-write, findings triage,
+  plan-confirm, optional Task agents, probe-session-write, findings triage,
   post-comments. Local default; PR URL/number for PR mode.
 argument-hint: "[PR-URL | PR-number]"
 ---
@@ -14,19 +14,19 @@ argument-hint: "[PR-URL | PR-number]"
 
 ```bash
 SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
-"$SCRUTINY_BIN" review [--pr <url|number>]
+"$SCRUTINY_BIN" probe [--pr <url|number>]
 ```
 
-That probes `agent`/`claude`/`codex`, asks plan knobs, runs headless review
+Detects `agent`/`claude`/`codex`, asks plan knobs, runs headless probe
 (`team` lead by default with **verbatim isolated member briefs embedded** in
 the lead prompt, or `isolated` parallel specialists), triage, and posts.
 
 This skill is for **IDE agent sessions** that still chain discrete steps below.
-Complexity, map, pack, and scan stay scripts. Review agents read **pack only**.
+Complexity, map, pack, and scan stay scripts. Probe agents read **pack only**.
 
 ## Usage
 
-- `/scrutiny` — local branch vs auto-detected base (or suggest `scrutiny review`)
+- `/scrutiny` — local branch vs auto-detected base (or suggest `scrutiny probe`)
 - `/scrutiny <PR-URL>` — PR mode
 - `/scrutiny <PR-number>` — PR mode when unambiguous in current repo
 
@@ -157,7 +157,7 @@ Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `r
 
 If `reviewers_requested` > `reviewers` (pack `max_reviewers` cap, e.g. pack_chars < 4000 → cap 1), tell user the effective count — do not spawn the raw requested number.
 
-#### Short-circuit (no AI review)
+#### Short-circuit (no AI probe)
 
 If `skip_ai` is true (XS + docs + empty scan, or reviewers=evangelists=0):
 
@@ -166,7 +166,7 @@ If `skip_ai` is true (XS + docs + empty scan, or reviewers=evangelists=0):
 - Jump to **findings-init** from scan → Step 7 triage
 - Optional tiny doc skim from pack digests only if user asks
 
-### 6. AI review (when `skip_ai` is false)
+### 6. AI probe (when `skip_ai` is false)
 
 #### Model application (critical)
 
@@ -184,7 +184,7 @@ Telling the main agent “prefer 4.6” while the UI session is Opus **does not*
 
 #### Spawn rules (mandatory when `skip_ai` false and `plan.reviewers` > 0)
 
-**Prefer CLI templates** (same text as `scrutiny review` isolated / team):
+**Prefer CLI templates** (same text as `scrutiny probe` isolated / team):
 
 ```bash
 "$SCRUTINY_BIN" agent-prompt --role reviewer --pack "$PACK" --plan "$PLAN" --paths "a.ts,b.ts"
@@ -210,12 +210,12 @@ BUCKETS="$("$SCRUTINY_BIN" pack-partition --pack "$PACK" --reviewers "$(jq .revi
 6. Record session (fails if agent count ≠ expected):
 
 ```bash
-SESSION="$("$SCRUTINY_BIN" review-session-write --plan "$PLAN" --pack "$PACK" --from-json "$AGENTS_JSON")"
+SESSION="$("$SCRUTINY_BIN" probe-session-write --plan "$PLAN" --pack "$PACK" --from-json "$AGENTS_JSON")"
 ```
 
 `AGENTS_JSON` example: `[{"role":"reviewer","index":1,"paths":["a.ts"],"findings_count":3},…]`.
 
-If `review-session-write` fails validation (or `agents.length != reviewers_expected + evangelists_expected`), **re-spawn missing agents** before triage — do not invent session JSON.
+If `probe-session-write` fails validation (or `agents.length != reviewers_expected + evangelists_expected`), **re-spawn missing agents** before triage — do not invent session JSON.
 
 Other:
 
@@ -269,7 +269,7 @@ Each issue: **number**, **title**, **path:line**, **explanation**, **proposed fi
 
 ### 8. Interactive triage → edit findings JSON → hand off to script
 
-**Prefer the script.** Run `$SCRUTINY_BIN findings-triage` (or full `scrutiny review`): TTY uses **↑/↓ menus** — Post / Ignore / Ask a question… (or fix option). Ask is a **separate** menu row, then a follow-up question — never "type P or free text" on one prompt (that misreads `P` as a question).
+**Prefer the script.** Run `$SCRUTINY_BIN findings-triage` (or full `scrutiny probe`): TTY uses **↑/↓ menus** — Post / Ignore / Ask a question… (or fix option). Ask is a **separate** menu row, then a follow-up question — never "type P or free text" on one prompt (that misreads `P` as a question).
 
 If the agent host cannot attach a TTY to the binary, use **one** multi-choice form (Post/Ignore/options per finding; no free-text action field). Never split by severity. Never a second decision menu after posting. **Do not** ask Request changes / Comment / Approve — that is `post-comments`'s job.
 
@@ -307,7 +307,7 @@ Show result path / review `html_url` from the script output. Agent must **not** 
 
 ## Notes
 
-- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → `plan-confirm` → `plan-write` → (optional AI: partition + parallel spawn + wait + `review-session-write`) → `findings-init` → **one** triage prompt → `findings-resolve` → `post-comments` (pending + event prompts)
+- Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → `plan-confirm` → `plan-write` → (optional AI: partition + parallel spawn + wait + `probe-session-write`) → `findings-init` → **one** triage prompt → `findings-resolve` → `post-comments` (pending + event prompts)
 - Edit `~/.scrutiny/config.toml` for models / pack / scan / agent counts
 - Claude `[models.claude]` uses aliases or pinned Anthropic ids only — not Cursor slugs
 - Install: `npx skills add <owner>/scrutiny -g -y --skill '*'` (see README)

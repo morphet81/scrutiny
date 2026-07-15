@@ -8,13 +8,13 @@ The goal is simple: **do as much work as possible outside the model.** Determini
 
 ## Skills
 
-### `/scrutiny`
+### `/scrutiny` (Probe)
 
-Reviews a local branch or a GitHub PR. Prefer **`scrutiny review`** for script-orchestrated runs (detects Cursor/Claude/Codex CLIs, plan knobs, headless agents, triage, post). The `/scrutiny` skill remains for IDE agent sessions that chain discrete commands.
+Probes a local branch or a GitHub PR. Prefer **`scrutiny probe`** for script-orchestrated runs (detects Cursor/Claude/Codex CLIs, plan knobs, headless agents, triage, post). The `/scrutiny` skill remains for IDE agent sessions that chain discrete commands.
 
 ### `/forge`
 
-Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent (writes `pr.json`, script commits + optional draft PR). Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny review`.
+Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent (writes `pr.json`, script commits + optional draft PR). Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny probe`.
 
 ## Install (Homebrew)
 
@@ -59,7 +59,7 @@ Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline 
 - Or: network for GitHub Release binary / Rust toolchain for `cargo build --release`
 - `git`
 - Optional: `gh` (PR review + GitHub issues), `acli` (Jira), `glab` (GitLab), `fcli` (Figma)
-- For `scrutiny review`: headless agent CLI on PATH — `agent`/`cursor-agent`, `claude`, and/or `codex`
+- For `scrutiny probe`: headless agent CLI on PATH — `agent`/`cursor-agent`, `claude`, and/or `codex`
 - `npx` for `skills-install`
 - `SCRUTINY_GITHUB_REPO` overrides download/install repo (default `morphet81/scrutiny`)
 - Binary fetch (when not using brew) uses GitHub Release **latest** by default (cache keyed by `bin/.scrutiny-version`; refreshes when tag changes). Set `SCRUTINY_VERSION=0.1.5` only to pin. `SCRUTINY_USE_LOCAL=1` forces local `cargo` build.
@@ -69,22 +69,22 @@ Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline 
 ```bash
 cargo build --release
 ./target/release/scrutiny eval --help
-./target/release/scrutiny review --help
+./target/release/scrutiny probe --help
 ./target/release/scrutiny skills-install --help
 bash scripts/ensure-bin.sh
 ```
 
 ## Commands
 
-### One-shot review (preferred)
+### One-shot probe (preferred)
 
 ```bash
-./target/release/scrutiny review
-./target/release/scrutiny review --pr 42
-./target/release/scrutiny review --client claude --spawn-mode isolated
-./target/release/scrutiny review --from-json '{"client":"claude","model":"sonnet","security":true,"performance":false,"error_handling":true,"reviewers":1,"evangelists":0,"spawn_mode":"isolated"}' --yes
+./target/release/scrutiny probe
+./target/release/scrutiny probe --pr 42
+./target/release/scrutiny probe --client claude --spawn-mode isolated
+./target/release/scrutiny probe --from-json '{"client":"claude","model":"sonnet","security":true,"performance":false,"error_handling":true,"reviewers":1,"evangelists":0,"spawn_mode":"isolated"}' --yes
 # resume triage/post from an existing AI review-report.json (skip eval/agents):
-./target/release/scrutiny review --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutiny/42/scan.json]
+./target/release/scrutiny probe --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutiny/42/scan.json]
 ```
 
 Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **team** lead (default) or **isolated** parallel headless agents → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
@@ -106,7 +106,7 @@ Flow: require source CLI (`acli`/`gh`/`glab`) with install links → ticket mirr
 
 Install links when missing: [acli](https://developer.atlassian.com/cloud/acli/guides/install-acli/), [fcli](https://github.com/morphet81/figma-cli).
 
-Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny review` does **not** pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth even with a key: `SCRUTINY_CLAUDE_NO_BARE=1`.
+Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny probe` does **not** pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth even with a key: `SCRUTINY_CLAUDE_NO_BARE=1`.
 
 Config (`~/.scrutiny/config.toml`):
 
@@ -115,7 +115,7 @@ Config (`~/.scrutiny/config.toml`):
 # force_spawn_mode = "isolated"  # or "team"
 ```
 
-### Step-by-step review pipeline
+### Step-by-step probe pipeline
 
 ```bash
 ./target/release/scrutiny eval
@@ -130,7 +130,7 @@ Config (`~/.scrutiny/config.toml`):
   --answers .scrutiny/42/plan-answers.json
 # after spawning reviewers/evangelists:
 ./target/release/scrutiny pack-partition --pack .scrutiny/42/pack.json --reviewers 2
-./target/release/scrutiny review-session-write --plan .scrutiny/42/plan.json --pack .scrutiny/42/pack.json \
+./target/release/scrutiny probe-session-write --plan .scrutiny/42/plan.json --pack .scrutiny/42/pack.json \
   --from-json '[{"role":"reviewer","index":1,"paths":["a.rs"],"findings_count":2}]'
 ./target/release/scrutiny findings-init --scan .scrutiny/42/scan.json --eval .scrutiny/42/eval.json \
   --pack .scrutiny/42/pack.json --plan .scrutiny/42/plan.json --pr 42
@@ -162,13 +162,13 @@ Print a role or lead prompt for skill/debug:
 
 ### Review session
 
-`pack-partition` splits pack slice paths across N reviewers (round-robin). `review-session-write` records spawned agents and **fails** if counts do not match the plan (team mode expects one `lead`).
+`pack-partition` splits pack slice paths across N reviewers (round-robin). `probe-session-write` records spawned agents and **fails** if counts do not match the plan (team mode expects one `lead`).
 
 ### Findings / post-comments
 
 After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `suggestion`.
 
-`findings-triage` (and `scrutiny review`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. Agent revises that finding only; menu reappears. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
+`findings-triage` (and `scrutiny probe`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. Agent revises that finding only; menu reappears. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
 
 On a TTY, severity/title use ANSI colors (`NO_COLOR` or non-TTY disables). Each finding shows a short code snippet from `git show <head>:<path>` when a path exists.
 

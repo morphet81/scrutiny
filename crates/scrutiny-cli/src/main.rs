@@ -115,8 +115,8 @@ enum Commands {
         #[arg(long)]
         from_json: Option<String>,
     },
-    /// Orchestrate full review: analyze → plan → headless agents → triage → post
-    Review {
+    /// Orchestrate full probe: analyze → plan → headless agents → triage → post
+    Probe {
         #[arg(long)]
         cwd: Option<PathBuf>,
         /// PR URL or number (else local branch)
@@ -182,8 +182,8 @@ enum Commands {
         #[arg(long)]
         paths: Option<String>,
     },
-    /// Record spawned review agents; validate counts vs plan; print session path
-    ReviewSessionWrite {
+    /// Record spawned probe agents; validate counts vs plan; print session path
+    ProbeSessionWrite {
         #[arg(long)]
         plan: PathBuf,
         #[arg(long)]
@@ -466,7 +466,7 @@ fn run() -> Result<()> {
             let (_plan, path) = run_plan_write(input)?;
             println!("{}", path.display());
         }
-        Commands::Review {
+        Commands::Probe {
             cwd,
             pr,
             rest,
@@ -554,7 +554,7 @@ fn run() -> Result<()> {
             })?;
             println!("{text}");
         }
-        Commands::ReviewSessionWrite {
+        Commands::ProbeSessionWrite {
             plan,
             pack,
             from_json,

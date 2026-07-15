@@ -3,7 +3,7 @@ name: forge
 description: >-
   Implement a ticket or description. Prefer `scrutiny forge` (fetch mirror,
   fcli, knobs, TDD plan confirm, single|team implement). Or chain forge-fetch /
-  plan-write / context / brief. Reuses scrutiny review for post-impl.
+  plan-write / context / brief. Reuses scrutiny probe for post-impl.
 argument-hint: "[URL | issue-id | --inline description]"
 ---
 
@@ -272,7 +272,7 @@ decides "done". Do NOT re-implement this in the IDE chain.
 
 ---
 
-## Phase D — Post-impl review (reuse scrutiny)
+## Phase D — Post-impl probe (reuse `scrutiny probe`)
 
 If `session.skip_ai_review` → skip AI; optional note.
 
