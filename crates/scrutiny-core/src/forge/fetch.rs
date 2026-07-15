@@ -1,8 +1,11 @@
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::Utc;
+use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -490,43 +493,306 @@ fn download_jira_attachments(cwd: &Path, key: &str, raw: &Value) -> Result<Optio
     let dir = root.join("attachments");
     fs::create_dir_all(&dir).context("create attachments dir")?;
 
-    let token = Command::new("acli")
-        .args(["auth", "token"])
-        .current_dir(cwd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-    let Some(token) = token else {
-        // Keep dir path even if we cannot download
+    let profile = acli_jira_profile();
+    let auth = resolve_jira_download_auth(cwd, profile.as_ref());
+    let Some(auth) = auth else {
+        eprintln!(
+            "scrutiny forge: skip downloading {} attachment(s) for {key} \
+             (no OAuth keychain token / API token; metadata stays in ticket.json)",
+            attachments.len()
+        );
         return Ok(Some(dir.display().to_string()));
     };
 
+    let cloud_id = profile.as_ref().map(|p| p.cloud_id.as_str());
+    let site = profile.as_ref().map(|p| p.site.as_str());
+
+    eprintln!(
+        "scrutiny forge: downloading {} attachment(s)…",
+        attachments.len()
+    );
     for att in attachments {
         let filename = att
             .get("filename")
             .and_then(|v| v.as_str())
             .unwrap_or("attachment.bin");
-        let content_url = att.get("content").and_then(|v| v.as_str());
-        let Some(url) = content_url else {
+        let Some(url) = attachment_download_url(cloud_id, site, &att, &auth) else {
+            eprintln!("scrutiny forge: attachment missing id/url: {filename}");
             continue;
         };
         let dest = dir.join(filename);
-        let status = Command::new("curl")
-            .args([
-                "-s",
-                "-L",
-                "-H",
-                &format!("Authorization: Bearer {token}"),
-                "-o",
-                &dest.display().to_string(),
-                url,
-            ])
-            .status();
-        let _ = status; // best-effort
+        // Timeouts: bad auth + `-L` used to hang forever on login redirects.
+        let mut cmd = Command::new("curl");
+        cmd.args([
+            "-sS",
+            "-L",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "60",
+            "-f",
+            "-o",
+            &dest.display().to_string(),
+        ]);
+        match &auth {
+            JiraDownloadAuth::Bearer(token) => {
+                cmd.args(["-H", &format!("Authorization: Bearer {token}")]);
+            }
+            JiraDownloadAuth::Basic { email, token } => {
+                cmd.args(["-u", &format!("{email}:{token}")]);
+            }
+        }
+        cmd.arg(&url);
+        let status = cmd.status();
+        if !matches!(status, Ok(s) if s.success()) {
+            let _ = fs::remove_file(&dest);
+            eprintln!("scrutiny forge: attachment download failed: {filename}");
+        }
     }
     Ok(Some(dir.display().to_string()))
+}
+
+#[derive(Debug, Clone)]
+enum JiraDownloadAuth {
+    Bearer(String),
+    Basic { email: String, token: String },
+}
+
+#[derive(Debug, Clone)]
+struct AcliJiraProfile {
+    cloud_id: String,
+    account_id: String,
+    site: String,
+    email: String,
+}
+
+/// Env bearer → env API token (Basic) → macOS acli keychain OAuth → validated `acli auth token`.
+fn resolve_jira_download_auth(cwd: &Path, profile: Option<&AcliJiraProfile>) -> Option<JiraDownloadAuth> {
+    for key in ["SCRUTINY_JIRA_BEARER", "ATLASSIAN_ACCESS_TOKEN"] {
+        if let Ok(v) = std::env::var(key) {
+            let t = v.trim().to_string();
+            if looks_like_bearer_token(&t) {
+                return Some(JiraDownloadAuth::Bearer(t));
+            }
+        }
+    }
+
+    let api_token = ["ATLASSIAN_API_TOKEN", "JIRA_API_TOKEN"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(token) = api_token {
+        let email = std::env::var("ATLASSIAN_EMAIL")
+            .or_else(|_| std::env::var("JIRA_EMAIL"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| profile.map(|p| p.email.clone()).filter(|s| !s.is_empty()))
+            .or_else(|| parse_acli_auth_status_email(cwd));
+        if let Some(email) = email {
+            return Some(JiraDownloadAuth::Basic { email, token });
+        }
+    }
+
+    if let Some(p) = profile {
+        if let Some(tok) = read_acli_oauth_access_token(p) {
+            return Some(JiraDownloadAuth::Bearer(tok));
+        }
+    }
+
+    // Legacy / future: only if acli ever ships a real `auth token`.
+    let output = Command::new("acli")
+        .args(["auth", "token"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if looks_like_bearer_token(&token) {
+            return Some(JiraDownloadAuth::Bearer(token));
+        }
+    }
+    None
+}
+
+fn attachment_download_url(
+    cloud_id: Option<&str>,
+    site: Option<&str>,
+    att: &Value,
+    auth: &JiraDownloadAuth,
+) -> Option<String> {
+    let id = attachment_id(att)?;
+    match auth {
+        JiraDownloadAuth::Bearer(_) => {
+            let cid = cloud_id?;
+            Some(format!(
+                "https://api.atlassian.com/ex/jira/{cid}/rest/api/3/attachment/content/{id}"
+            ))
+        }
+        JiraDownloadAuth::Basic { .. } => {
+            if let Some(site) = site.filter(|s| !s.is_empty()) {
+                let host = site.trim_start_matches("https://").trim_start_matches("http://");
+                return Some(format!(
+                    "https://{host}/rest/api/3/attachment/content/{id}"
+                ));
+            }
+            // Last resort: content URL from JSON (may be unreachable off-VPN).
+            att.get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+    }
+}
+
+fn attachment_id(att: &Value) -> Option<String> {
+    if let Some(s) = att.get("id").and_then(|v| v.as_str()) {
+        return Some(s.to_string());
+    }
+    att.get("id")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.to_string())
+}
+
+fn acli_jira_profile() -> Option<AcliJiraProfile> {
+    let home = dirs_home()?;
+    let path = home.join(".config/acli/jira_config.yaml");
+    let text = fs::read_to_string(path).ok()?;
+    parse_acli_jira_profile_yaml(&text)
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Minimal parse of acli's jira_config.yaml (no YAML crate).
+fn parse_acli_jira_profile_yaml(text: &str) -> Option<AcliJiraProfile> {
+    let mut current_profile = None::<String>;
+    let mut cloud_id = None::<String>;
+    let mut account_id = None::<String>;
+    let mut site = None::<String>;
+    let mut email = None::<String>;
+    for line in text.lines() {
+        let t = line.trim().trim_start_matches('-').trim();
+        if let Some(rest) = t.strip_prefix("current_profile:") {
+            current_profile = Some(rest.trim().trim_matches('"').to_string());
+        } else if let Some(rest) = t.strip_prefix("cloud_id:") {
+            cloud_id = Some(rest.trim().trim_matches('"').to_string());
+        } else if let Some(rest) = t.strip_prefix("account_id:") {
+            account_id = Some(rest.trim().trim_matches('"').to_string());
+        } else if let Some(rest) = t.strip_prefix("site:") {
+            site = Some(rest.trim().trim_matches('"').to_string());
+        } else if let Some(rest) = t.strip_prefix("email:") {
+            email = Some(rest.trim().trim_matches('"').to_string());
+        }
+    }
+    // current_profile is `{cloud_id}:{account_id}` — prefer explicit fields, else split UUID.
+    if cloud_id.is_none() || account_id.is_none() {
+        if let Some(cp) = &current_profile {
+            if let Some((cid, aid)) = split_cloud_and_account(cp) {
+                cloud_id = cloud_id.or(Some(cid));
+                account_id = account_id.or(Some(aid));
+            }
+        }
+    }
+    Some(AcliJiraProfile {
+        cloud_id: cloud_id.filter(|s| !s.is_empty())?,
+        account_id: account_id.filter(|s| !s.is_empty())?,
+        site: site.unwrap_or_default(),
+        email: email.unwrap_or_default(),
+    })
+}
+
+fn split_cloud_and_account(profile: &str) -> Option<(String, String)> {
+    // UUID is 36 chars with dashes; rest after first ':' following UUID is account_id.
+    let bytes = profile.as_bytes();
+    if bytes.len() < 38 || bytes.get(36) != Some(&b':') {
+        return None;
+    }
+    let cid = &profile[..36];
+    if !cid.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return None;
+    }
+    Some((cid.to_string(), profile[37..].to_string()))
+}
+
+fn parse_acli_auth_status_email(cwd: &Path) -> Option<String> {
+    let output = Command::new("acli")
+        .args(["auth", "status"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Email:") {
+            let email = rest.trim();
+            if !email.is_empty() {
+                return Some(email.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read renewing OAuth access_token from acli's go-keyring blob (macOS Keychain).
+fn read_acli_oauth_access_token(profile: &AcliJiraProfile) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let acct = format!("jira:{}:{}", profile.cloud_id, profile.account_id);
+        let output = Command::new("security")
+            .args(["find-generic-password", "-s", "acli", "-a", &acct, "-w"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return decode_go_keyring_access_token(&raw);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = profile;
+        None
+    }
+}
+
+/// Decode `go-keyring-base64:` + gzip + JSON `{ access_token, ... }`.
+fn decode_go_keyring_access_token(raw: &str) -> Option<String> {
+    const PREFIX: &str = "go-keyring-base64:";
+    let b64 = raw.strip_prefix(PREFIX)?.trim();
+    let compressed = B64.decode(b64.as_bytes()).ok()?;
+    let mut decoder = GzDecoder::new(&compressed[..]);
+    let mut json_bytes = Vec::new();
+    decoder.read_to_end(&mut json_bytes).ok()?;
+    let v: Value = serde_json::from_slice(&json_bytes).ok()?;
+    let token = v.get("access_token")?.as_str()?.to_string();
+    if looks_like_bearer_token(&token) {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+/// Reject acli help dumps / multi-line garbage that used to be passed as Bearer.
+fn looks_like_bearer_token(s: &str) -> bool {
+    let s = s.trim();
+    // JWTs from Atlassian OAuth are long; keep headroom.
+    if s.len() < 20 || s.len() > 16_384 {
+        return false;
+    }
+    if s.contains('\n') || s.contains('\r') || s.contains(char::is_whitespace) {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("usage:") || lower.contains("authenticate to use") {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '+' | '/' | '='))
 }
 
 fn fetch_github(cwd: &Path, raw: &str) -> Result<TicketReport> {
@@ -841,5 +1107,71 @@ mod tests {
         let r = fetch_inline("Build dark mode\n\nDetails here", None).unwrap();
         assert_eq!(r.source, "inline");
         assert_eq!(r.title, "Build dark mode");
+    }
+
+    #[test]
+    fn bearer_token_rejects_acli_help_dump() {
+        let help = "Authenticate to use Atlassian CLI.\n\nUsage:\n  acli auth [command]\n";
+        assert!(!looks_like_bearer_token(help));
+        assert!(!looks_like_bearer_token("short"));
+        assert!(!looks_like_bearer_token("token with spaces that are long enough!!"));
+        assert!(looks_like_bearer_token(
+            "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.abc.def"
+        ));
+    }
+
+    #[test]
+    fn parses_acli_jira_profile_yaml() {
+        let yaml = r#"
+version: 1
+current_profile: d5b2094b-04bb-467d-b98e-f39df372f11b:712020:e26bdb9e-a73f-4a07-b3df-7b9a1b76136e
+profiles:
+    - site: tablecheck.atlassian.net
+      cloud_id: d5b2094b-04bb-467d-b98e-f39df372f11b
+      account_id: 712020:e26bdb9e-a73f-4a07-b3df-7b9a1b76136e
+      email: alex@example.com
+"#;
+        let p = parse_acli_jira_profile_yaml(yaml).unwrap();
+        assert_eq!(p.cloud_id, "d5b2094b-04bb-467d-b98e-f39df372f11b");
+        assert_eq!(p.account_id, "712020:e26bdb9e-a73f-4a07-b3df-7b9a1b76136e");
+        assert_eq!(p.site, "tablecheck.atlassian.net");
+        assert_eq!(p.email, "alex@example.com");
+    }
+
+    #[test]
+    fn gateway_url_for_bearer() {
+        let att = serde_json::json!({"id": "117160", "filename": "x.png"});
+        let auth = JiraDownloadAuth::Bearer("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.abc.def".into());
+        let url = attachment_download_url(
+            Some("d5b2094b-04bb-467d-b98e-f39df372f11b"),
+            Some("tablecheck.atlassian.net"),
+            &att,
+            &auth,
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://api.atlassian.com/ex/jira/d5b2094b-04bb-467d-b98e-f39df372f11b/rest/api/3/attachment/content/117160"
+        );
+    }
+
+    #[test]
+    fn decodes_go_keyring_oauth_blob() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let payload = serde_json::json!({
+            "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.abc.def",
+            "token_type": "Bearer",
+            "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.refresh.tok",
+            "expiry": "2026-07-15T00:00:00.000Z",
+            "expires_in": 3600
+        });
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(payload.to_string().as_bytes()).unwrap();
+        let compressed = enc.finish().unwrap();
+        let raw = format!("go-keyring-base64:{}", B64.encode(compressed));
+        let tok = decode_go_keyring_access_token(&raw).unwrap();
+        assert_eq!(tok, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.abc.def");
     }
 }

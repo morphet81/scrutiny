@@ -6,6 +6,11 @@ use std::process::Command;
 
 use crate::forge::fetch::TicketReport;
 use crate::paths::{temp_artifact_path, write_json_pretty};
+use crate::treesitter;
+
+const MAX_OUTLINE_FILES: usize = 20;
+const MAX_DECLS_PER_FILE: usize = 40;
+const MAX_OUTLINE_FILE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeContextReport {
@@ -14,8 +19,25 @@ pub struct ForgeContextReport {
     pub cwd: String,
     pub keywords: Vec<String>,
     pub related_paths: Vec<String>,
+    #[serde(default)]
+    pub file_outlines: Vec<FileOutline>,
     pub test_harness: TestHarnessHints,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOutline {
+    pub path: String,
+    pub decls: Vec<OutlineDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutlineDecl {
+    pub kind: String,
+    pub name: String,
+    pub signature: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -35,6 +57,7 @@ pub fn run_forge_context(ticket_path: &Path, cwd: &Path) -> Result<(ForgeContext
 
     let keywords = keywords_from_ticket(&ticket);
     let related_paths = find_related_paths(cwd, &keywords);
+    let file_outlines = outline_related_paths(cwd, &related_paths);
     let test_harness = sniff_test_harness(cwd);
     let mut notes = Vec::new();
     if related_paths.is_empty() {
@@ -47,6 +70,7 @@ pub fn run_forge_context(ticket_path: &Path, cwd: &Path) -> Result<(ForgeContext
         cwd: cwd.display().to_string(),
         keywords,
         related_paths,
+        file_outlines,
         test_harness,
         notes,
     };
@@ -168,6 +192,57 @@ fn walk_names(
     Ok(())
 }
 
+/// Symbol outlines for related path hits. Caps files/decls/size; skips dirs and oversized.
+fn outline_related_paths(cwd: &Path, related_paths: &[String]) -> Vec<FileOutline> {
+    let mut out = Vec::new();
+    for rel in related_paths {
+        if out.len() >= MAX_OUTLINE_FILES {
+            break;
+        }
+        let abs = cwd.join(rel);
+        let meta = match fs::metadata(&abs) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.len() > MAX_OUTLINE_FILE_BYTES {
+            continue;
+        }
+        let bytes = match fs::read(&abs) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if bytes.iter().any(|&b| b == 0) {
+            continue;
+        }
+        let src = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let decls = match treesitter::outline(rel, &src) {
+            Some(decls) => decls
+                .into_iter()
+                .take(MAX_DECLS_PER_FILE)
+                .map(|d| OutlineDecl {
+                    kind: d.kind,
+                    name: d.name,
+                    signature: d.signature,
+                    start: d.start,
+                    end: d.end,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        out.push(FileOutline {
+            path: rel.clone(),
+            decls,
+        });
+    }
+    out
+}
+
 fn sniff_test_harness(cwd: &Path) -> TestHarnessHints {
     let mut hints = TestHarnessHints::default();
     let candidates = [
@@ -212,4 +287,78 @@ fn sniff_test_harness(cwd: &Path) -> TestHarnessHints {
         }
     }
     hints
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn outlines_rust_file_with_decls() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "pub fn widget_helper(x: u32) -> u32 {\n    x + 1\n}\n\nstruct WidgetState {\n    n: u32,\n}\n";
+        fs::write(dir.path().join("widget.rs"), src).unwrap();
+
+        let outlines = outline_related_paths(dir.path(), &["widget.rs".into()]);
+        assert_eq!(outlines.len(), 1);
+        assert_eq!(outlines[0].path, "widget.rs");
+        assert!(outlines[0]
+            .decls
+            .iter()
+            .any(|d| d.kind == "fn" && d.name == "widget_helper"));
+        assert!(outlines[0]
+            .decls
+            .iter()
+            .any(|d| d.kind == "struct" && d.name == "WidgetState"));
+    }
+
+    #[test]
+    fn unknown_ext_included_with_empty_decls() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "hello widget\n").unwrap();
+
+        let outlines = outline_related_paths(dir.path(), &["notes.txt".into()]);
+        assert_eq!(outlines.len(), 1);
+        assert_eq!(outlines[0].path, "notes.txt");
+        assert!(outlines[0].decls.is_empty());
+    }
+
+    #[test]
+    fn oversized_file_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        let mut f = fs::File::create(&path).unwrap();
+        // Over 256 KiB of valid-ish rust-ish text
+        let chunk = b"// padding line that makes the file large enough to skip\n";
+        let need = (MAX_OUTLINE_FILE_BYTES as usize / chunk.len()) + 2;
+        for _ in 0..need {
+            f.write_all(chunk).unwrap();
+        }
+        drop(f);
+
+        let outlines = outline_related_paths(dir.path(), &["big.rs".into()]);
+        assert!(outlines.is_empty());
+    }
+
+    #[test]
+    fn skips_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        let outlines = outline_related_paths(dir.path(), &["src".into()]);
+        assert!(outlines.is_empty());
+    }
+
+    #[test]
+    fn caps_outline_file_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for i in 0..25 {
+            let name = format!("f{i}.rs");
+            fs::write(dir.path().join(&name), format!("fn f{i}() {{}}\n")).unwrap();
+            paths.push(name);
+        }
+        let outlines = outline_related_paths(dir.path(), &paths);
+        assert_eq!(outlines.len(), MAX_OUTLINE_FILES);
+    }
 }

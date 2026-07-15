@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::forge::context::ForgeContextReport;
+use crate::forge::context::{FileOutline, ForgeContextReport};
 use crate::forge::fetch::TicketReport;
 use crate::forge::plan::ForgeSessionPlan;
 use crate::paths::{temp_artifact_path, write_json_pretty};
+
+const OUTLINES_SECTION_MAX_CHARS: usize = 8000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeBriefReport {
@@ -129,6 +131,10 @@ fn render_brief(
             out.push_str(&format!("- {p}\n"));
         }
         out.push('\n');
+        if let Some(section) = render_outlines_section(&c.file_outlines) {
+            out.push_str(&section);
+            out.push('\n');
+        }
     }
 
     if !ticket.comments.is_empty() {
@@ -157,4 +163,127 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let truncated: String = s.chars().take(max).collect();
     format!("{truncated}…")
+}
+
+/// Compact symbol outlines for brief. Skips empty-decl files. Soft-caps ~8k chars.
+fn render_outlines_section(outlines: &[FileOutline]) -> Option<String> {
+    let with_decls: Vec<&FileOutline> = outlines.iter().filter(|o| !o.decls.is_empty()).collect();
+    if with_decls.is_empty() {
+        return None;
+    }
+    let mut section = String::from("### Outlines\n");
+    let mut truncated = false;
+    for fo in with_decls {
+        let mut block = format!("#### {}\n", fo.path);
+        for d in &fo.decls {
+            block.push_str(&format!(
+                "- {} {} — `{}` L{}-{}\n",
+                d.kind, d.name, d.signature, d.start, d.end
+            ));
+        }
+        if section.len() + block.len() > OUTLINES_SECTION_MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        section.push_str(&block);
+    }
+    if truncated {
+        section.push_str("…\n");
+    }
+    Some(section)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forge::context::{OutlineDecl, TestHarnessHints};
+
+    fn ticket() -> TicketReport {
+        TicketReport {
+            version: 1,
+            source: "inline".into(),
+            id: "inline-1".into(),
+            url: None,
+            title: "Add widget".into(),
+            description: "Build the widget helper.".into(),
+            labels: vec![],
+            comments: vec![],
+            attachments_dir: None,
+            figma_urls: vec![],
+            figma_dir: None,
+            fields: serde_json::json!({}),
+            raw_path: None,
+            fetched_at: String::new(),
+            suggested_forge: crate::config::SuggestedForge::default(),
+        }
+    }
+
+    fn context_with_outlines() -> ForgeContextReport {
+        ForgeContextReport {
+            version: 1,
+            ticket_path: "ticket.json".into(),
+            cwd: "/tmp".into(),
+            keywords: vec!["widget".into()],
+            related_paths: vec!["src/widget.rs".into()],
+            file_outlines: vec![FileOutline {
+                path: "src/widget.rs".into(),
+                decls: vec![OutlineDecl {
+                    kind: "fn".into(),
+                    name: "widget_helper".into(),
+                    signature: "pub fn widget_helper(x: u32) -> u32 {".into(),
+                    start: 1,
+                    end: 3,
+                }],
+            }],
+            test_harness: TestHarnessHints::default(),
+            notes: vec![],
+        }
+    }
+
+    #[test]
+    fn brief_includes_outlines_section() {
+        let md = render_brief(&ticket(), None, Some(&context_with_outlines()));
+        assert!(md.contains("### Outlines"));
+        assert!(md.contains("#### src/widget.rs"));
+        assert!(md.contains("widget_helper"));
+        assert!(md.contains("L1-3"));
+    }
+
+    #[test]
+    fn brief_skips_empty_decl_outlines() {
+        let mut ctx = context_with_outlines();
+        ctx.file_outlines = vec![FileOutline {
+            path: "notes.txt".into(),
+            decls: vec![],
+        }];
+        let md = render_brief(&ticket(), None, Some(&ctx));
+        assert!(!md.contains("### Outlines"));
+    }
+
+    #[test]
+    fn outlines_section_soft_cap() {
+        let mut decls = Vec::new();
+        for i in 0..200 {
+            decls.push(OutlineDecl {
+                kind: "fn".into(),
+                name: format!("f{i}"),
+                signature: format!("fn f{i}() {{ /* padding so lines are long enough for budget */ }}"),
+                start: i + 1,
+                end: i + 1,
+            });
+        }
+        let outlines = vec![
+            FileOutline {
+                path: "a.rs".into(),
+                decls: decls.clone(),
+            },
+            FileOutline {
+                path: "b.rs".into(),
+                decls,
+            },
+        ];
+        let section = render_outlines_section(&outlines).unwrap();
+        assert!(section.len() <= OUTLINES_SECTION_MAX_CHARS + 10);
+        assert!(section.contains("### Outlines"));
+    }
 }

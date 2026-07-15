@@ -7,9 +7,11 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 console.workspace = true
 dialoguer.workspace = true
+flate2.workspace = true
 globset.workspace = true
 regex.workspace = true
 serde.workspace = true
