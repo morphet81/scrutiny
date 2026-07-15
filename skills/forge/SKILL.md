@@ -228,6 +228,7 @@ Guidelines (keep):
 - No locale string asserts — use i18n keys
 - No intermediate-state asserts that sibling epic tickets will break
 - Follow project naming/layout from context
+- **Case titles:** affirmative; start with a bare verb (`renders…`, `returns…`, `opens…`, `does not…`); no `should` / `should not`; no `TC-*` / numbered / ticket-id prefixes; nested `describe` = SUT/area only. Prefer matching nearby `it()`/`test()` style when present.
 
 **Approve test plan**
 

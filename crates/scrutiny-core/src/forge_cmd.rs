@@ -26,6 +26,17 @@ use crate::git::{self, git_ok, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
 
+/// Shared case-title rules for TDD test-plan + implement agents.
+const TEST_TITLE_GUIDELINES: &str = "\
+Test case titles (it/test strings in the plan and in code):\n\
+- Affirmative outcome: what the SUT does (not \"test that\" / \"verify that\" / \"ensure that\").\n\
+- Start with a bare verb: renders…, returns…, opens…, shows…, calls…, does not…\n\
+- Do NOT use \"should\" / \"should not\".\n\
+- No prefixes: no TC-12, TEST-1, ticket ids, or numbered case labels.\n\
+- Nested describe = SUT / area (symbol or feature), not a prefixed case id.\n\
+- Prefer matching nearby it()/test() title style in context paths when present; \
+  otherwise use bare-verb affirmative style above.\n";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrMeta {
     pub pr_title: String,
@@ -620,6 +631,8 @@ fn build_test_plan_prompt(
          Guidelines: every AC ≥1 test; bugs need regression tests; no locale string asserts \
          (use i18n keys); follow project test layout from context.\n",
     );
+    p.push_str("\n");
+    p.push_str(TEST_TITLE_GUIDELINES);
     p.push_str(&format!(
         "\nOverwrite this file with the full markdown plan:\n  {}\n",
         plan_path.display()
@@ -729,11 +742,13 @@ fn build_implement_prompt(
     if session.tdd {
         if session.tdd_plan_path.is_some() {
             p.push_str(
-                "\nTDD: implement tests from the approved plan first (red), then production code (green).\n",
+                "\nTDD: implement tests from the approved plan first (red), then production code (green).\n\
+                 Use approved plan case titles verbatim as it()/test() strings.\n",
             );
         } else {
             p.push_str("\nTDD: write failing tests before production code.\n");
         }
+        p.push_str(TEST_TITLE_GUIDELINES);
     }
     if session.e2e {
         p.push_str("Include e2e coverage for critical user flows.\n");
@@ -1228,4 +1243,98 @@ fn extract_markdownish(stdout: &str) -> String {
         }
     }
     stdout.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn session(e2e: bool, tdd: bool, plan: Option<&str>) -> ForgeSessionPlan {
+        ForgeSessionPlan {
+            version: 1,
+            client: "claude".into(),
+            model: "sonnet".into(),
+            approach: if tdd { "tdd".into() } else { "heads_down".into() },
+            e2e,
+            agents: 1,
+            testers: 1,
+            reviewers: 0,
+            evangelists: 0,
+            enable_figma: false,
+            enable_lore: false,
+            enable_ticket_writeback: false,
+            enable_po: false,
+            ticket_path: "/tmp/ticket.json".into(),
+            skip_ai_review: true,
+            skip_ai_review_reason: None,
+            spawn_mode: "single".into(),
+            use_playwright: false,
+            coverage_pct: 100,
+            tdd,
+            tdd_plan_path: plan.map(str::to_string),
+            figma_dir: None,
+        }
+    }
+
+    #[test]
+    fn test_plan_prompt_includes_verb_first_title_rules() {
+        let s = session(true, true, None);
+        let p = build_test_plan_prompt(
+            Path::new("/t/ticket.json"),
+            Path::new("/t/session.json"),
+            Path::new("/t/brief.md"),
+            Path::new("/t/context.json"),
+            &s,
+            Path::new("/t/test-plan.md"),
+            None,
+        );
+        assert!(p.contains("Start with a bare verb"));
+        assert!(p.contains("No prefixes: no TC-12"));
+        assert!(p.contains("Do NOT use \"should\""));
+        assert!(p.contains("Affirmative outcome"));
+        assert!(p.contains("and e2e cases"));
+    }
+
+    #[test]
+    fn implement_prompt_includes_title_rules_when_tdd() {
+        let s = session(false, true, Some("/t/test-plan.md"));
+        let ticket = TicketReport {
+            version: 1,
+            source: "inline".into(),
+            id: "inline-1".into(),
+            url: None,
+            title: "Add widget".into(),
+            description: "Build it.".into(),
+            labels: vec![],
+            comments: vec![],
+            attachments_dir: None,
+            figma_urls: vec![],
+            figma_dir: None,
+            fields: serde_json::json!({}),
+            raw_path: None,
+            fetched_at: String::new(),
+            suggested_forge: crate::config::SuggestedForge::default(),
+        };
+        let verify = VerifyPlan {
+            commands: vec![],
+            coverage: None,
+            coverage_target: 100,
+            max_loops: 1,
+        };
+        let p = build_implement_prompt(
+            Path::new("/t/ticket.json"),
+            Path::new("/t/session.json"),
+            Path::new("/t/brief.md"),
+            Path::new("/t/context.json"),
+            &s,
+            &ticket,
+            Path::new("/t/pr.json"),
+            &verify,
+            "feat",
+        );
+        assert!(p.contains("Use approved plan case titles verbatim"));
+        assert!(p.contains("Start with a bare verb"));
+        assert!(p.contains("No prefixes: no TC-12"));
+    }
 }
