@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Input};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -896,26 +896,30 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
     let max_push_attempts = 1 + max_fix;
 
     for attempt in 1..=max_push_attempts {
-        if let Some(ref up) = upstream {
-            eprintln!("scrutiny parley: pushing {branch} → {up} (attempt {attempt}/{max_push_attempts})…");
-        } else {
-            eprintln!(
-                "scrutiny parley: no upstream — pushing {branch} → origin (git push -u) (attempt {attempt}/{max_push_attempts})…"
-            );
-        }
-        let _ = std::io::stderr().flush();
+        let dest = match upstream {
+            Some(ref up) => up.clone(),
+            None => "origin (git push -u)".to_string(),
+        };
+        let sp = crate::spinner::Spinner::start(format!(
+            "git push {branch} → {dest} — running pre-push hooks (attempt {attempt}/{max_push_attempts})"
+        ));
 
         let log_path = session_root.join(format!("push-attempt-{attempt}.log"));
         let result = run_git_push_tee(cwd, &push_args, &log_path)?;
         if result.ok {
-            eprintln!("scrutiny parley: push complete");
+            sp.stop_ok("push complete");
             return Ok(());
         }
-
-        eprintln!(
-            "scrutiny parley: push failed (exit {}) — log {}",
+        sp.stop_fail(format!(
+            "push failed (exit {}) — log {}",
             result.exit_code,
             result.log_path.display()
+        ));
+
+        // Log is on disk; show a short tail so the failure is visible at a glance.
+        eprintln!(
+            "scrutiny parley: push log (tail)\n{}",
+            push_log_tail(&result.log, 2_000)
         );
 
         if is_non_fixable_push_error(&result.log) {
@@ -1001,8 +1005,8 @@ fn run_git_push_tee(cwd: &Path, args: &[&str], log_path: &Path) -> Result<PushAt
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
     let tx1 = tx.clone();
-    let h1 = thread::spawn(move || copy_tee(stdout, tx1));
-    let h2 = thread::spawn(move || copy_tee(stderr, tx));
+    let h1 = thread::spawn(move || drain_to_log(stdout, tx1));
+    let h2 = thread::spawn(move || drain_to_log(stderr, tx));
 
     let mut combined = Vec::new();
     for chunk in rx {
@@ -1023,16 +1027,15 @@ fn run_git_push_tee(cwd: &Path, args: &[&str], log_path: &Path) -> Result<PushAt
     })
 }
 
-fn copy_tee(mut r: impl Read, tx: mpsc::Sender<Vec<u8>>) {
+/// Drain a child pipe into the log channel only — no live echo to the terminal.
+/// A spinner covers the wait; the full output lands in the on-disk push log.
+fn drain_to_log(mut r: impl Read, tx: mpsc::Sender<Vec<u8>>) {
     let mut buf = [0u8; 4096];
     loop {
         match r.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                let chunk = buf[..n].to_vec();
-                let _ = std::io::stderr().write_all(&chunk);
-                let _ = std::io::stderr().flush();
-                if tx.send(chunk).is_err() {
+                if tx.send(buf[..n].to_vec()).is_err() {
                     break;
                 }
             }

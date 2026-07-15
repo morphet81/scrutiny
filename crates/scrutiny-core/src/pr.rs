@@ -144,13 +144,18 @@ pub fn create_pr(
     draft: bool,
 ) -> Result<String> {
     if !git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]) {
-        eprintln!("scrutiny pr: no upstream — git push -u origin HEAD…");
+        let sp = crate::spinner::Spinner::start(
+            "git push -u origin HEAD — running pre-push hooks",
+        );
         let push = Command::new("git")
             .args(["push", "-u", "origin", "HEAD"])
             .current_dir(cwd)
             .output()
             .context("git push -u origin HEAD")?;
-        if !push.status.success() {
+        if push.status.success() {
+            sp.stop_ok("pushed HEAD → origin");
+        } else {
+            sp.stop_fail("git push failed");
             bail!(
                 "git push failed: {}",
                 String::from_utf8_lossy(&push.stderr).trim()

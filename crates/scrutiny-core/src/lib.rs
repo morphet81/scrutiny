@@ -25,6 +25,7 @@ pub mod scan;
 pub mod score;
 pub mod signals;
 pub mod skills_install;
+pub mod spinner;
 pub mod taxonomy;
 pub mod terminal;
 pub mod treesitter;
