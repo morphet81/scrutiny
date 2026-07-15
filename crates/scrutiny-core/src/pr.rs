@@ -133,6 +133,37 @@ pub fn confirm_pr_meta(
     Ok(PrMetaChoice { title, body, base })
 }
 
+/// Push the current branch to origin: `push -u origin HEAD` when it has no
+/// upstream, else a plain `git push`. Pre-push hook output stays behind a
+/// spinner and in the on-disk log, not on the terminal.
+pub fn push_current_branch(cwd: &Path) -> Result<()> {
+    let has_upstream = git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    let (args, label): (&[&str], &str) = if has_upstream {
+        (&["push"], "git push — running pre-push hooks")
+    } else {
+        (
+            &["push", "-u", "origin", "HEAD"],
+            "git push -u origin HEAD — running pre-push hooks",
+        )
+    };
+    let sp = crate::spinner::Spinner::start(label);
+    let push = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("git {}", args.join(" ")))?;
+    if push.status.success() {
+        sp.stop_ok("pushed HEAD → origin");
+        Ok(())
+    } else {
+        sp.stop_fail("git push failed");
+        bail!(
+            "git push failed: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        )
+    }
+}
+
 /// Push the current branch if it has no upstream, then create the PR via `gh`.
 /// Returns the PR URL.
 pub fn create_pr(
@@ -144,23 +175,7 @@ pub fn create_pr(
     draft: bool,
 ) -> Result<String> {
     if !git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]) {
-        let sp = crate::spinner::Spinner::start(
-            "git push -u origin HEAD — running pre-push hooks",
-        );
-        let push = Command::new("git")
-            .args(["push", "-u", "origin", "HEAD"])
-            .current_dir(cwd)
-            .output()
-            .context("git push -u origin HEAD")?;
-        if push.status.success() {
-            sp.stop_ok("pushed HEAD → origin");
-        } else {
-            sp.stop_fail("git push failed");
-            bail!(
-                "git push failed: {}",
-                String::from_utf8_lossy(&push.stderr).trim()
-            );
-        }
+        push_current_branch(cwd)?;
     }
 
     let body_path = dir.join("pr-body.md");

@@ -2,16 +2,16 @@
 //! suggests a title + description from it, lets the user confirm/edit both, then
 //! creates the PR. No implement pipeline, no AI.
 
-use anyhow::Result;
-use dialoguer::{theme::ColorfulTheme, Input};
+use anyhow::{bail, Result};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::scaffold;
-use crate::git::git_stdout;
+use crate::git::{self, git_ok, git_stdout};
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
 use crate::pr;
 
@@ -44,6 +44,8 @@ pub fn run_pr(input: PrCmdInput) -> Result<PathBuf> {
     let shipped = find_shipped_default(&cwd);
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
+
+    preflight_branch(&cwd, &cfg, input.non_interactive)?;
 
     let ticket = resolve_ticket(&cwd, input.ticket.as_deref(), input.source.as_deref(), input.non_interactive);
 
@@ -85,6 +87,96 @@ pub fn run_pr(input: PrCmdInput) -> Result<PathBuf> {
     let out = artifact_path("pr");
     write_json_pretty(&out, &summary)?;
     Ok(out)
+}
+
+/// What push is needed before opening the PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushNeed {
+    /// Remote is up to date.
+    None,
+    /// Branch has no upstream — needs a first `push -u`.
+    FirstPush,
+    /// Upstream exists but HEAD is `n` commits ahead.
+    Ahead(usize),
+}
+
+/// Pure decision: given upstream presence and how far HEAD is ahead of it.
+fn push_need(has_upstream: bool, ahead_of_upstream: usize) -> PushNeed {
+    if !has_upstream {
+        PushNeed::FirstPush
+    } else if ahead_of_upstream > 0 {
+        PushNeed::Ahead(ahead_of_upstream)
+    } else {
+        PushNeed::None
+    }
+}
+
+/// Gate PR creation on branch state: no-commits (hard fail), dirty tree
+/// (confirm), and unpushed commits (confirm → push). See the plan for rules.
+fn preflight_branch(cwd: &Path, cfg: &Config, non_interactive: bool) -> Result<()> {
+    let interactive = !non_interactive
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
+
+    // 1) No commits vs base → fail early (skip if base can't be resolved).
+    if let Ok(base) = git::resolve_base_branch(cwd, &cfg.git.base_candidates, None) {
+        if git::commits_ahead(cwd, &base) == 0 {
+            bail!("no commits between HEAD and {base} — nothing to open a PR for");
+        }
+    }
+
+    // 2) Dirty tree → confirm (they won't be in the PR).
+    if git::is_dirty(cwd) {
+        if interactive {
+            let go = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt("Uncommitted changes won't be in the PR. Continue?")
+                .default(false)
+                .interact()?;
+            if !go {
+                bail!("aborted: commit or stash your changes first");
+            }
+        } else {
+            eprintln!("scrutiny pr: warning — uncommitted changes won't be in the PR");
+        }
+    }
+
+    // 3) Unpushed / never-pushed commits → confirm, then push.
+    let has_upstream = git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    let ahead = if has_upstream {
+        git::commits_ahead(cwd, "@{upstream}")
+    } else {
+        0
+    };
+    match push_need(has_upstream, ahead) {
+        PushNeed::None => {}
+        need => {
+            if interactive {
+                let prompt = match need {
+                    PushNeed::FirstPush => {
+                        "Branch not pushed to origin. Push and continue?".to_string()
+                    }
+                    PushNeed::Ahead(n) => {
+                        let upstream = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        format!("{n} local commit(s) not pushed to {upstream}. Push and continue?")
+                    }
+                    PushNeed::None => unreachable!(),
+                };
+                let go = Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt(prompt)
+                    .default(true)
+                    .interact()?;
+                if !go {
+                    bail!("aborted: push your commits first");
+                }
+            }
+            pr::push_current_branch(cwd)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Fetch the ticket: explicit arg → infer from branch → prompt (TTY) → none.
@@ -152,4 +244,17 @@ fn title_from_branch(cwd: &Path) -> String {
     let tail = branch.rsplit('/').next().unwrap_or(&branch);
     let humanized = tail.replace(['-', '_'], " ");
     humanized.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_need_cases() {
+        assert_eq!(push_need(false, 0), PushNeed::FirstPush);
+        assert_eq!(push_need(false, 3), PushNeed::FirstPush);
+        assert_eq!(push_need(true, 0), PushNeed::None);
+        assert_eq!(push_need(true, 2), PushNeed::Ahead(2));
+    }
 }
