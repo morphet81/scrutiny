@@ -4,11 +4,14 @@ use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_eval,
     run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate, run_forge,
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack,
-    run_plan_confirm, run_plan_write, run_post_comments, run_review, run_review_session_write,
-    run_scan, run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeCmdInput,
-    ForgeFetchInput, ForgePlanWriteInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
-    ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
+    run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply, run_plan_confirm,
+    run_plan_write, run_post_comments, run_pr, run_review, run_review_session_write, run_scan,
+    run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeCmdInput,
+    ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput,
+    ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
+    PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
+use scrutiny_core::{ensure_config, find_shipped_default, load_config};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -196,6 +199,79 @@ enum Commands {
     FindingsTriage {
         #[arg(long)]
         findings: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Address unresolved PR review comments: fetch → fix agents → commit/push → reply
+    Parley {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// PR URL or number (else current branch PR)
+        #[arg(long)]
+        pr: Option<String>,
+        /// Positional alias for --pr
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+        #[arg(long)]
+        client: Option<String>,
+        /// isolated (default) | team
+        #[arg(long)]
+        spawn_mode: Option<String>,
+        /// Skip menus; pass ParleyAnswers JSON
+        #[arg(long)]
+        from_json: Option<String>,
+        /// Non-interactive defaults
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        /// Fetch + plan only (no headless agents)
+        #[arg(long, default_value_t = false)]
+        skip_agents: bool,
+        /// Skip commit/push/reply
+        #[arg(long, default_value_t = false)]
+        skip_ship: bool,
+    },
+    /// Create a PR: suggest title + description from ticket → confirm/edit → gh pr create
+    Pr {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Ticket URL / key / number (else infer from branch, else prompt)
+        #[arg(long)]
+        ticket: Option<String>,
+        /// Positional alias for --ticket
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+        /// Force ticket source (jira|github|gitlab|inline)
+        #[arg(long)]
+        source: Option<String>,
+        /// Create a ready PR instead of the default draft
+        #[arg(long, default_value_t = false)]
+        ready: bool,
+        /// Non-interactive: accept suggestions, skip prompts
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Fetch unresolved PR review threads → parley-comments.json path
+    ParleyFetch {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        pr: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
+    /// Write parley-plan.json from comments + answers
+    ParleyPlanWrite {
+        #[arg(long)]
+        comments: PathBuf,
+        #[arg(long)]
+        from_json: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Post thread replies from parley-fixes.json
+    ParleyReply {
+        #[arg(long)]
+        fixes: PathBuf,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -578,6 +654,113 @@ fn run() -> Result<()> {
                 prepare_artifacts(c, None, &[findings.as_path()])?;
             }
             let (_r, path) = run_findings_triage(&findings, cwd.as_deref(), None)?;
+            println!("{}", path.display());
+        }
+        Commands::Parley {
+            cwd,
+            pr,
+            rest,
+            client,
+            spawn_mode,
+            from_json,
+            yes,
+            skip_agents,
+            skip_ship,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let pr = pr.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            let path = run_parley(ParleyCmdInput {
+                cwd,
+                pr,
+                client,
+                spawn_mode,
+                from_json,
+                non_interactive: yes,
+                skip_agents,
+                skip_ship,
+            })?;
+            println!("{}", path.display());
+        }
+        Commands::Pr {
+            cwd,
+            ticket,
+            rest,
+            source,
+            ready,
+            yes,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let ticket = ticket.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            let path = run_pr(PrCmdInput {
+                cwd,
+                ticket,
+                source,
+                ready,
+                non_interactive: yes,
+            })?;
+            println!("{}", path.display());
+        }
+        Commands::ParleyFetch { cwd, pr, rest } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let pr = pr.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            let (_file, path) = run_parley_fetch(ParleyFetchInput { cwd, pr })?;
+            println!("{}", path.display());
+        }
+        Commands::ParleyPlanWrite {
+            comments,
+            from_json,
+            cwd,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[comments.as_path()])?;
+            let shipped = find_shipped_default(
+                &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
+            );
+            let cfg_path = ensure_config(&shipped)?;
+            let cfg = load_config(&cfg_path)?;
+            let answers: ParleyAnswers =
+                serde_json::from_str(&from_json).context("parse --from-json for parley-plan-write")?;
+            let text = std::fs::read_to_string(&comments)
+                .with_context(|| format!("read {}", comments.display()))?;
+            let comments_file: scrutiny_core::parley::ParleyCommentsFile =
+                serde_json::from_str(&text).context("parse parley-comments")?;
+            let (_plan, path) = run_parley_plan_write(ParleyPlanWriteInput {
+                comments: comments_file,
+                comments_path: comments,
+                answers,
+                cfg,
+            })?;
+            println!("{}", path.display());
+        }
+        Commands::ParleyReply { fixes, cwd } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            prepare_artifacts(&cwd, None, &[fixes.as_path()])?;
+            let (result, path) = run_parley_reply(ParleyReplyInput {
+                fixes_path: fixes,
+                cwd,
+            })?;
+            eprintln!(
+                "scrutiny parley-reply: posted {} reply(ies) ({} skipped)",
+                result.posted, result.skipped
+            );
             println!("{}", path.display());
         }
         Commands::Forge {

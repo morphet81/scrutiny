@@ -16,6 +16,10 @@ Probes a local branch or a GitHub PR. Prefer **`scrutiny probe`** for script-orc
 
 Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent (writes `pr.json`, script commits + optional draft PR). Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny probe`.
 
+### `/parley`
+
+Addresses unresolved GitHub PR review comments. Prefer **`scrutiny parley`**: GraphQL-fetch unresolved threads → ask members / verifiers / evangelists / spawn mode → isolated or team fix agents → verifier flag-pass (both modes: confirms fixes actually address comments) → optional evangelist verify (isolated) → host commit + push → script replies under each thread via `addPullRequestReviewThreadReply`. Set config root `headless = false` to run each agent in a visible terminal window (claude auto mode; tmux/zellij/macOS). Discrete `parley-fetch` / `parley-plan-write` / `parley-reply` for IDE chaining.
+
 ## Install (Homebrew)
 
 Prebuilt `scrutiny` binary via the [`morphet81/homebrew-tools`](https://github.com/morphet81/homebrew-tools) tap (Apple Silicon macOS; Linux amd64/arm64):
@@ -51,7 +55,7 @@ npx skills add morphet81/scrutiny -g -y --skill '*'
 npx skills add /path/to/scrutiny -g -y --skill '*' --agent cursor
 ```
 
-Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline <desc>`.
+Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline <desc>`, `/parley`, `/parley <PR-URL>`.
 
 ### Prerequisites
 
@@ -101,6 +105,16 @@ Artifacts live under **`<repo>/.scrutiny/<pr>/`** (or `.scrutiny/local/` without
 ./target/release/scrutiny forge --inline --input "Add dark mode toggle"
 ./target/release/scrutiny forge --from-json '{"client":"claude","model":"sonnet","spawn_mode":"single","tdd":true,"e2e":true,"coverage_pct":100}' --yes --input KEY-1
 ```
+
+### One-shot parley (preferred)
+
+```bash
+./target/release/scrutiny parley
+./target/release/scrutiny parley --pr 42
+./target/release/scrutiny parley --from-json '{"client":"claude","model":"sonnet","members":2,"evangelists":1,"spawn_mode":"isolated"}' --yes
+```
+
+Flow: GraphQL unresolved `reviewThreads` → `.scrutiny/<pr>/parley-comments.json` → knobs (members ≤ comment count, verifiers, evangelists, isolated|team) → fix agents write `parley-fixes.json` → verifier flag-pass (both modes; writes `verified`/`verification`, flips bogus `addressed`) → optional evangelist verify (isolated only) → host `git commit` + `git push` → script `parley-reply` under each thread id. Agents must not commit/push/gh-reply. Config root `headless = false` opens each agent in a visible auto-mode window (claude; tmux/zellij/macOS), else headless.
 
 Flow: require source CLI (`acli`/`gh`/`glab`) with install links → ticket mirror under `.scrutiny/forge-<id>/` (attachments, full fields) → if Figma URLs require `fcli` and export screenshots+XML → ask spawn (**single** default|team), playwright (skipped if no `playwright-cli`), TDD, coverage%, e2e → optional TDD test-plan agent + confirm/comment → implement agent (prompt encodes choices; writes `.scrutiny/forge-<id>/pr.json` with PR title/body + commit message; cleans non-implementation junk; does **not** commit) → script commits from `pr.json` → TTY asks to create a **draft PR** (base branch defaults to calculated base; skipped with `--yes` / non-TTY).
 

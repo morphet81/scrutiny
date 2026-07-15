@@ -12,12 +12,19 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_client: String,
+    /// Run spawned agents headless (stdout captured). When false, parley opens each
+    /// agent in a visible terminal window in auto mode (claude + tmux/zellij/macOS).
+    #[serde(default = "default_true")]
+    pub headless: bool,
     /// Force headless client for `scrutiny probe` (cursor|claude|codex). Omit → detect + prompt.
     #[serde(default)]
     pub force_client: Option<String>,
     /// Force spawn mode: isolated | team. Omit → prompt (default **isolated**).
     #[serde(default)]
     pub force_spawn_mode: Option<String>,
+    /// Editor for PR descriptions. Omit → `$VISUAL` → `$EDITOR` → `vi`.
+    #[serde(default)]
+    pub editor: Option<String>,
     pub models: BTreeMap<String, ClientModels>,
     pub review: ReviewConfig,
     pub agents: AgentsConfig,
@@ -28,6 +35,46 @@ pub struct Config {
     pub scan: ScanConfig,
     #[serde(default)]
     pub forge: ForgeConfig,
+    #[serde(default)]
+    pub parley: ParleyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParleyConfig {
+    #[serde(default = "default_parley_members")]
+    pub default_members: u32,
+    #[serde(default = "default_parley_evangelists")]
+    pub default_evangelists: u32,
+    /// Verifiers that check fixes actually address comments (before evangelist).
+    #[serde(default = "default_parley_verifiers")]
+    pub default_verifiers: u32,
+    /// Max push→fail→agent-fix→retry cycles after the initial push attempt.
+    #[serde(default = "default_parley_push_fix_loops")]
+    pub push_fix_max_loops: u32,
+}
+
+fn default_parley_members() -> u32 {
+    1
+}
+fn default_parley_evangelists() -> u32 {
+    1
+}
+fn default_parley_verifiers() -> u32 {
+    1
+}
+fn default_parley_push_fix_loops() -> u32 {
+    2
+}
+
+impl Default for ParleyConfig {
+    fn default() -> Self {
+        Self {
+            default_members: default_parley_members(),
+            default_evangelists: default_parley_evangelists(),
+            default_verifiers: default_parley_verifiers(),
+            push_fix_max_loops: default_parley_push_fix_loops(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

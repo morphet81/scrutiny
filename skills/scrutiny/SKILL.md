@@ -8,7 +8,7 @@ description: >-
 argument-hint: "[PR-URL | PR-number]"
 ---
 
-# Scrutiny
+# Probe
 
 **Preferred (no IDE agent host):** run the CLI orchestrator:
 
@@ -50,7 +50,7 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 Config: `~/.scrutiny/config.toml` (user settings). **Artifacts:** `<repo>/.scrutiny/<pr>/` (or `local/`) — eval/map/pack/scan/plan/findings/report JSON. Never `/tmp`. Add `.scrutiny/` to the repo `.gitignore` (CLI warns if missing).
 Optional: `force_client`, `force_spawn_mode` (`isolated` | `team`).
 
-Sibling skill: `/forge` (ticket implement) — same binary.
+Sibling skills: `/forge` (ticket implement), `/parley` (address PR comments) — same binary.
 
 ---
 

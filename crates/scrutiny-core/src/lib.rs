@@ -1,4 +1,4 @@
-//! Scrutiny core: config, git, eval, map, pack, scan, plan, forge, findings, review.
+//! Scrutiny core: config, git, eval, map, pack, scan, plan, forge, parley, findings, review.
 
 pub mod agent_runner;
 pub mod config;
@@ -7,12 +7,17 @@ pub mod eval;
 pub mod findings;
 pub mod forge;
 pub mod forge_cmd;
+pub mod gh;
 pub mod git;
 pub mod map;
 pub mod mdterm;
 pub mod pack;
+pub mod parley;
+pub mod parley_cmd;
 pub mod paths;
 pub mod plan;
+pub mod pr;
+pub mod pr_cmd;
 pub mod review_cmd;
 pub mod review_session;
 pub mod runtime;
@@ -21,9 +26,10 @@ pub mod score;
 pub mod signals;
 pub mod skills_install;
 pub mod taxonomy;
+pub mod terminal;
 pub mod treesitter;
 
-pub use config::{ensure_config, load_config, Config};
+pub use config::{ensure_config, find_shipped_default, load_config, Config};
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
     attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,
@@ -37,6 +43,11 @@ pub use forge::{
 };
 pub use forge_cmd::{run_forge, ForgeCmdInput};
 pub use map::{run_map, MapReport};
+pub use parley::{
+    run_parley_fetch, run_parley_plan_write, run_parley_reply, ParleyAnswers, ParleyFetchInput,
+    ParleyPlanWriteInput, ParleyReplyInput,
+};
+pub use parley_cmd::{run_parley, ParleyCmdInput};
 pub use pack::{run_pack, PackReport};
 pub use paths::{
     prepare_artifacts, temp_artifact_path, warn_if_scrutiny_unignored, init_artifact_ctx,
@@ -45,6 +56,7 @@ pub use plan::{
     load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
     PlanConfirmInput, PlanWriteInput,
 };
+pub use pr_cmd::{run_pr, PrCmdInput};
 pub use agent_runner::{
     build_isolated_prompt, build_team_lead_prompt, AgentPromptInput, run_agent_prompt,
 };

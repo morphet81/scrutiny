@@ -40,7 +40,7 @@ AI value or guess), commits, then on a TTY asks whether to create a **draft PR**
 (PR-title Input + base branch prompt). `--yes` / non-TTY skips prompts and uses
 the defaults.
 
-Sibling of `/scrutiny` (same binary, `~/.scrutiny/config.toml`).
+Sibling of `/scrutiny` and `/parley` (same binary, `~/.scrutiny/config.toml`).
 
 ## Usage
 

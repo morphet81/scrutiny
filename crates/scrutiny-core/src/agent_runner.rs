@@ -11,11 +11,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crate::paths::{temp_artifact_path, write_json_pretty};
+use crate::paths::{artifact_path_unique, temp_artifact_path, write_json_pretty};
 use crate::plan::ConfirmedPlan;
 use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
+use crate::terminal::{launch_agent_window, TerminalContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessKind {
@@ -27,6 +28,8 @@ pub enum HeadlessKind {
     Ask,
     /// Forge implement / test-plan: full tools, no findings JSON schema.
     Forge,
+    /// Parley: fix PR review comments; full tools, no findings schema.
+    Parley,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +150,7 @@ pub fn run_headless(
                 HeadlessKind::Isolated | HeadlessKind::Ask => {
                     cmd.arg("--mode").arg("ask");
                 }
-                HeadlessKind::TeamLead | HeadlessKind::Forge => {}
+                HeadlessKind::TeamLead | HeadlessKind::Forge | HeadlessKind::Parley => {}
             }
             cmd.arg(prompt);
         }
@@ -176,8 +179,8 @@ pub fn run_headless(
                 HeadlessKind::TeamLead => {
                     cmd.arg("--json-schema").arg(FINDINGS_JSON_SCHEMA);
                 }
-                HeadlessKind::Forge => {
-                    // Full tools; no findings schema (ticket implement / test plan).
+                HeadlessKind::Forge | HeadlessKind::Parley => {
+                    // Full tools; no findings schema (implement / address comments).
                 }
             }
             cmd.arg("--model").arg(model).arg(prompt);
@@ -282,6 +285,83 @@ pub fn run_headless(
         code,
         timed_out,
     })
+}
+
+/// Launch a claude agent in a visible terminal window (auto permission mode) and
+/// return the completion-sentinel path the host should poll. Claude only.
+///
+/// The agent writes its results to disk (parley-fixes.json) as usual; the host
+/// collects from disk after the sentinel appears. The window stays open for the
+/// user to inspect after the agent finishes.
+pub fn run_nonheadless(
+    client: &DetectedClient,
+    model: &str,
+    cwd: &Path,
+    prompt: &str,
+    label: &str,
+    ctx: TerminalContext,
+) -> Result<PathBuf> {
+    if client.client != "claude" {
+        bail!(
+            "non-headless mode supports claude only (got {})",
+            client.client
+        );
+    }
+    let sentinel = artifact_path_unique("agent-done");
+    let _ = fs::remove_file(&sentinel); // clear any stale marker
+
+    let prompt_path = temp_artifact_path("scrutiny", "agent", "prompt");
+    let full_prompt = format!(
+        "{prompt}\n\n---\nWhen you are completely finished (all fixes written to disk), \
+         run this shell command exactly once so the host knows you are done:\n\n\
+         touch '{}'\n",
+        sentinel.display()
+    );
+    fs::write(&prompt_path, full_prompt.as_bytes())
+        .with_context(|| format!("write {}", prompt_path.display()))?;
+
+    let script_path = artifact_path_unique("agent-script");
+    let script = format!(
+        "#!/usr/bin/env bash\ncd '{cwd}'\n'{binary}' --permission-mode auto --model '{model}' \"$(cat '{prompt}')\"\n",
+        cwd = cwd.display(),
+        binary = client.binary.display(),
+        prompt = prompt_path.display(),
+    );
+    fs::write(&script_path, script.as_bytes())
+        .with_context(|| format!("write {}", script_path.display()))?;
+
+    eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
+    launch_agent_window(ctx, label, &script_path)?;
+    Ok(sentinel)
+}
+
+/// Poll until every sentinel file exists or the wall clock elapses.
+/// Returns the sentinels that never appeared (empty = all agents finished).
+pub fn wait_for_sentinels(sentinels: &[PathBuf], wall: Duration) -> Vec<PathBuf> {
+    let start = std::time::Instant::now();
+    let mut last_tick = start;
+    loop {
+        let missing: Vec<PathBuf> = sentinels
+            .iter()
+            .filter(|s| !s.exists())
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        if start.elapsed() >= wall {
+            return missing;
+        }
+        if last_tick.elapsed() >= Duration::from_secs(PROGRESS_SECS) {
+            eprintln!(
+                "scrutiny: waiting on {} agent window(s) ({}s)",
+                missing.len(),
+                start.elapsed().as_secs()
+            );
+            last_tick = std::time::Instant::now();
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Extract human-readable error from Claude `--output-format json` envelope.

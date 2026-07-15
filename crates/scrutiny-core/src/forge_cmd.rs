@@ -22,7 +22,7 @@ use crate::forge::verify::{
     build_verify_plan, coverage_gaps, measure_coverage, parse_test_failures, raw_tail, run_command,
     FailureReport, VerifyPlan,
 };
-use crate::git::{self, git_ok, git_stdout};
+use crate::git::{self, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
 
@@ -1137,85 +1137,39 @@ fn run_forge_ship(
         return Ok(());
     }
 
-    let default_base = git::resolve_base_branch(cwd, &cfg.git.base_candidates, None)
-        .unwrap_or_else(|_| "main".into());
-    // Strip origin/ for gh --base (expects branch name)
-    let default_base = default_base
-        .strip_prefix("origin/")
-        .unwrap_or(&default_base)
-        .to_string();
-
-    let base: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Base branch")
-        .default(default_base)
-        .interact_text()
-        .context("base branch")?;
-    let base = base.trim().to_string();
-    if base.is_empty() {
-        bail!("base branch empty");
-    }
-
-    if !git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]) {
-        eprintln!("scrutiny forge: no upstream — git push -u origin HEAD…");
-        let push = Command::new("git")
-            .args(["push", "-u", "origin", "HEAD"])
-            .current_dir(cwd)
-            .output()
-            .context("git push -u origin HEAD")?;
-        if !push.status.success() {
-            bail!(
-                "git push failed: {}",
-                String::from_utf8_lossy(&push.stderr).trim()
-            );
-        }
-    }
-
-    let title_default = {
+    let suggested_title = {
         let ai = meta.pr_title.trim();
         if ai.is_empty() {
-            crate::forge::scaffold::guess_pr_title(ticket, prefix)
+            scaffold::guess_pr_title(ticket, prefix)
         } else {
             ai.to_string()
         }
     };
-    let pr_title: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("PR title")
-        .default(title_default)
-        .interact_text()
-        .context("pr title")?
-        .trim()
-        .to_string();
-    if pr_title.is_empty() {
-        bail!("pr title empty");
-    }
+    let suggested_body = {
+        let ai = meta.pr_body.trim();
+        if ai.is_empty() {
+            scaffold::guess_pr_body(ticket)
+        } else {
+            meta.pr_body.clone()
+        }
+    };
 
-    let body_path = session_root.join("pr-body.md");
-    fs::write(&body_path, meta.pr_body.as_bytes())
-        .with_context(|| format!("write {}", body_path.display()))?;
-
-    let pr = Command::new("gh")
-        .args([
-            "pr",
-            "create",
-            "--draft",
-            "--base",
-            &base,
-            "--title",
-            &pr_title,
-            "--body-file",
-        ])
-        .arg(&body_path)
-        .current_dir(cwd)
-        .output()
-        .context("gh pr create")?;
-    if !pr.status.success() {
-        bail!(
-            "gh pr create failed: {} {}",
-            String::from_utf8_lossy(&pr.stderr).trim(),
-            String::from_utf8_lossy(&pr.stdout).trim()
-        );
-    }
-    let url = String::from_utf8_lossy(&pr.stdout).trim().to_string();
+    let choice = crate::pr::confirm_pr_meta(
+        cfg,
+        cwd,
+        session_root,
+        &suggested_title,
+        &suggested_body,
+        skip_prompts,
+    )?;
+    let url = crate::pr::create_pr(
+        cwd,
+        session_root,
+        &choice.base,
+        &choice.title,
+        &choice.body,
+        /* draft */ true,
+    )?;
     eprintln!("scrutiny forge: draft PR → {url}");
     Ok(())
 }

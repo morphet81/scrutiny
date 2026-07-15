@@ -118,6 +118,18 @@ pub fn guess_pr_title(ticket: &TicketReport, prefix: &str) -> String {
     format!("{prefix}: {}", ticket.title.trim())
 }
 
+/// Editable default for the PR description: ticket body + a trailing ticket ref.
+pub fn guess_pr_body(ticket: &TicketReport) -> String {
+    let mut body = ticket.description.trim().to_string();
+    if let Some(url) = ticket.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!("Refs: {url}"));
+    }
+    body
+}
+
 /// Editable default for the one-line commit subject (≤72 chars).
 pub fn guess_commit_subject(ticket: &TicketReport, prefix: &str) -> String {
     let mut s = format!("{prefix}: {}", ticket.title.trim());
@@ -164,6 +176,31 @@ mod tests {
             fetched_at: String::new(),
             suggested_forge: crate::config::SuggestedForge::default(),
         }
+    }
+
+    #[test]
+    fn pr_body_appends_ref_when_url_present() {
+        let mut t = ticket("jira", "PROJ-9", "Title", &[], json!({}));
+        t.description = "Implement the thing.".into();
+        t.url = Some("https://jira/PROJ-9".into());
+        assert_eq!(
+            guess_pr_body(&t),
+            "Implement the thing.\n\nRefs: https://jira/PROJ-9"
+        );
+    }
+
+    #[test]
+    fn pr_body_without_url_is_description_only() {
+        let mut t = ticket("inline", "inline", "Title", &[], json!({}));
+        t.description = "Just a description.".into();
+        assert_eq!(guess_pr_body(&t), "Just a description.");
+    }
+
+    #[test]
+    fn pr_body_url_only_when_no_description() {
+        let mut t = ticket("jira", "PROJ-9", "Title", &[], json!({}));
+        t.url = Some("https://jira/PROJ-9".into());
+        assert_eq!(guess_pr_body(&t), "Refs: https://jira/PROJ-9");
     }
 
     #[test]

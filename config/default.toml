@@ -1,8 +1,15 @@
 default_client = "claude"
+# Run spawned agents headless (stdout captured). Set false to open each parley
+# agent in a visible terminal window in auto mode (claude only; tmux/zellij/
+# macOS Terminal/iTerm2). Unsupported surfaces fall back to headless.
+headless = true
 # When set, skip client prompt for `scrutiny probe` (must be installed on PATH).
 # force_client = "claude"
 # When set, skip spawn-mode prompt. Default when unset: isolated.
 # force_spawn_mode = "isolated"
+# Editor for PR descriptions (forge + `scrutiny pr`). Supports args, e.g. "code --wait".
+# Falls back to $VISUAL, then $EDITOR, then vi.
+# editor = "vi"
 
 [models.cursor]
 xs = "composer-2-fast"
@@ -175,6 +182,13 @@ verify_coverage = true
 
 enable_branch = true
 branch_headless = "auto"
+
+[parley]
+default_members = 1
+default_evangelists = 1
+# Verifiers check that fixes actually address comments (runs before evangelist).
+default_verifiers = 1
+push_fix_max_loops = 2
 
 [git]
 base_candidates = ["main", "master", "develop"]
