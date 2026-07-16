@@ -340,10 +340,8 @@ fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
         })
         .unwrap_or_default();
     let comments = extract_jira_comments(&raw_json);
-    let url = raw_json
-        .get("self")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    let self_url = raw_json.get("self").and_then(|v| v.as_str());
+    let url = jira_browse_url(&key, raw, self_url)
         .or_else(|| Some(format_jira_browse_url(raw, &key)));
 
     let attachments_dir = download_jira_attachments(cwd, &key, &raw_json)?;
@@ -386,6 +384,23 @@ fn jira_key_from_url_or_raw(raw: &str) -> Result<String> {
         }
     }
     bail!("could not extract Jira key from: {raw}");
+}
+
+/// Human, clickable Jira issue URL (`<host>/browse/KEY`) — never the REST
+/// `self` endpoint. Derives the host from a browse-style raw input or from the
+/// `self` link's host; `None` when no host is available.
+fn jira_browse_url(key: &str, raw: &str, self_url: Option<&str>) -> Option<String> {
+    if raw.contains("://") && raw.contains("/browse/") {
+        return Some(format_jira_browse_url(raw, key));
+    }
+    let self_url = self_url?;
+    let host_end = self_url.find("/rest/").unwrap_or(self_url.len());
+    let host = self_url.get(..host_end)?;
+    if host.contains("://") {
+        Some(format!("{host}/browse/{key}"))
+    } else {
+        None
+    }
 }
 
 fn format_jira_browse_url(raw: &str, key: &str) -> String {
@@ -1088,6 +1103,26 @@ mod tests {
         );
         assert_eq!(detect_source("42"), TicketSource::Github);
         assert_eq!(detect_source("do the thing"), TicketSource::Inline);
+    }
+
+    #[test]
+    fn jira_browse_url_derives_host_from_self() {
+        // REST `self` link → clickable browse URL, never the API endpoint.
+        assert_eq!(
+            jira_browse_url(
+                "PROJ-1",
+                "PROJ-1",
+                Some("https://co.atlassian.net/rest/api/3/issue/160804")
+            ),
+            Some("https://co.atlassian.net/browse/PROJ-1".into())
+        );
+        // browse-style raw input is normalized to the key.
+        assert_eq!(
+            jira_browse_url("AB-9", "https://x.atlassian.net/browse/AB-1", None),
+            Some("https://x.atlassian.net/browse/AB-9".into())
+        );
+        // no host available → None (caller falls back).
+        assert_eq!(jira_browse_url("AB-9", "AB-9", None), None);
     }
 
     #[test]

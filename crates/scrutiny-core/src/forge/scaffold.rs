@@ -118,14 +118,20 @@ pub fn guess_pr_title(ticket: &TicketReport, prefix: &str) -> String {
     format!("{prefix}: {}", ticket.title.trim())
 }
 
-/// Editable default for the PR description: ticket body + a trailing ticket ref.
+/// Editable default for the PR description: ticket body + a clickable ticket
+/// reference. `Fixes [KEY](url)` for bugs, `Addresses [KEY](url)` otherwise.
 pub fn guess_pr_body(ticket: &TicketReport) -> String {
     let mut body = ticket.description.trim().to_string();
     if let Some(url) = ticket.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         if !body.is_empty() {
             body.push_str("\n\n");
         }
-        body.push_str(&format!("Refs: {url}"));
+        let verb = if guess_prefix(ticket) == "fix" {
+            "Fixes"
+        } else {
+            "Addresses"
+        };
+        body.push_str(&format!("{verb} [{}]({url})", ticket.id.trim()));
     }
     body
 }
@@ -182,10 +188,10 @@ mod tests {
     fn pr_body_appends_ref_when_url_present() {
         let mut t = ticket("jira", "PROJ-9", "Title", &[], json!({}));
         t.description = "Implement the thing.".into();
-        t.url = Some("https://jira/PROJ-9".into());
+        t.url = Some("https://jira/browse/PROJ-9".into());
         assert_eq!(
             guess_pr_body(&t),
-            "Implement the thing.\n\nRefs: https://jira/PROJ-9"
+            "Implement the thing.\n\nAddresses [PROJ-9](https://jira/browse/PROJ-9)"
         );
     }
 
@@ -199,8 +205,11 @@ mod tests {
     #[test]
     fn pr_body_url_only_when_no_description() {
         let mut t = ticket("jira", "PROJ-9", "Title", &[], json!({}));
-        t.url = Some("https://jira/PROJ-9".into());
-        assert_eq!(guess_pr_body(&t), "Refs: https://jira/PROJ-9");
+        t.url = Some("https://jira/browse/PROJ-9".into());
+        assert_eq!(
+            guess_pr_body(&t),
+            "Addresses [PROJ-9](https://jira/browse/PROJ-9)"
+        );
     }
 
     #[test]

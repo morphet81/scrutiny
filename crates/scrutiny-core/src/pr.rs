@@ -65,6 +65,21 @@ pub struct PrMetaChoice {
     pub base: String,
 }
 
+/// Lowercase the first letter of a conventional-commit subject:
+/// `feat: Optimize …` → `feat: optimize …`. Leaves the `type(scope):` prefix
+/// intact; a no-op when there is no `: ` separator.
+pub fn normalize_conventional_title(title: &str) -> String {
+    let Some(sep) = title.find(": ") else {
+        return title.to_string();
+    };
+    let (prefix, rest) = title.split_at(sep + 2);
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(first) => format!("{prefix}{}{}", first.to_lowercase(), chars.as_str()),
+        None => title.to_string(),
+    }
+}
+
 /// Compute the default base branch for a PR (resolved, `origin/` stripped).
 pub fn default_base_branch(cwd: &Path, candidates: &[String]) -> String {
     let base = git::resolve_base_branch(cwd, candidates, None).unwrap_or_else(|_| "main".into());
@@ -86,7 +101,7 @@ pub fn confirm_pr_meta(
     let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
 
     if skip_prompts || !tty {
-        let title = suggested_title.trim().to_string();
+        let title = normalize_conventional_title(suggested_title.trim());
         if title.is_empty() {
             bail!("pr title empty");
         }
@@ -101,9 +116,8 @@ pub fn confirm_pr_meta(
         .with_prompt("PR title")
         .default(suggested_title.trim().to_string())
         .interact_text()
-        .context("pr title")?
-        .trim()
-        .to_string();
+        .context("pr title")?;
+    let title = normalize_conventional_title(title.trim());
     if title.is_empty() {
         bail!("pr title empty");
     }
@@ -225,5 +239,27 @@ mod tests {
     #[test]
     fn editor_falls_back_to_vi() {
         assert_eq!(pick_editor(None, None, None), "vi");
+    }
+
+    #[test]
+    fn conventional_title_lowercases_subject() {
+        assert_eq!(
+            normalize_conventional_title("feat: Optimize docs"),
+            "feat: optimize docs"
+        );
+        assert_eq!(
+            normalize_conventional_title("fix(pr): Resolve branch"),
+            "fix(pr): resolve branch"
+        );
+    }
+
+    #[test]
+    fn conventional_title_leaves_prefix_and_lowercase_subject() {
+        assert_eq!(
+            normalize_conventional_title("chore: already lower"),
+            "chore: already lower"
+        );
+        // no separator → unchanged
+        assert_eq!(normalize_conventional_title("No prefix Here"), "No prefix Here");
     }
 }
