@@ -60,22 +60,21 @@ pub fn resolve_base_branch(
         return Ok(resolved);
     }
 
-    // 1) configured upstream
-    if let Ok(upstream) = git_stdout(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]) {
-        let upstream = upstream.trim().to_string();
-        if !upstream.is_empty() && upstream != "HEAD" {
-            return Ok(upstream);
-        }
-    }
+    // The current branch: never a valid destination for its own PR. The
+    // configured upstream is a remote copy of this same branch, so it is
+    // deliberately NOT used as a base source.
+    let current = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| normalize_ref(s.trim()))
+        .unwrap_or_default();
 
-    // 2) open PR base via gh (best-effort)
+    // 1) open PR base via gh (best-effort)
     if let Some(base) = try_gh_pr_base(root) {
         if let Some(resolved) = resolve_existing_ref(root, &base) {
             return Ok(resolved);
         }
     }
 
-    // 3) BASE_BRANCH env (project convention)
+    // 2) BASE_BRANCH env (project convention)
     if let Ok(env_base) = std::env::var("BASE_BRANCH") {
         let env_base = env_base.trim().to_string();
         if !env_base.is_empty() {
@@ -87,7 +86,7 @@ pub fn resolve_base_branch(
         }
     }
 
-    // 4) fork-point / merge-base against candidates (and origin/*)
+    // 3) fork-point / merge-base against candidates (and origin/*)
     let mut expanded: Vec<String> = Vec::new();
     for cand in candidates {
         expanded.push(cand.clone());
@@ -101,6 +100,10 @@ pub fn resolve_base_branch(
         let Some(resolved) = resolve_existing_ref(root, cand) else {
             continue;
         };
+        // Never pick the current branch as its own base.
+        if !current.is_empty() && normalize_ref(&resolved) == current {
+            continue;
+        }
         let Some(base_commit) = fork_point(root, &resolved).or_else(|| merge_base(root, &resolved))
         else {
             continue;
@@ -378,6 +381,46 @@ mod tests {
         run(&["add", "-A"]);
         run(&["commit", "-q", "-m", "second"]);
         assert_eq!(commits_ahead(&dir, "main"), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn base_is_parent_not_self_upstream() {
+        let dir = std::env::temp_dir().join(format!("git-base-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        // Feature branch off main, with a commit.
+        create_branch(&dir, "feat/z").unwrap();
+        std::fs::write(dir.join("b.txt"), "2").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "feat"]);
+
+        // Even with the current branch among the candidates, the base must be
+        // the parent (`main`), never the branch itself.
+        let cands = vec!["feat/z".to_string(), "main".to_string()];
+        let base = resolve_base_branch(&dir, &cands, None).unwrap();
+        assert_eq!(normalize_ref(&base), "main");
 
         std::fs::remove_dir_all(&dir).ok();
     }

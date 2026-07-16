@@ -121,7 +121,11 @@ fn preflight_branch(cwd: &Path, cfg: &Config, non_interactive: bool) -> Result<(
     // 1) No commits vs base → fail early (skip if base can't be resolved).
     if let Ok(base) = git::resolve_base_branch(cwd, &cfg.git.base_candidates, None) {
         if git::commits_ahead(cwd, &base) == 0 {
-            bail!("no commits between HEAD and {base} — nothing to open a PR for");
+            let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_else(|_| "HEAD".into())
+                .trim()
+                .to_string();
+            bail!("no commits between {branch} and {base} — nothing to open a PR for");
         }
     }
 
