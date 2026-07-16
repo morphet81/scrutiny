@@ -46,6 +46,39 @@ pub fn detect_from_env(
     }
 }
 
+/// Decide the non-headless terminal surface for a spawned agent, or `None` to
+/// run headless. `tool` names the caller (parley/probe/forge) for log prefixes.
+///
+/// `None` when: `headless = true`; the client is not claude (non-headless
+/// supports claude only); or no supported surface is detected.
+pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<TerminalContext> {
+    if headless {
+        return None;
+    }
+    match detect_terminal() {
+        Some(_) if client != "claude" => {
+            eprintln!(
+                "scrutiny {tool}: headless=false but non-headless mode supports claude only \
+                 (got {client}) — running headless"
+            );
+            None
+        }
+        Some(t) => {
+            eprintln!(
+                "scrutiny {tool}: headless=false — opening agents in {t:?} windows (auto mode)"
+            );
+            Some(t)
+        }
+        None => {
+            eprintln!(
+                "scrutiny {tool}: headless=false but no supported terminal surface \
+                 (tmux/zellij/iTerm2/Terminal.app) — running headless"
+            );
+            None
+        }
+    }
+}
+
 /// Open a new visible window/session running `bash <script_path>` on `ctx`.
 ///
 /// Returns once the launcher command exits — the agent keeps running in its own
@@ -135,5 +168,11 @@ mod tests {
     #[test]
     fn tmux_session_name_sanitized() {
         assert_eq!(tmux_session_name("parley-member#1"), "parley-member-1");
+    }
+
+    #[test]
+    fn resolve_terminal_headless_is_none() {
+        // headless=true short-circuits before any env detection.
+        assert_eq!(resolve_terminal(true, "claude", "probe"), None);
     }
 }

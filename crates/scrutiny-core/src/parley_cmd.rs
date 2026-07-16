@@ -28,7 +28,7 @@ use crate::parley::plan::{
 use crate::parley::reply::{run_parley_reply, ParleyReplyInput};
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
-use crate::terminal::{detect_terminal, TerminalContext};
+use crate::terminal::{resolve_terminal, TerminalContext};
 
 #[derive(Debug, Clone)]
 pub struct ParleyCmdInput {
@@ -143,7 +143,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
 
     if !input.skip_agents {
         // Non-headless: open each agent in a visible window (claude + tmux/zellij/macOS).
-        let term = resolve_terminal(&cfg, &detected.client);
+        let term = resolve_terminal(cfg.headless, &detected.client, "parley");
 
         if plan.spawn_mode == "team" {
             eprintln!("scrutiny parley: team lead…");
@@ -251,35 +251,6 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
 
 /// Wall clock for a non-headless agent window (user may be watching — be generous).
 const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
-
-/// Decide the non-headless terminal surface, or None to run headless.
-fn resolve_terminal(cfg: &Config, client: &str) -> Option<TerminalContext> {
-    if cfg.headless {
-        return None;
-    }
-    match detect_terminal() {
-        Some(_) if client != "claude" => {
-            eprintln!(
-                "scrutiny parley: headless=false but non-headless mode supports claude only \
-                 (got {client}) — running headless"
-            );
-            None
-        }
-        Some(t) => {
-            eprintln!(
-                "scrutiny parley: headless=false — opening agents in {t:?} windows (auto mode)"
-            );
-            Some(t)
-        }
-        None => {
-            eprintln!(
-                "scrutiny parley: headless=false but no supported terminal surface \
-                 (tmux/zellij/iTerm2/Terminal.app) — running headless"
-            );
-            None
-        }
-    }
-}
 
 /// Read the fixes file and ensure every expected thread id has an entry,
 /// stubbing any the agent left behind. Used to collect non-headless results.

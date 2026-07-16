@@ -21,6 +21,7 @@ use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteI
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
 use crate::runtime::{resolve_client, resolve_spawn_mode, ResolveClientInput};
 use crate::scan::run_scan;
+use crate::terminal::resolve_terminal;
 
 #[derive(Debug, Clone)]
 pub struct ReviewCmdInput {
@@ -162,12 +163,13 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
     let mut report_path: Option<PathBuf> = None;
 
     if !plan.skip_ai && !input.skip_agents {
+        let term = resolve_terminal(cfg.headless, &detected.client, "probe");
         let (report, rpath) = if plan.spawn_mode == "team" {
             eprintln!("scrutiny probe: team lead agent…");
-            run_team_review(&detected, &plan, &pack_path, &cwd)?
+            run_team_review(&detected, &plan, &pack_path, &cwd, term)?
         } else {
             eprintln!("scrutiny probe: isolated parallel agents…");
-            run_isolated_review(&detected, &plan, &pack_path, &cwd)?
+            run_isolated_review(&detected, &plan, &pack_path, &cwd, term)?
         };
         eprintln!(
             "  report {} ({} findings, from {} raw)",

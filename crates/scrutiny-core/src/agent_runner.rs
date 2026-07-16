@@ -18,6 +18,8 @@ use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
 use crate::terminal::{launch_agent_window, TerminalContext};
 
+const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessKind {
     /// Read-focused specialist (no team spawn).
@@ -312,7 +314,7 @@ pub fn run_nonheadless(
 
     let prompt_path = temp_artifact_path("scrutiny", "agent", "prompt");
     let full_prompt = format!(
-        "{prompt}\n\n---\nWhen you are completely finished (all fixes written to disk), \
+        "{prompt}\n\n---\nWhen you are completely finished (all outputs written to disk), \
          run this shell command exactly once so the host knows you are done:\n\n\
          touch '{}'\n",
         sentinel.display()
@@ -667,12 +669,50 @@ pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
     )
 }
 
+/// Append to a findings prompt: write JSON to disk instead of stdout.
+/// Used in non-headless mode where stdout is not captured.
+fn nonheadless_findings_suffix(out_path: &Path) -> String {
+    format!(
+        "\n\n---\nNON-HEADLESS OUTPUT OVERRIDE:\n\
+         Do NOT print the findings JSON to stdout.\n\
+         Instead, WRITE the findings JSON object (the same `{{\"findings\":[…]}}` you would \
+         have printed) to this file (create/overwrite):\n\
+           {}\n\
+         Use the Write tool. The host reads that file after you finish.\n",
+        out_path.display()
+    )
+}
+
+/// Collate a vec of `AgentRunResult` into a deduped `ReviewReport` and write it.
+fn collate_review_report(
+    agents: Vec<AgentRunResult>,
+    spawn_mode: &str,
+    model: &str,
+    client: &str,
+) -> Result<(ReviewReport, PathBuf)> {
+    let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum();
+    let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
+    let findings = dedupe_findings(&mut all);
+    let report = ReviewReport {
+        version: 1,
+        spawn_mode: spawn_mode.to_string(),
+        model: model.to_string(),
+        findings,
+        agents,
+        deduped_from: raw_count,
+    };
+    let out = temp_artifact_path(client, "review", "report");
+    write_json_pretty(&out, &report)?;
+    Ok((report, out))
+}
+
 /// Run isolated parallel specialists; collate + dedupe into ReviewReport.
 pub fn run_isolated_review(
     client: &DetectedClient,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
+    term: Option<TerminalContext>,
 ) -> Result<(ReviewReport, PathBuf)> {
     let mut jobs: Vec<(String, u32, Vec<String>)> = Vec::new();
 
@@ -701,6 +741,48 @@ pub fn run_isolated_review(
 
     if jobs.is_empty() {
         bail!("isolated mode: no agents to spawn (reviewers/evangelists/specialists all off)");
+    }
+
+    // Non-headless: each agent writes findings JSON to a per-agent file.
+    if let Some(ctx) = term {
+        let wall = Duration::from_secs(NONHEADLESS_WALL_SECS);
+        // (sentinel_path, findings_path, role, index, paths)
+        let mut entries: Vec<(PathBuf, PathBuf, String, u32, Vec<String>)> = Vec::new();
+        for (role, index, paths) in &jobs {
+            let label = format!("{role}#{index}");
+            let findings_path = artifact_path_unique("review-agent-findings");
+            let prompt = build_isolated_prompt(role, pack_path, paths, plan)
+                + &nonheadless_findings_suffix(&findings_path);
+            let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, &label, ctx)?;
+            entries.push((sentinel, findings_path, role.clone(), *index, paths.clone()));
+        }
+        let sentinel_paths: Vec<PathBuf> = entries.iter().map(|(s, _, _, _, _)| s.clone()).collect();
+        let missing = wait_for_sentinels(&sentinel_paths, wall);
+        if !missing.is_empty() {
+            eprintln!(
+                "scrutiny: {} isolated agent window(s) did not signal done within {}s — collecting partial findings",
+                missing.len(),
+                NONHEADLESS_WALL_SECS
+            );
+        }
+        let mut agents: Vec<AgentRunResult> = Vec::new();
+        for (_sentinel, findings_path, role, index, paths) in entries {
+            let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
+                Ok(raw) => {
+                    let f = parse_findings_json(&raw, &role).unwrap_or_default();
+                    let ok = !f.is_empty();
+                    (f, ok, String::new())
+                }
+                Err(e) => (Vec::new(), false, format!("could not read findings file: {e}")),
+            };
+            if !ok {
+                eprintln!(
+                    "scrutiny: agent {role}#{index} non-headless: no findings or read error"
+                );
+            }
+            agents.push(AgentRunResult { role, index, paths, findings, ok, stderr });
+        }
+        return collate_review_report(agents, "isolated", &plan.model, &plan.client);
     }
 
     let wall = Duration::from_secs(AGENT_WALL_SECS);
@@ -874,21 +956,7 @@ pub fn run_isolated_review(
         );
     }
 
-    let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum();
-    let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
-    let findings = dedupe_findings(&mut all);
-
-    let report = ReviewReport {
-        version: 1,
-        spawn_mode: "isolated".into(),
-        model: plan.model.clone(),
-        findings,
-        agents,
-        deduped_from: raw_count,
-    };
-    let out = temp_artifact_path(&plan.client, "review", "report");
-    write_json_pretty(&out, &report)?;
-    Ok((report, out))
+    collate_review_report(agents, "isolated", &plan.model, &plan.client)
 }
 
 pub fn run_team_review(
@@ -896,14 +964,56 @@ pub fn run_team_review(
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
+    term: Option<TerminalContext>,
 ) -> Result<(ReviewReport, PathBuf)> {
-    let prompt = build_team_lead_prompt(pack_path, plan);
+    let prompt_base = build_team_lead_prompt(pack_path, plan);
+
+    if let Some(ctx) = term {
+        let findings_path = artifact_path_unique("review-lead-findings");
+        let prompt = prompt_base + &nonheadless_findings_suffix(&findings_path);
+        let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, "lead#1", ctx)?;
+        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        if !missing.is_empty() {
+            eprintln!(
+                "scrutiny: team lead window did not signal done within {}s — collecting partial findings",
+                NONHEADLESS_WALL_SECS
+            );
+        }
+        let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
+            Ok(raw) => {
+                let f = parse_findings_json(&raw, "lead").unwrap_or_default();
+                let ok = !f.is_empty();
+                (f, ok, String::new())
+            }
+            Err(e) => (Vec::new(), false, format!("could not read findings file: {e}")),
+        };
+        let agent = AgentRunResult {
+            role: "lead".into(),
+            index: 1,
+            paths: Vec::new(),
+            findings: findings.clone(),
+            ok,
+            stderr,
+        };
+        let report = ReviewReport {
+            version: 1,
+            spawn_mode: "team".into(),
+            model: plan.model.clone(),
+            findings,
+            agents: vec![agent],
+            deduped_from: 0,
+        };
+        let out_path = temp_artifact_path(&plan.client, "review", "report");
+        write_json_pretty(&out_path, &report)?;
+        return Ok((report, out_path));
+    }
+
     let wall = Duration::from_secs(AGENT_WALL_SECS);
     let out = run_headless(
         client,
         &plan.model,
         cwd,
-        &prompt,
+        &prompt_base,
         HeadlessKind::TeamLead,
         "lead#1",
         wall,

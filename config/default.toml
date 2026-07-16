@@ -1,7 +1,8 @@
 default_client = "claude"
-# Run spawned agents headless (stdout captured). Set false to open each parley
-# agent in a visible terminal window in auto mode (claude only; tmux/zellij/
-# macOS Terminal/iTerm2). Unsupported surfaces fall back to headless.
+# Run spawned agents headless (stdout captured). Set false to open each agent
+# in a visible terminal window in auto mode (claude only; tmux/zellij/
+# macOS Terminal/iTerm2). Applies to parley, probe, and forge.
+# Unsupported surfaces or non-claude clients fall back to headless.
 headless = true
 # When set, skip client prompt for `scrutiny probe` (must be installed on PATH).
 # force_client = "claude"

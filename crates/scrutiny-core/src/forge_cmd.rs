@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::agent_runner::{run_headless, HeadlessKind, AGENT_WALL_SECS};
+use crate::agent_runner::{
+    run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind, HeadlessOutcome,
+    AGENT_WALL_SECS,
+};
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::brief::run_forge_brief;
 use crate::forge::context::run_forge_context;
@@ -25,6 +28,7 @@ use crate::forge::verify::{
 use crate::git::{self, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
+use crate::terminal::{resolve_terminal, TerminalContext};
 
 /// Shared case-title rules for TDD test-plan + implement agents.
 const TEST_TITLE_GUIDELINES: &str = "\
@@ -36,6 +40,45 @@ Test case titles (it/test strings in the plan and in code):\n\
 - Nested describe = SUT / area (symbol or feature), not a prefixed case id.\n\
 - Prefer matching nearby it()/test() title style in context paths when present; \
   otherwise use bare-verb affirmative style above.\n";
+
+/// Wall clock for a non-headless agent window (user may be watching — be generous).
+const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
+
+/// Run one forge agent either headless (captured, returns the outcome) or in a
+/// visible window (`term = Some`, returns `None` — results are read from disk by
+/// the caller). Forge agents always communicate via disk (test-plan.md, pr.json,
+/// source, coverage), so the non-headless path needs no stdout.
+fn run_forge_agent(
+    client: &crate::runtime::DetectedClient,
+    model: &str,
+    cwd: &Path,
+    prompt: &str,
+    label: &str,
+    term: Option<TerminalContext>,
+    wall: Duration,
+) -> Result<Option<HeadlessOutcome>> {
+    if let Some(ctx) = term {
+        let sentinel = run_nonheadless(client, model, cwd, prompt, label, ctx)?;
+        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        if !missing.is_empty() {
+            eprintln!(
+                "scrutiny forge: {label} window did not signal done within {}s — using disk state",
+                NONHEADLESS_WALL_SECS
+            );
+        }
+        Ok(None)
+    } else {
+        Ok(Some(run_headless(
+            client,
+            model,
+            cwd,
+            prompt,
+            HeadlessKind::Forge,
+            label,
+            wall,
+        )?))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PrMeta {
@@ -121,6 +164,9 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
             skip_prompt: input.non_interactive || input.from_json.is_some(),
         },
     )?;
+
+    // Non-headless: open each agent in a visible window (claude + tmux/zellij/macOS).
+    let term = resolve_terminal(cfg.headless, &detected.client, "forge");
 
     eprintln!("scrutiny forge: fetch ticket…");
     let (mut ticket, ticket_path) = run_forge_fetch(ForgeFetchInput {
@@ -239,6 +285,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
             &brief_path,
             &context_path,
             &session,
+            term,
         )?;
         session.tdd_plan_path = Some(plan_path.display().to_string());
         write_json_pretty(&session_path, &session)?;
@@ -262,6 +309,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         &pr_meta_path,
         &verify_plan,
         &prefix,
+        term,
     )?;
 
     match run_verify_gate(
@@ -273,6 +321,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         &brief_path,
         &context_path,
         &verify_plan,
+        term,
     )? {
         GateOutcome::Green => {}
         GateOutcome::Red { proceed: true } => {
@@ -502,6 +551,7 @@ fn run_tdd_plan_loop(
     brief_path: &Path,
     context_path: &Path,
     session: &ForgeSessionPlan,
+    term: Option<TerminalContext>,
 ) -> Result<PathBuf> {
     let plan_path = session_root.join("test-plan.md");
     let theme = ColorfulTheme::default();
@@ -509,7 +559,7 @@ fn run_tdd_plan_loop(
     // Generate once up front; the loop only re-renders and (on Revise) re-runs.
     run_test_plan_agent(
         client, model, cwd, ticket_path, session_path, brief_path, context_path, session,
-        &plan_path, None, "forge-test-plan",
+        &plan_path, None, "forge-test-plan", term,
     )?;
 
     loop {
@@ -545,7 +595,7 @@ fn run_tdd_plan_loop(
                     .context("test plan comment")?;
                 run_test_plan_agent(
                     client, model, cwd, ticket_path, session_path, brief_path, context_path,
-                    session, &plan_path, Some(&comment), "forge-test-plan-revise",
+                    session, &plan_path, Some(&comment), "forge-test-plan-revise", term,
                 )?;
             }
         }
@@ -569,6 +619,7 @@ fn run_test_plan_agent(
     plan_path: &Path,
     comment: Option<&str>,
     label: &str,
+    term: Option<TerminalContext>,
 ) -> Result<()> {
     let prompt = build_test_plan_prompt(
         ticket_path,
@@ -583,28 +634,41 @@ fn run_test_plan_agent(
         "scrutiny forge: {} test plan…",
         if comment.is_some() { "revising" } else { "generating" }
     );
-    let out = run_headless(
+    let out = run_forge_agent(
         client,
         model,
         cwd,
         &prompt,
-        HeadlessKind::Forge,
         label,
+        term,
         Duration::from_secs(AGENT_WALL_SECS),
     )?;
-    if out.code != 0 && !out.timed_out && !plan_path.exists() {
-        bail!(
-            "test-plan agent failed: {}",
-            out.stderr.chars().take(400).collect::<String>()
-        );
-    }
-    // Salvage from stdout if the agent didn't write the file.
-    if !plan_path.exists() {
-        let text = extract_markdownish(&out.stdout);
-        if text.trim().is_empty() {
-            bail!("test-plan agent produced no markdown");
+    match out {
+        // Headless: salvage markdown from stdout if the agent didn't write the file.
+        Some(o) => {
+            if o.code != 0 && !o.timed_out && !plan_path.exists() {
+                bail!(
+                    "test-plan agent failed: {}",
+                    o.stderr.chars().take(400).collect::<String>()
+                );
+            }
+            if !plan_path.exists() {
+                let text = extract_markdownish(&o.stdout);
+                if text.trim().is_empty() {
+                    bail!("test-plan agent produced no markdown");
+                }
+                fs::write(plan_path, text).context("write test-plan.md")?;
+            }
         }
-        fs::write(plan_path, text).context("write test-plan.md")?;
+        // Non-headless: no stdout to salvage — the plan file is the only channel.
+        None => {
+            if !plan_path.exists() {
+                bail!(
+                    "test-plan agent window finished without writing {}",
+                    plan_path.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -673,6 +737,7 @@ fn run_implement_agent(
     pr_meta_path: &Path,
     verify: &VerifyPlan,
     prefix: &str,
+    term: Option<TerminalContext>,
 ) -> Result<()> {
     let prompt = build_implement_prompt(
         ticket_path,
@@ -690,20 +755,22 @@ fn run_implement_agent(
     } else {
         "forge-implement"
     };
-    let out = run_headless(
+    let out = run_forge_agent(
         client,
         model,
         cwd,
         &prompt,
-        HeadlessKind::Forge,
         label,
+        term,
         Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
     )?;
-    if out.code != 0 && !out.timed_out {
-        eprintln!(
-            "scrutiny forge: implement agent exit {} — check output",
-            out.code
-        );
+    if let Some(o) = out {
+        if o.code != 0 && !o.timed_out {
+            eprintln!(
+                "scrutiny forge: implement agent exit {} — check output",
+                o.code
+            );
+        }
     }
     Ok(())
 }
@@ -860,6 +927,7 @@ fn run_verify_gate(
     brief_path: &Path,
     context_path: &Path,
     plan: &VerifyPlan,
+    term: Option<TerminalContext>,
 ) -> Result<GateOutcome> {
     if plan.is_empty() {
         eprintln!("scrutiny forge: no verify commands — skip gate");
@@ -943,17 +1011,19 @@ fn run_verify_gate(
             plan.coverage_target,
         );
         eprintln!("scrutiny forge: spawning fix agent…");
-        let out = run_headless(
+        let out = run_forge_agent(
             client,
             model,
             cwd,
             &prompt,
-            HeadlessKind::Forge,
             "forge-verify-fix",
+            term,
             Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
         )?;
-        if out.code != 0 && !out.timed_out {
-            eprintln!("scrutiny forge: fix agent exit {} — re-checking", out.code);
+        if let Some(o) = out {
+            if o.code != 0 && !o.timed_out {
+                eprintln!("scrutiny forge: fix agent exit {} — re-checking", o.code);
+            }
         }
     }
 
