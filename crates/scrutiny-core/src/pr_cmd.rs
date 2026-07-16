@@ -199,6 +199,12 @@ fn resolve_ticket(
         return Some(report);
     }
 
+    // Branch gave nothing: reuse a ticket already fetched into .scrutiny/.
+    if let Some(report) = cached_ticket(cwd) {
+        eprintln!("scrutiny pr: reusing ticket {} from .scrutiny (cached)", report.id);
+        return Some(report);
+    }
+
     let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     if non_interactive || !tty {
         eprintln!("scrutiny pr: no ticket — suggestions from branch name only");
@@ -239,6 +245,44 @@ fn fetch_input(cwd: &Path, input: Option<String>, source: Option<&str>) -> Forge
     }
 }
 
+/// Read every `.scrutiny/*/ticket.json` into a `TicketReport` (skip unreadable/invalid).
+fn load_cached_tickets(cwd: &Path) -> Vec<TicketReport> {
+    let mut reports = Vec::new();
+    let Ok(entries) = std::fs::read_dir(cwd.join(".scrutiny")) else {
+        return reports;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join("ticket.json");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(report) = serde_json::from_str::<TicketReport>(&text) {
+                reports.push(report);
+            }
+        }
+    }
+    reports
+}
+
+/// Reuse a previously fetched ticket from `.scrutiny/` when arg + branch gave nothing.
+fn cached_ticket(cwd: &Path) -> Option<TicketReport> {
+    let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    pick_cached_ticket(load_cached_tickets(cwd), branch.trim())
+}
+
+/// Pure selection: branch-matched id wins; else the single cached ticket; else None (ambiguous).
+fn pick_cached_ticket(mut reports: Vec<TicketReport>, branch: &str) -> Option<TicketReport> {
+    let up = branch.to_uppercase();
+    if let Some(i) = reports
+        .iter()
+        .position(|r| !r.id.is_empty() && up.contains(&r.id.to_uppercase()))
+    {
+        return Some(reports.swap_remove(i));
+    }
+    if reports.len() == 1 {
+        return reports.pop();
+    }
+    None
+}
+
 /// Fallback title when no ticket: humanize the current branch name.
 fn title_from_branch(cwd: &Path) -> String {
     let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -260,5 +304,52 @@ mod tests {
         assert_eq!(push_need(false, 3), PushNeed::FirstPush);
         assert_eq!(push_need(true, 0), PushNeed::None);
         assert_eq!(push_need(true, 2), PushNeed::Ahead(2));
+    }
+
+    fn report(id: &str) -> TicketReport {
+        TicketReport {
+            version: 1,
+            source: "jira".into(),
+            id: id.into(),
+            url: None,
+            title: String::new(),
+            description: String::new(),
+            labels: vec![],
+            comments: vec![],
+            attachments_dir: None,
+            figma_urls: vec![],
+            figma_dir: None,
+            fields: serde_json::Value::Null,
+            raw_path: None,
+            fetched_at: String::new(),
+            suggested_forge: Default::default(),
+        }
+    }
+
+    #[test]
+    fn cached_ticket_branch_match_is_case_insensitive() {
+        let picked = pick_cached_ticket(vec![report("NERO-531")], "new-tc-manager/feat/nero-531");
+        assert_eq!(picked.map(|r| r.id), Some("NERO-531".into()));
+    }
+
+    #[test]
+    fn cached_ticket_prefers_branch_match_over_others() {
+        let picked = pick_cached_ticket(
+            vec![report("ABC-1"), report("NERO-531")],
+            "feat/nero-531",
+        );
+        assert_eq!(picked.map(|r| r.id), Some("NERO-531".into()));
+    }
+
+    #[test]
+    fn cached_ticket_ambiguous_without_branch_match_is_none() {
+        let picked = pick_cached_ticket(vec![report("ABC-1"), report("XYZ-2")], "feat/unrelated");
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn cached_ticket_single_is_reused_without_branch_match() {
+        let picked = pick_cached_ticket(vec![report("ABC-1")], "feat/unrelated");
+        assert_eq!(picked.map(|r| r.id), Some("ABC-1".into()));
     }
 }
