@@ -92,7 +92,7 @@ pub fn launch_agent_window(ctx: TerminalContext, label: &str, script_path: &Path
             .status()
             .context("spawn tmux new-session")?,
         TerminalContext::Zellij => Command::new("zellij")
-            .args(["run", "--name", label, "--", "bash", &script])
+            .args(["run", "--close-on-exit", "--name", label, "--", "bash", &script])
             .status()
             .context("spawn zellij run")?,
         TerminalContext::AppleTerminal => Command::new("osascript")

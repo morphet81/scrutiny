@@ -324,10 +324,16 @@ pub fn run_nonheadless(
 
     let script_path = artifact_path_unique("agent-script");
     let script = format!(
-        "#!/usr/bin/env bash\ncd '{cwd}'\n'{binary}' --permission-mode auto --model '{model}' \"$(cat '{prompt}')\"\n",
+        "#!/usr/bin/env bash\ncd '{cwd}'\n\
+         '{binary}' --permission-mode auto --model '{model}' \"$(cat '{prompt}')\"\n\
+         code=$?\n\
+         if [ \"$code\" -eq 0 ]; then exit 0; fi\n\
+         echo \"scrutiny: agent '{label}' failed (exit $code); pane kept open for inspection\"\n\
+         exec bash\n",
         cwd = cwd.display(),
         binary = client.binary.display(),
         prompt = prompt_path.display(),
+        label = label,
     );
     fs::write(&script_path, script.as_bytes())
         .with_context(|| format!("write {}", script_path.display()))?;
