@@ -223,3 +223,34 @@ exclude_globs = [
   "**/*.pb.go",
   "**/*.pb.ts",
 ]
+
+# Custom prompt injection. Text here is prepended to spawned-agent prompts.
+# Order: global → per-agent → scrutiny's own prompt.
+# Per-agent key = the agent's label prefix with "-" replaced by "_".
+# Unknown keys are ignored. Team leads only inject into their own prompt, not
+# into teammates they spawn themselves. Uncomment to enable.
+# [prompts]
+# Prepended to EVERY spawned agent (probe, parley, forge).
+# global = "Follow our house rules: cite file:line; never touch generated code."
+#
+# Per-role overrides (prepended after `global`, before scrutiny's prompt).
+# [prompts.agents]
+# --- probe (code review) ---
+# reviewer = ""
+# evangelist = ""
+# security = ""
+# performance = ""
+# error_handling = ""
+# lead = ""                 # team-mode review lead
+# --- parley (PR comment resolution) ---
+# parley_member = ""
+# parley_lead = ""
+# parley_verifier = ""
+# parley_evangelist = ""
+# parley_push_fix = ""
+# --- forge (ticket implementation) ---
+# forge_test_plan = ""
+# forge_test_plan_revise = ""
+# forge_implement = ""       # single-agent implement
+# forge_po_team = ""         # team-mode PO/lead implement
+# forge_verify_fix = ""

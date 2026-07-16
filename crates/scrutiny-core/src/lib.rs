@@ -30,7 +30,9 @@ pub mod taxonomy;
 pub mod terminal;
 pub mod treesitter;
 
-pub use config::{ensure_config, find_shipped_default, load_config, Config};
+pub use config::{
+    ensure_config, find_shipped_default, load_config, resolve_prompt_prefix, Config, PromptsConfig,
+};
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
     attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,

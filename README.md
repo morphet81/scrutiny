@@ -221,12 +221,74 @@ Each command prints **one** temp JSON path on stdout (`forge-brief` also writes 
 
 ## Config
 
-First run copies `config/default.toml` → `~/.scrutiny/config.toml`.
+First run copies `config/default.toml` → `~/.scrutiny/config.toml`. Every key has a default
+(`#[serde(default)]`), so a partial file is valid — set only what you override.
 
-- `[models.claude]` — Claude Code aliases (`haiku`/`sonnet`/`opus`) or pinned ids. Not Cursor slugs.
-- `[pack]` / `[scan]` — review pack budget + optional lint hooks
-- `[forge]` — force approach / e2e / agent counts (omit = prompt); `enable_figma`, `enable_lore`, `enable_po`, `enable_ticket_writeback`
-- `[forge.complexity]` — keyword lists, story-point field names, and tier thresholds that drive automatic model selection
+### Full key reference
+
+**Top-level**
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `default_client` | `"claude"` | AI client: `claude` \| `cursor` \| `codex` |
+| `headless` | `true` | Capture agent stdout. `false` → open each agent in a visible terminal window (claude only; tmux/zellij/macOS Terminal/iTerm2). Applies to probe, parley, forge |
+| `force_client` | _(unset)_ | Skip the client prompt for `scrutiny probe` |
+| `force_spawn_mode` | _(unset)_ | Skip spawn-mode prompt: `isolated` \| `team`. Unset → `isolated` |
+| `editor` | _(unset)_ | Editor for PR descriptions; falls back to `$VISUAL` → `$EDITOR` → `vi`. Supports args (`"code --wait"`) |
+
+**`[models.<client>]`** — model per tier for `claude` / `cursor` / `codex`. Keys `xs`,`s`,`m`,`l`,`xl`. Claude uses aliases (`haiku`/`sonnet`/`opus`) or pinned Anthropic ids — not Cursor slugs.
+
+**`[review]`** — per-tier toggles `security_by_tier`, `performance_by_tier`, `error_handling_by_tier` (each `XS`/`S`/`M`/`L`/`XL` bool). Security/performance/error-handling default off for XS/S, on for M/L/XL.
+
+**`[review.signals]`** — content-signal gating: `ignore_content_signals` (`false`), plus glob/regex lists `security_path_globs`, `security_diff_patterns`, `performance_path_globs`, `performance_diff_patterns`, `performance_css_path_globs`, `performance_css_patterns`, `error_handling_diff_patterns`.
+
+**`[agents]`** — `max_agents_total` (`4`), `max_reviewers` (`2`), `max_evangelists` (`1`); per-tier counts `[agents.reviewers_by_tier]` and `[agents.evangelists_by_tier]` (`XS`..`XL`).
+
+**`[git]`** — `base_candidates` (`["main","master","develop"]`), `exclude_globs` (lockfiles, `node_modules`, `dist`, generated, …).
+
+**`[pack]`** — review-pack budgets: `max_chars` (`48000`), `doc_digest_lines` (`40`), `symbol_context_lines` (`3`), `min_file_chars` (`1200`), weights `source_weight` (`4`)/`test_weight` (`2`)/`doc_weight` (`1`), xref knobs `enable_xref` (`true`), `xref_max_symbols` (`40`), `xref_max_files_scanned` (`300`), `xref_char_budget` (`6000`), `xref_body_lines` (`40`), `annex_char_budget` (`12000`).
+
+**`[pack.explore]`** — bounded agent exploration: `enable` (`true`), `max_extra_reads` (`6`), `max_extra_chars` (`24000`), `prefer_read_over_bash` (`true`), `allow_repo_grep` (`false`), `require_pack_path_hint` (`true`).
+
+**`[scan]` / `[scan.i18n]`** — deterministic scan: `enable` (`true`), `commands` (extra lint hooks); i18n `enable` (`true`), `reference_locale` (`"en"`), `path_globs`, `check_placeholders` (`true`), `check_empty_values` (`true`), `full_catalog` (`false`).
+
+**`[forge]`** — force approach / e2e / agent counts (omit = prompt): `approach`, `e2e`, `agents`, `testers`, `reviewers`, `evangelists`, `model`; toggles `enable_figma`/`enable_lore`/`enable_po`/`enable_ticket_writeback`/`enable_branch` (all `true`); defaults `default_approach` (`"tdd"`), `default_agents` (`2`), `default_testers` (`1`), `default_reviewers` (`1`), `default_evangelists` (`0`); verify gate `verify_commands`, `verify_max_loops` (`2`), `verify_coverage` (`true`); `branch_headless` (`"auto"`).
+
+**`[forge.complexity]`** — keyword lists, story-point field names, and tier thresholds that drive automatic model selection.
+
+**`[parley]`** — `default_members` (`1`), `default_evangelists` (`1`), `default_verifiers` (`1`), `push_fix_max_loops` (`2`).
+
+**`[prompts]`** — custom prompt injection (see below).
+
+### Custom prompts
+
+Inject your own text into scrutiny's spawned-agent prompts without editing the binary.
+
+- `[prompts].global` — prepended to **every** spawned agent (probe, parley, forge).
+- `[prompts.agents].<role>` — prepended for one role only.
+
+Order: **`global` → `<role>` → scrutiny's own prompt**. Both trimmed; empty entries skipped.
+
+Role key = the agent's label prefix with `-` → `_`. Unknown keys are silently ignored.
+
+| Surface | Role keys |
+|---------|-----------|
+| probe | `reviewer`, `evangelist`, `security`, `performance`, `error_handling`, `lead` |
+| parley | `parley_member`, `parley_lead`, `parley_verifier`, `parley_evangelist`, `parley_push_fix` |
+| forge | `forge_test_plan`, `forge_test_plan_revise`, `forge_implement`, `forge_po_team`, `forge_verify_fix` |
+
+Caveat: in **team** mode the lead spawns teammates itself — injection reaches only the prompt
+scrutiny builds (the lead's), not sub-agents the lead spawns.
+
+```toml
+[prompts]
+global = "Repo convention: cite file:line. Never edit generated code."
+
+[prompts.agents]
+reviewer = "Prioritise null-safety and async race conditions."
+security = "We handle PCI data — flag any logging of card fields."
+forge_implement = "Match the existing Result/anyhow error style."
+```
 
 ### Forge model selection
 

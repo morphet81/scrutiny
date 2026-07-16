@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use crate::score::Tier;
 
@@ -37,6 +38,58 @@ pub struct Config {
     pub forge: ForgeConfig,
     #[serde(default)]
     pub parley: ParleyConfig,
+    #[serde(default)]
+    pub prompts: PromptsConfig,
+}
+
+/// User-injected prompt text prepended to spawned-agent prompts.
+/// `global` goes to every agent; `agents[<role>]` targets one role. Order:
+/// global → agent → scrutiny's own prompt. Role key = agent label prefix with
+/// `-` replaced by `_` (e.g. `parley-member` → `parley_member`); unknown keys ignored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromptsConfig {
+    #[serde(default)]
+    pub global: String,
+    #[serde(default)]
+    pub agents: BTreeMap<String, String>,
+}
+
+impl PromptsConfig {
+    /// Combined prefix for an agent type: global then per-agent override,
+    /// each trimmed, joined by a blank line. Empty when neither is set.
+    pub fn prefix_for(&self, agent_type: &str) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        let g = self.global.trim();
+        if !g.is_empty() {
+            parts.push(g);
+        }
+        let a = self.agents.get(agent_type).map(|s| s.trim()).unwrap_or("");
+        if !a.is_empty() {
+            parts.push(a);
+        }
+        parts.join("\n\n")
+    }
+}
+
+static PROMPT_OVERRIDES: OnceLock<RwLock<PromptsConfig>> = OnceLock::new();
+
+fn prompt_overrides() -> &'static RwLock<PromptsConfig> {
+    PROMPT_OVERRIDES.get_or_init(|| RwLock::new(PromptsConfig::default()))
+}
+
+fn store_prompt_overrides(p: &PromptsConfig) {
+    if let Ok(mut w) = prompt_overrides().write() {
+        *w = p.clone();
+    }
+}
+
+/// Resolve the injected prompt prefix for an agent type from the process-global
+/// overrides set by the most recent [`load_config`]. Empty if unset.
+pub fn resolve_prompt_prefix(agent_type: &str) -> String {
+    prompt_overrides()
+        .read()
+        .map(|p| p.prefix_for(agent_type))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -981,6 +1034,7 @@ pub fn load_config(path: &Path) -> Result<Config> {
     let text =
         fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
     let cfg: Config = toml::from_str(&text).context("parse config.toml")?;
+    store_prompt_overrides(&cfg.prompts);
     Ok(cfg)
 }
 
@@ -1038,6 +1092,52 @@ mod tests {
         assert_eq!(forge.agents, 2);
         assert!(!forge.available_models.is_empty());
         assert_eq!(forge.tier, Tier::M);
+        assert!(cfg.prompts.global.is_empty());
+        assert!(cfg.prompts.agents.is_empty());
+    }
+
+    #[test]
+    fn prompts_prefix_for() {
+        let empty = PromptsConfig::default();
+        assert_eq!(empty.prefix_for("reviewer"), "");
+
+        let global_only = PromptsConfig {
+            global: "  G  ".into(),
+            agents: BTreeMap::new(),
+        };
+        assert_eq!(global_only.prefix_for("reviewer"), "G");
+
+        let mut agents = BTreeMap::new();
+        agents.insert("reviewer".to_string(), "R".to_string());
+        let agent_only = PromptsConfig {
+            global: String::new(),
+            agents: agents.clone(),
+        };
+        assert_eq!(agent_only.prefix_for("reviewer"), "R");
+        assert_eq!(agent_only.prefix_for("security"), "");
+
+        let both = PromptsConfig {
+            global: "G".into(),
+            agents,
+        };
+        // global first, then agent, blank-line joined.
+        assert_eq!(both.prefix_for("reviewer"), "G\n\nR");
+        assert_eq!(both.prefix_for("security"), "G");
+    }
+
+    #[test]
+    fn load_config_populates_prompt_overrides() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let toml = format!(
+            "{DEFAULT_TOML}\n[prompts]\nglobal = \"GLOB\"\n[prompts.agents]\nreviewer = \"REV\"\n"
+        );
+        fs::write(&path, toml).unwrap();
+        let cfg = load_config(&path).unwrap();
+        assert_eq!(cfg.prompts.global, "GLOB");
+        // Global store updated as a side effect of load_config.
+        assert_eq!(resolve_prompt_prefix("reviewer"), "GLOB\n\nREV");
+        assert_eq!(resolve_prompt_prefix("security"), "GLOB");
     }
 
     #[test]

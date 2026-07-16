@@ -116,6 +116,28 @@ pub struct HeadlessOutcome {
     pub timed_out: bool,
 }
 
+/// Agent-type key derived from a spawn label: prefix before `#`, `-` → `_`.
+/// e.g. `parley-member#1` → `parley_member`, `reviewer#3` → `reviewer`.
+fn agent_type_from_label(label: &str) -> String {
+    label
+        .split('#')
+        .next()
+        .unwrap_or(label)
+        .trim()
+        .replace('-', "_")
+}
+
+/// Prepend the user's configured prompt overrides (global + per-agent) to a
+/// prompt. Order: global → agent → scrutiny's prompt. Unchanged when none set.
+fn inject_overrides(label: &str, prompt: &str) -> String {
+    let prefix = crate::config::resolve_prompt_prefix(&agent_type_from_label(label));
+    if prefix.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prefix}\n\n{prompt}")
+    }
+}
+
 pub fn run_headless(
     client: &DetectedClient,
     model: &str,
@@ -125,6 +147,8 @@ pub fn run_headless(
     label: &str,
     wall: Duration,
 ) -> Result<HeadlessOutcome> {
+    let injected = inject_overrides(label, prompt);
+    let prompt = injected.as_str();
     let prompt_path = temp_artifact_path("scrutiny", "agent", "prompt");
     {
         let mut f = fs::File::create(&prompt_path)?;
@@ -313,8 +337,9 @@ pub fn run_nonheadless(
     let _ = fs::remove_file(&sentinel); // clear any stale marker
 
     let prompt_path = temp_artifact_path("scrutiny", "agent", "prompt");
+    let base = inject_overrides(label, prompt);
     let full_prompt = format!(
-        "{prompt}\n\n---\nWhen you are completely finished (all outputs written to disk), \
+        "{base}\n\n---\nWhen you are completely finished (all outputs written to disk), \
          run this shell command exactly once so the host knows you are done:\n\n\
          touch '{}'\n",
         sentinel.display()
@@ -1173,6 +1198,14 @@ fn normalize_title(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_to_agent_type() {
+        assert_eq!(agent_type_from_label("reviewer#3"), "reviewer");
+        assert_eq!(agent_type_from_label("parley-member#1"), "parley_member");
+        assert_eq!(agent_type_from_label("forge-implement"), "forge_implement");
+        assert_eq!(agent_type_from_label("lead#1"), "lead");
+    }
 
     #[test]
     fn claude_error_from_stdout() {
