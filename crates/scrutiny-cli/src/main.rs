@@ -19,7 +19,17 @@ use std::process::ExitCode;
 #[command(
     name = "scrutiny",
     version,
-    about = "PR complexity eval + forge ticket implement helpers"
+    about = "PR complexity eval + forge ticket implement helpers",
+    help_template = "\
+{about-with-newline}
+Main commands:
+  probe   Orchestrate full probe: analyze → plan → headless agents → triage → post
+  forge   Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
+  parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
+
+{usage-heading} {usage}
+
+{all-args}{after-help}"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -119,6 +129,7 @@ enum Commands {
         from_json: Option<String>,
     },
     /// Orchestrate full probe: analyze → plan → headless agents → triage → post
+    #[command(hide = true)]
     Probe {
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -203,6 +214,7 @@ enum Commands {
         cwd: Option<PathBuf>,
     },
     /// Address unresolved PR review comments: fetch → fix agents → commit/push → reply
+    #[command(hide = true)]
     Parley {
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -276,6 +288,7 @@ enum Commands {
         cwd: Option<PathBuf>,
     },
     /// Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
+    #[command(hide = true)]
     Forge {
         #[arg(long)]
         cwd: Option<PathBuf>,
