@@ -9,6 +9,7 @@ use crate::score::Tier;
 
 const CONFIG_DIR_NAME: &str = ".scrutiny";
 const CONFIG_FILE_NAME: &str = "config.toml";
+const LOCAL_CONFIG_FILE_NAME: &str = "scrutiny.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -1030,10 +1031,53 @@ pub fn ensure_config(shipped_default: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Find a project-local `scrutiny.toml` by walking up from cwd to the repo root.
+fn local_config_path() -> Option<PathBuf> {
+    let mut cur = std::env::current_dir().ok()?;
+    loop {
+        let candidate = cur.join(LOCAL_CONFIG_FILE_NAME);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if cur.join(".git").exists() {
+            return None;
+        }
+        cur = cur.parent()?.to_path_buf();
+    }
+}
+
+/// Recursively merge `over` into `base`. Tables merge key-by-key; scalars and
+/// arrays are replaced wholesale by the override.
+fn merge_toml(base: &mut toml::Value, over: toml::Value) {
+    match (base, over) {
+        (toml::Value::Table(b), toml::Value::Table(o)) => {
+            for (k, v) in o {
+                match b.get_mut(&k) {
+                    Some(bv) => merge_toml(bv, v),
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+        }
+        (b, o) => *b = o,
+    }
+}
+
 pub fn load_config(path: &Path) -> Result<Config> {
     let text =
         fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text).context("parse config.toml")?;
+    let mut value: toml::Value = toml::from_str(&text).context("parse config.toml")?;
+
+    if let Some(local) = local_config_path() {
+        let ltext =
+            fs::read_to_string(&local).with_context(|| format!("read {}", local.display()))?;
+        let lvalue: toml::Value =
+            toml::from_str(&ltext).with_context(|| format!("parse {}", local.display()))?;
+        merge_toml(&mut value, lvalue);
+    }
+
+    let cfg: Config = value.try_into().context("parse config.toml")?;
     store_prompt_overrides(&cfg.prompts);
     Ok(cfg)
 }
@@ -1138,6 +1182,43 @@ mod tests {
         // Global store updated as a side effect of load_config.
         assert_eq!(resolve_prompt_prefix("reviewer"), "GLOB\n\nREV");
         assert_eq!(resolve_prompt_prefix("security"), "GLOB");
+    }
+
+    #[test]
+    fn merge_toml_overrides_per_item() {
+        let mut base: toml::Value = toml::from_str(
+            "default_client = \"claude\"\nheadless = true\n[models.claude]\nm = \"g-m\"\nl = \"g-l\"\n[git]\nbase_candidates = [\"main\", \"master\"]\n",
+        )
+        .unwrap();
+        let over: toml::Value = toml::from_str(
+            "default_client = \"codex\"\n[models.claude]\nm = \"local-m\"\n[git]\nbase_candidates = [\"develop\"]\n",
+        )
+        .unwrap();
+        merge_toml(&mut base, over);
+
+        // scalar overridden
+        assert_eq!(base["default_client"].as_str(), Some("codex"));
+        // untouched scalar preserved
+        assert_eq!(base["headless"].as_bool(), Some(true));
+        // nested table: overridden key wins, sibling preserved
+        assert_eq!(base["models"]["claude"]["m"].as_str(), Some("local-m"));
+        assert_eq!(base["models"]["claude"]["l"].as_str(), Some("g-l"));
+        // array replaced, not appended
+        let bases = base["git"]["base_candidates"].as_array().unwrap();
+        assert_eq!(bases.len(), 1);
+        assert_eq!(bases[0].as_str(), Some("develop"));
+    }
+
+    #[test]
+    fn merged_value_deserializes_with_defaults() {
+        // Local override applied to the default config, then deserialized.
+        let mut base: toml::Value = toml::from_str(DEFAULT_TOML).unwrap();
+        let over: toml::Value = toml::from_str("default_client = \"codex\"\n").unwrap();
+        merge_toml(&mut base, over);
+        let cfg: Config = base.try_into().unwrap();
+        assert_eq!(cfg.default_client, "codex");
+        // untouched fields still come from global/defaults
+        assert_eq!(cfg.agents.reviewers_by_tier.get(Tier::Xs), 0);
     }
 
     #[test]

@@ -224,6 +224,25 @@ Each command prints **one** temp JSON path on stdout (`forge-brief` also writes 
 First run copies `config/default.toml` → `~/.scrutiny/config.toml`. Every key has a default
 (`#[serde(default)]`), so a partial file is valid — set only what you override.
 
+### Project-local `scrutiny.toml`
+
+Drop a `scrutiny.toml` in your project to override the global config **per item**. Scrutiny
+walks up from the working directory to the repo root and uses the first `scrutiny.toml` it
+finds. Merge is deep and per-key: any key set locally wins, everything else falls back to
+`~/.scrutiny/config.toml`. Tables merge key-by-key; scalars and arrays are replaced wholesale
+(a local array replaces the global one, it does not append).
+
+```toml
+# <repo>/scrutiny.toml — override just what this repo needs
+default_client = "codex"
+
+[models.claude]
+m = "sonnet"        # only tier `m` changes; other tiers stay global
+
+[git]
+base_candidates = ["develop", "main"]   # replaces the global list
+```
+
 ### Full key reference
 
 **Top-level**
