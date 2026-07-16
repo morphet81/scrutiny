@@ -24,6 +24,12 @@ impl Tier {
     }
 }
 
+impl Default for Tier {
+    fn default() -> Self {
+        Tier::M
+    }
+}
+
 impl std::fmt::Display for Tier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())

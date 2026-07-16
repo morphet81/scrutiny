@@ -450,15 +450,28 @@ fn prompt_forge_answers(client: &str, ticket: &TicketReport) -> Result<ForgeAnsw
         .interact()
         .context("e2e confirm")?;
 
-    let model = if sug.prompt_model && !sug.model.is_empty() {
-        let models = if sug.model.is_empty() {
-            vec![sug.model.clone()]
+    let model = if sug.prompt_model {
+        let models = &sug.available_models;
+        if models.len() > 1 {
+            let default_idx = models
+                .iter()
+                .position(|m| m == &sug.model)
+                .unwrap_or(0);
+            let prompt_label = if sug.complexity_reason.is_empty() {
+                format!("Model  [tier {}]", sug.tier)
+            } else {
+                format!("Model  [tier {} · {}]", sug.tier, sug.complexity_reason)
+            };
+            let sel = Select::with_theme(&theme)
+                .with_prompt(prompt_label)
+                .items(models)
+                .default(default_idx)
+                .interact()
+                .context("model select")?;
+            models[sel].clone()
         } else {
-            // offer suggested as default via Confirm skip — keep suggested
-            vec![sug.model.clone()]
-        };
-        let _ = models;
-        sug.model.clone()
+            sug.model.clone()
+        }
     } else {
         sug.model.clone()
     };

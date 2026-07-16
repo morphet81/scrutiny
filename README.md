@@ -226,6 +226,27 @@ First run copies `config/default.toml` → `~/.scrutiny/config.toml`.
 - `[models.claude]` — Claude Code aliases (`haiku`/`sonnet`/`opus`) or pinned ids. Not Cursor slugs.
 - `[pack]` / `[scan]` — review pack budget + optional lint hooks
 - `[forge]` — force approach / e2e / agent counts (omit = prompt); `enable_figma`, `enable_lore`, `enable_po`, `enable_ticket_writeback`
+- `[forge.complexity]` — keyword lists, story-point field names, and tier thresholds that drive automatic model selection
+
+### Forge model selection
+
+`scrutiny forge` estimates ticket complexity **before prompting for the model**. Signals (all deterministic, no AI call):
+
+| Signal | Source | Notes |
+|--------|--------|-------|
+| AC count | Checkboxes / numbered list under AC heading / BDD Scenarios | Bucket → points |
+| Description size | Word count | Bucket → points |
+| Breadth keywords | title + description (refactor, migrate, overhaul…) | +8 pts/hit, capped at 2 |
+| Integration keywords | api, database, webhook, migration… | +6 pts/hit, capped at 2 |
+| Risk keywords | auth, security, payment, pii… | +10 pts/hit, capped at 2 |
+| Trivial keywords | typo, wording, bump, minor… | −8 pts/hit, capped at 2 |
+| Story points | Jira custom field (`story_point_fields`) | Dominant: 1-2→S, 3-5→M, 6-8→L, 9+→XL |
+| Issue type | Jira `issuetype.name` | Epic +15, Story +8, Bug −3, Subtask −8 |
+| Labels | config `bump_labels` / `lower_labels` | ±6 pts, max 1 hit each |
+| Figma URLs | ticket | +5 pts (UI work) |
+| Comments | ticket | 0/2/5/8 pts |
+
+Score 0–100 → tier XS/S/M/L/XL → `[models.<client>]` lookup → default selection in the model prompt (user can still change it). Override with `[forge] model = "sonnet"` to pin globally.
 
 Example force (no prompts):
 
@@ -237,9 +258,15 @@ agents = 2
 testers = 1
 reviewers = 1
 evangelists = 0
-model = "sonnet"
+model = "sonnet"      # pin model, skip complexity prompt
 enable_figma = false
 enable_lore = false
+
+[forge.complexity]
+# Extend risk keywords for your domain
+risk_keywords = ["auth", "security", "payment", "pii", "credential", "oauth", "token", "billing"]
+# Your Jira story-point custom field
+story_point_fields = ["customfield_10016"]
 ```
 
 ## Token-saving habits

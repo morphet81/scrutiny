@@ -23,7 +23,7 @@ xl = "claude-opus-4-8-thinking-high"
 xs = "haiku"
 s = "haiku"
 m = "sonnet"
-l = "claude-sonnet-4-6"
+l = "opus"
 xl = "opus"
 
 [models.codex]
@@ -182,6 +182,24 @@ verify_coverage = true
 
 enable_branch = true
 branch_headless = "auto"
+
+[forge.complexity]
+# Jira field names that hold story-point estimates (tried in order).
+story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]
+# Keywords suggesting broad, cross-cutting scope (+8 pts each, capped at 2 hits).
+breadth_keywords = ["refactor", "migrate", "rewrite", "redesign", "architecture", "overhaul", "restructure", "across"]
+# Keywords suggesting external/API integration work (+6 pts each, capped at 2 hits).
+integration_keywords = ["api", "endpoint", "webhook", "schema", "database", "migration", "third-party", "external", "integration"]
+# Keywords suggesting security-sensitive changes (+10 pts each, capped at 2 hits).
+risk_keywords = ["auth", "security", "payment", "permission", "encryption", "pii", "credential", "oauth", "token"]
+# Keywords indicating trivial changes (-8 pts each, capped at 2 hits).
+trivial_keywords = ["typo", "copy", "wording", "rename", "bump", "documentation", "translation", "minor", "spelling"]
+# Label substrings that bump complexity up (+6 pts, max 1).
+bump_labels = ["urgent", "complex", "breaking-change", "breaking", "epic", "large"]
+# Label substrings that pull complexity down (-6 pts, max 1).
+lower_labels = ["trivial", "minor", "quick", "simple", "easy", "small"]
+# Tier thresholds [XS_max, S_max, M_max, L_max]; above L_max → XL.
+tier_thresholds = [18, 35, 55, 95]
 
 [parley]
 default_members = 1

@@ -94,7 +94,7 @@ Show ticket path. Read `suggested_forge` from ticket JSON.
 
 | Prompt | Default | Skip when |
 |--------|---------|-----------|
-| Model | `suggested_forge.model` | `prompt_model` false |
+| Model | `suggested_forge.model` (derived from ticket complexity tier — AC count, keywords, story points → XS/S/M/L/XL → `[models.<client>]` lookup) | `prompt_model` false |
 | Approach `tdd` / `heads_down` / `plan` | `suggested_forge.approach` | `prompt_approach` false |
 | Agents (developers) | `suggested_forge.agents` | `prompt_agents` false |
 | Testers | `suggested_forge.testers` | `prompt_testers` false |

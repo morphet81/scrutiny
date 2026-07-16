@@ -1,6 +1,7 @@
 //! Forge: ticket fetch, session plan, context pack, brief for implement skill.
 
 pub mod brief;
+pub mod complexity;
 pub mod context;
 pub mod fetch;
 pub mod figma;

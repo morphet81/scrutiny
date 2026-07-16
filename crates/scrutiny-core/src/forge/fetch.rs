@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{ensure_config, find_shipped_default, load_config, SuggestedForge};
+use crate::forge::complexity::estimate_ticket_tier;
 use crate::forge::tools::{require_acli, require_gh, require_glab};
+use crate::score::Tier;
 use crate::paths::{temp_artifact_path, write_json_pretty};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,7 +83,6 @@ pub fn run_forge_fetch(input: ForgeFetchInput) -> Result<(TicketReport, PathBuf)
         .client
         .clone()
         .unwrap_or_else(|| cfg.default_client.clone());
-    let suggested = cfg.suggested_forge(&client);
 
     let (source, raw_input) = resolve_source(&input)?;
     let mut report = match source {
@@ -90,8 +91,19 @@ pub fn run_forge_fetch(input: ForgeFetchInput) -> Result<(TicketReport, PathBuf)
         TicketSource::Github => fetch_github(&input.cwd, &raw_input)?,
         TicketSource::Gitlab => fetch_gitlab(&input.cwd, &raw_input)?,
     };
-    report.suggested_forge = suggested;
+    // figma_urls must be set before complexity estimation (design signal)
     report.figma_urls = extract_figma_urls(&report);
+    let (tier, score, breakdown) = estimate_ticket_tier(
+        &report.title,
+        &report.description,
+        &report.labels,
+        report.comments.len(),
+        report.figma_urls.len(),
+        &report.fields,
+        &cfg.forge.complexity,
+    );
+    let reason = breakdown.top_signals.join(", ");
+    report.suggested_forge = cfg.suggested_forge(&client, tier, score, reason);
 
     let _ = crate::paths::init_artifact_ctx(
         &input.cwd,
@@ -277,6 +289,10 @@ fn empty_suggested() -> SuggestedForge {
     SuggestedForge {
         client: String::new(),
         model: String::new(),
+        tier: Tier::M,
+        complexity_score: 0,
+        complexity_reason: String::new(),
+        available_models: vec![],
         approach: "tdd".into(),
         e2e: None,
         agents: 2,

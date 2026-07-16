@@ -127,6 +127,8 @@ pub struct ForgeConfig {
     /// Headless branch behavior: "auto" (follow detection) | "never" (use current).
     #[serde(default = "default_branch_headless")]
     pub branch_headless: String,
+    #[serde(default)]
+    pub complexity: ComplexityConfig,
 }
 
 fn default_true() -> bool {
@@ -175,6 +177,106 @@ impl Default for ForgeConfig {
             verify_coverage: true,
             enable_branch: true,
             branch_headless: default_branch_headless(),
+            complexity: ComplexityConfig::default(),
+        }
+    }
+}
+
+/// Ticket complexity scoring configuration for `forge`.
+/// Controls keyword lists, story-point field names, label bumps/lowers, and tier thresholds.
+/// All fields have sensible defaults — omitting `[forge.complexity]` entirely is valid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplexityConfig {
+    /// Jira custom field names (or standard names) that hold story-point estimates.
+    #[serde(default = "default_story_point_fields")]
+    pub story_point_fields: Vec<String>,
+    /// Keywords suggesting broad, cross-cutting scope (each hit adds to the score).
+    #[serde(default = "default_breadth_keywords")]
+    pub breadth_keywords: Vec<String>,
+    /// Keywords suggesting external / API integration work.
+    #[serde(default = "default_integration_keywords")]
+    pub integration_keywords: Vec<String>,
+    /// Keywords suggesting security-sensitive or high-risk changes.
+    #[serde(default = "default_risk_keywords")]
+    pub risk_keywords: Vec<String>,
+    /// Keywords that indicate trivial changes (reduce the score).
+    #[serde(default = "default_trivial_keywords")]
+    pub trivial_keywords: Vec<String>,
+    /// Label substrings that push the tier up by one step.
+    #[serde(default = "default_bump_labels")]
+    pub bump_labels: Vec<String>,
+    /// Label substrings that pull the tier down by one step.
+    #[serde(default = "default_lower_labels")]
+    pub lower_labels: Vec<String>,
+    /// Inclusive upper bounds for tiers [XS, S, M, L]; anything above → XL.
+    /// Matches the same scale used by `score.rs` for code-diff scoring.
+    #[serde(default = "default_tier_thresholds")]
+    pub tier_thresholds: [u32; 4],
+}
+
+fn default_story_point_fields() -> Vec<String> {
+    vec![
+        "story_points".into(),
+        "customfield_10016".into(),
+        "customfield_10028".into(),
+        "customfield_10034".into(),
+    ]
+}
+fn default_breadth_keywords() -> Vec<String> {
+    vec![
+        "refactor".into(), "migrate".into(), "rewrite".into(),
+        "redesign".into(), "architecture".into(), "overhaul".into(),
+        "restructure".into(), "across".into(),
+    ]
+}
+fn default_integration_keywords() -> Vec<String> {
+    vec![
+        "api".into(), "endpoint".into(), "webhook".into(),
+        "schema".into(), "database".into(), "migration".into(),
+        "third-party".into(), "external".into(), "integration".into(),
+    ]
+}
+fn default_risk_keywords() -> Vec<String> {
+    vec![
+        "auth".into(), "security".into(), "payment".into(),
+        "permission".into(), "encryption".into(), "pii".into(),
+        "credential".into(), "oauth".into(), "token".into(),
+    ]
+}
+fn default_trivial_keywords() -> Vec<String> {
+    vec![
+        "typo".into(), "copy".into(), "wording".into(),
+        "rename".into(), "bump".into(), "documentation".into(),
+        "translation".into(), "minor".into(), "spelling".into(),
+    ]
+}
+fn default_bump_labels() -> Vec<String> {
+    vec![
+        "urgent".into(), "complex".into(), "breaking-change".into(),
+        "breaking".into(), "epic".into(), "large".into(),
+    ]
+}
+fn default_lower_labels() -> Vec<String> {
+    vec![
+        "trivial".into(), "minor".into(), "quick".into(),
+        "simple".into(), "easy".into(), "small".into(),
+    ]
+}
+fn default_tier_thresholds() -> [u32; 4] {
+    [18, 35, 55, 95]
+}
+
+impl Default for ComplexityConfig {
+    fn default() -> Self {
+        Self {
+            story_point_fields: default_story_point_fields(),
+            breadth_keywords: default_breadth_keywords(),
+            integration_keywords: default_integration_keywords(),
+            risk_keywords: default_risk_keywords(),
+            trivial_keywords: default_trivial_keywords(),
+            bump_labels: default_bump_labels(),
+            lower_labels: default_lower_labels(),
+            tier_thresholds: default_tier_thresholds(),
         }
     }
 }
@@ -732,19 +834,31 @@ impl Config {
     }
 
     /// Suggested forge session knobs + which prompts to show.
-    pub fn suggested_forge(&self, client: &str) -> SuggestedForge {
+    ///
+    /// `tier`, `complexity_score`, `complexity_reason` come from
+    /// `forge::complexity::estimate_ticket_tier` — computed by the caller
+    /// (fetch.rs) after the ticket is fully built so figma_urls are available.
+    /// Pass `(Tier::M, 0, String::new())` when no ticket is available (e.g. tests).
+    pub fn suggested_forge(
+        &self,
+        client: &str,
+        tier: Tier,
+        complexity_score: u32,
+        complexity_reason: String,
+    ) -> SuggestedForge {
         let f = &self.forge;
         let model = f
             .model
             .clone()
-            .or_else(|| {
-                self.model_for(client, Tier::M)
-                    .map(|s| s.to_string())
-            })
+            .or_else(|| self.model_for(client, tier).map(|s| s.to_string()))
             .unwrap_or_else(|| "default".into());
         SuggestedForge {
             client: client.to_string(),
-            model: model.clone(),
+            model,
+            tier,
+            complexity_score,
+            complexity_reason,
+            available_models: self.available_models(client),
             approach: f
                 .approach
                 .clone()
@@ -773,6 +887,18 @@ impl Config {
 pub struct SuggestedForge {
     pub client: String,
     pub model: String,
+    /// Ticket-derived complexity tier that produced the default model.
+    #[serde(default)]
+    pub tier: Tier,
+    /// Raw complexity score (0–100) from the ticket estimator.
+    #[serde(default)]
+    pub complexity_score: u32,
+    /// Human-readable summary of the top signals that drove the tier estimate.
+    #[serde(default)]
+    pub complexity_reason: String,
+    /// All distinct model ids configured for this client (xs→xl order, deduped).
+    #[serde(default)]
+    pub available_models: Vec<String>,
     pub approach: String,
     /// None means "prompt"; Some forces yes/no without prompt when config set.
     pub e2e: Option<bool>,
@@ -891,7 +1017,7 @@ mod tests {
         assert_eq!(cfg.pack.max_chars, 48_000);
         assert!(cfg.scan.enable);
         let claude = cfg.suggested_plan("claude", Tier::L);
-        assert_eq!(claude.model, "claude-sonnet-4-6");
+        assert_eq!(claude.model, "opus");
         let plan = cfg.suggested_plan("cursor", Tier::M);
         assert!(plan.prompt_reviewers);
         assert!(!plan.prompt_evangelists); // M evangelists default 0
@@ -905,11 +1031,13 @@ mod tests {
         assert!(cfg.pack.explore.enable);
         assert!(cfg.forge.enable_figma);
         assert_eq!(cfg.forge.default_approach, "tdd");
-        let forge = cfg.suggested_forge("cursor");
+        let forge = cfg.suggested_forge("cursor", Tier::M, 0, String::new());
         assert!(forge.prompt_approach);
         assert!(forge.prompt_e2e);
         assert_eq!(forge.approach, "tdd");
         assert_eq!(forge.agents, 2);
+        assert!(!forge.available_models.is_empty());
+        assert_eq!(forge.tier, Tier::M);
     }
 
     #[test]
