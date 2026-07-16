@@ -1485,34 +1485,31 @@ fn create_new_review(
     review_body: &str,
     api_comments: &[Value],
 ) -> Result<(Value, u32)> {
-    let (line_comments, file_comments) = split_line_and_file_comments(api_comments);
-    let body = review_body_with_file_notes(review_body, &file_comments);
-    let (resp, line_n) = post_pull_request_review(
+    // Create a PENDING review with only the summary body and no inline comments.
+    // All findings are added as independent threads via GraphQL so each appears
+    // as its own comment (not bundled into the review body text).
+    let (pending_resp, _) = post_pull_request_review(
         cwd,
         owner,
         name,
         pr,
         &report.head_oid,
-        &body,
-        Some(event),
-        &line_comments,
+        review_body,
+        None,
+        &[],
     )?;
-    post_file_level_comments(cwd, owner, name, pr, &report.head_oid, &file_comments)?;
-    Ok((resp, line_n + file_comments.len() as u32))
-}
-
-fn review_body_with_file_notes(review_body: &str, file_comments: &[Value]) -> String {
-    let mut body = review_body.to_string();
-    if file_comments.is_empty() {
-        return body;
-    }
-    body.push_str("\n\n### File-level notes\n");
-    for c in file_comments {
-        let path = c.get("path").and_then(|p| p.as_str()).unwrap_or("?");
-        let text = c.get("body").and_then(|b| b.as_str()).unwrap_or("");
-        body.push_str(&format!("\n**`{path}`**\n\n{text}\n"));
-    }
-    body
+    let review_id = pending_resp
+        .get("id")
+        .and_then(|i| i.as_u64())
+        .context("new pending review missing id")?;
+    let node_id = pending_resp
+        .get("node_id")
+        .and_then(|n| n.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .context("new pending review missing node_id")?;
+    let pending = PendingReview { id: review_id, node_id };
+    finish_pending_with_comments(cwd, owner, name, pr, &pending, event, review_body, api_comments)
 }
 
 /// POST create-review. `event = None` leaves the review PENDING.
@@ -1615,76 +1612,6 @@ fn post_pull_request_review(
         "gh api review failed. No body dump — line comments must attach on the PR diff.\n{err}\n{stdout}\npayload: {}",
         payload_path.display()
     );
-}
-
-/// File-level comments via POST /pulls/{pr}/comments (not create-review comments[]).
-fn post_file_level_comments(
-    cwd: &Path,
-    owner: &str,
-    name: &str,
-    pr: u64,
-    commit_id: &str,
-    file_comments: &[Value],
-) -> Result<()> {
-    if file_comments.is_empty() {
-        return Ok(());
-    }
-    let endpoint = format!("repos/{owner}/{name}/pulls/{pr}/comments");
-    for (i, c) in file_comments.iter().enumerate() {
-        let payload = json!({
-            "body": c.get("body").cloned().unwrap_or(json!("")),
-            "path": c.get("path").cloned().unwrap_or(json!("")),
-            "commit_id": commit_id,
-            "subject_type": "file",
-        });
-        let payload_path = temp_artifact_path("scrutiny", "pending", "comment");
-        write_json_pretty(&payload_path, &payload)?;
-        let output = Command::new("gh")
-            .args(["api", "--method", "POST", &endpoint, "--input"])
-            .arg(&payload_path)
-            .current_dir(cwd)
-            .output()
-            .context("post file-level review comment")?;
-        if !output.status.success() {
-            eprintln!(
-                "scrutiny post-comments: warn: file comment {} failed (still in review body): {} {}",
-                i + 1,
-                String::from_utf8_lossy(&output.stderr).trim(),
-                String::from_utf8_lossy(&output.stdout).trim()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Line drafts for create-review; file drafts are not allowed in that array.
-fn split_line_and_file_comments(comments: &[Value]) -> (Vec<Value>, Vec<Value>) {
-    let mut line = Vec::new();
-    let mut file = Vec::new();
-    for c in comments {
-        let is_file = c.get("subject_type").and_then(|s| s.as_str()) == Some("file")
-            || c.get("line").and_then(|l| l.as_u64()).unwrap_or(0) == 0;
-        if is_file {
-            let mut f = c.clone();
-            if let Some(obj) = f.as_object_mut() {
-                obj.remove("line");
-                obj.remove("side");
-                obj.remove("start_line");
-                obj.remove("start_side");
-                obj.insert("subject_type".into(), json!("file"));
-            }
-            file.push(f);
-        } else {
-            let mut l = c.clone();
-            if let Some(obj) = l.as_object_mut() {
-                obj.remove("subject_type");
-                obj.remove("pull_request_review_id");
-                obj.remove("commit_id");
-            }
-            line.push(l);
-        }
-    }
-    (line, file)
 }
 
 struct PendingReview {
