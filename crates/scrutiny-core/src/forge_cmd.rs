@@ -19,8 +19,8 @@ use crate::forge::plan::{run_forge_plan_write, ForgePlanWriteInput, ForgeSession
 use crate::forge::scaffold;
 use crate::forge::tools::playwright_cli_available;
 use crate::forge::verify::{
-    build_verify_plan, coverage_gaps, measure_coverage, parse_test_failures, raw_tail, run_command,
-    FailureReport, VerifyPlan,
+    build_verify_plan, coverage_gaps, filter_playwright_cmd, measure_coverage, parse_test_failures,
+    raw_tail, run_command, FailureReport, VerifyPlan,
 };
 use crate::git::{self, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
@@ -875,8 +875,12 @@ fn run_verify_gate(
         let mut report = FailureReport::default();
 
         for cmd in &plan.commands {
-            eprintln!("scrutiny forge:   run `{}`", cmd.command);
-            let (code, out, err) = run_command(cwd, &cmd.command);
+            let effective_cmd = filter_playwright_cmd(cwd, cmd);
+            if effective_cmd != cmd.command {
+                eprintln!("scrutiny forge:   (filtered to changed spec files)");
+            }
+            eprintln!("scrutiny forge:   run `{}`", effective_cmd);
+            let (code, out, err) = run_command(cwd, &effective_cmd);
             if code != 0 {
                 let fails = parse_test_failures(cmd.framework.as_deref(), &out, &err);
                 if fails.is_empty() && report.raw_tail.is_none() {

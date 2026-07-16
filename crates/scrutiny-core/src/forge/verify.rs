@@ -711,6 +711,60 @@ fn pytest_gaps(cwd: &Path) -> Vec<FileGaps> {
     gaps
 }
 
+fn is_e2e_spec(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".spec.ts")
+        || p.ends_with(".spec.js")
+        || p.ends_with(".spec.tsx")
+        || p.ends_with(".spec.jsx")
+        || p.ends_with(".e2e.ts")
+        || p.ends_with(".e2e.js")
+        || p.ends_with(".e2e-spec.ts")
+}
+
+fn changed_e2e_files(cwd: &Path) -> Vec<String> {
+    let (_, out, _) = run_command(cwd, "git status --porcelain");
+    let mut files = Vec::new();
+    for line in out.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let path = if line.contains(" -> ") {
+            line.split(" -> ").last().unwrap_or("").trim()
+        } else {
+            line[3..].trim()
+        };
+        if is_e2e_spec(path) {
+            files.push(path.to_string());
+        }
+    }
+    files
+}
+
+/// Pure helper: insert `files` into a playwright command string before any `--` flags.
+pub fn inject_spec_files(cmd: &str, files: &[String]) -> String {
+    if files.is_empty() {
+        return cmd.to_string();
+    }
+    let files_arg = files.join(" ");
+    if let Some(idx) = cmd.find("--reporter") {
+        let (before, after) = cmd.split_at(idx);
+        format!("{} {} {}", before.trim_end(), files_arg, after)
+    } else {
+        format!("{} {}", cmd.trim_end(), files_arg)
+    }
+}
+
+/// If `cmd` is a playwright command and spec files were modified in the working tree,
+/// rewrite it to target only those files. Otherwise returns the command unchanged.
+pub fn filter_playwright_cmd(cwd: &Path, cmd: &VerifyCmd) -> String {
+    if cmd.framework.as_deref() != Some("playwright") {
+        return cmd.command.clone();
+    }
+    let files = changed_e2e_files(cwd);
+    inject_spec_files(&cmd.command, &files)
+}
+
 /// Truncated stderr-else-stdout tail for the fallback case (parse failed).
 pub fn raw_tail(stdout: &str, stderr: &str) -> String {
     let src = if !stderr.trim().is_empty() { stderr } else { stdout };
@@ -909,5 +963,46 @@ test result: FAILED. 1 passed; 1 failed";
         let long = "x".repeat(1000);
         let t = raw_tail(&long, "");
         assert_eq!(t.chars().count(), MAX_TAIL);
+    }
+
+    #[test]
+    fn inject_spec_files_inserts_before_reporter() {
+        let files = vec!["tests/foo.spec.ts".into(), "tests/bar.spec.ts".into()];
+        let result = inject_spec_files("npx playwright test --reporter=json", &files);
+        assert_eq!(result, "npx playwright test tests/foo.spec.ts tests/bar.spec.ts --reporter=json");
+    }
+
+    #[test]
+    fn inject_spec_files_appends_when_no_reporter_flag() {
+        let files = vec!["tests/foo.spec.ts".into()];
+        let result = inject_spec_files("npx playwright test", &files);
+        assert_eq!(result, "npx playwright test tests/foo.spec.ts");
+    }
+
+    #[test]
+    fn inject_spec_files_noop_when_empty() {
+        let result = inject_spec_files("npx playwright test --reporter=json", &[]);
+        assert_eq!(result, "npx playwright test --reporter=json");
+    }
+
+    #[test]
+    fn filter_playwright_cmd_skips_non_playwright() {
+        let cmd = VerifyCmd {
+            command: "npx vitest run --reporter=json".into(),
+            framework: Some("vitest".into()),
+        };
+        let result = filter_playwright_cmd(Path::new("/nonexistent"), &cmd);
+        assert_eq!(result, cmd.command);
+    }
+
+    #[test]
+    fn is_e2e_spec_recognizes_patterns() {
+        assert!(is_e2e_spec("tests/foo.spec.ts"));
+        assert!(is_e2e_spec("tests/foo.spec.js"));
+        assert!(is_e2e_spec("tests/foo.spec.tsx"));
+        assert!(is_e2e_spec("tests/foo.e2e.ts"));
+        assert!(is_e2e_spec("tests/foo.e2e-spec.ts"));
+        assert!(!is_e2e_spec("src/foo.ts"));
+        assert!(!is_e2e_spec("src/foo.test.ts"));
     }
 }
