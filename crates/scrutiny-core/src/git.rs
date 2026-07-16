@@ -271,6 +271,41 @@ pub struct DiffFile {
     pub status: String,
 }
 
+/// Fetch the PR's base-branch tip and head commit into dedicated refs and
+/// return their resolved OIDs `(base_oid, head_oid)`.
+///
+/// Fetches from `repo_url` (the PR's own repository) so the diff is always
+/// scoped to the PR — never to whatever the local `origin` or local branches
+/// happen to point at. Writes only `refs/scrutiny/{base,head}`, leaving the
+/// user's branches untouched. Hard-fails if the refs cannot be fetched.
+pub fn fetch_pr_diff_refs(
+    root: &Path,
+    repo_url: &str,
+    base_branch: &str,
+    pr_number: &str,
+) -> Result<(String, String)> {
+    let base_spec = format!("+refs/heads/{base_branch}:refs/scrutiny/base");
+    let head_spec = format!("+refs/pull/{pr_number}/head:refs/scrutiny/head");
+    let out = Command::new("git")
+        .args(["fetch", "--no-tags", repo_url, &base_spec, &head_spec])
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("git fetch PR refs from {repo_url}"))?;
+    if !out.status.success() {
+        bail!(
+            "could not fetch PR base '{base_branch}' and head #{pr_number} from {repo_url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let base_oid = git_stdout(root, &["rev-parse", "refs/scrutiny/base"])?
+        .trim()
+        .to_string();
+    let head_oid = git_stdout(root, &["rev-parse", "refs/scrutiny/head"])?
+        .trim()
+        .to_string();
+    Ok((base_oid, head_oid))
+}
+
 /// `git diff --numstat` for `base...head` (triple-dot).
 pub fn diff_numstat(root: &Path, base: &str, head: &str) -> Result<Vec<DiffFile>> {
     let range = format!("{base}...{head}");

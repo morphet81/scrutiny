@@ -9,6 +9,7 @@ use crate::agent_runner::{
 };
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
+use crate::git;
 use crate::findings::{
     attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,
     run_findings_init_empty, run_findings_resolve, run_findings_triage, run_findings_validate,
@@ -91,12 +92,26 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         input.non_interactive || input.from_json.is_some(),
     )?;
 
-    let (base, head, pr_for_init) = resolve_pr_refs(&cwd, input.pr.as_deref())?;
-    if let Some(ref prn) = pr_for_init {
+    let pr_refs = resolve_pr_refs(&cwd, input.pr.as_deref())?;
+    let pr_for_init = pr_refs.number.clone();
+    if let Some(ref prn) = pr_refs.number {
         if let Some(n) = crate::paths::parse_pr_number(prn) {
             crate::paths::init_artifact_ctx(&cwd, &n.to_string())?;
         }
     }
+
+    // PR mode: fetch the PR's real base + head from its own repo and diff those
+    // exact commits, so the review is scoped to the PR regardless of local
+    // branch state or where scrutiny is invoked from.
+    let (base, head) = match (&pr_refs.base, &pr_refs.number, &pr_refs.repo_url) {
+        (Some(base_branch), Some(number), Some(repo_url)) => {
+            eprintln!("scrutiny probe: fetch PR refs ({base_branch}…#{number})…");
+            let (base_oid, head_oid) =
+                git::fetch_pr_diff_refs(&cwd, repo_url, base_branch, number)?;
+            (Some(base_oid), Some(head_oid))
+        }
+        _ => (pr_refs.base.clone(), pr_refs.head.clone()),
+    };
 
     eprintln!("scrutiny probe: eval…");
     let (eval, eval_path) = run_eval(EvalInput {
@@ -238,8 +253,8 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
         );
     }
 
-    let (_base, _head, pr_for_init) = resolve_pr_refs(&cwd, input.pr.as_deref())?;
-    let pr_arg = pr_for_init.or(input.pr.clone());
+    let pr_refs = resolve_pr_refs(&cwd, input.pr.as_deref())?;
+    let pr_arg = pr_refs.number.or(input.pr.clone());
     if let Some(ref prn) = pr_arg {
         if let Some(n) = crate::paths::parse_pr_number(prn) {
             crate::paths::init_artifact_ctx(&cwd, &n.to_string())?;
@@ -356,10 +371,28 @@ fn finish_triage_and_post(
     Ok(())
 }
 
-fn resolve_pr_refs(
-    cwd: &Path,
-    pr: Option<&str>,
-) -> Result<(Option<String>, Option<String>, Option<String>)> {
+#[derive(Debug, Clone, Default)]
+struct PrRefs {
+    /// PR base (destination) branch name, e.g. `main`.
+    base: Option<String>,
+    /// PR head commit SHA.
+    head: Option<String>,
+    /// PR number as a string.
+    number: Option<String>,
+    /// Clone URL of the PR's own repository, derived from the PR web URL
+    /// (e.g. `https://github.com/owner/repo.git`). Used to fetch the PR's
+    /// real refs regardless of the local `origin`.
+    repo_url: Option<String>,
+}
+
+/// Derive a clone URL from a PR web URL by stripping the `/pull/<n>` suffix
+/// and appending `.git`. Preserves the host (works for GitHub Enterprise).
+fn repo_url_from_pr_url(pr_url: &str) -> Option<String> {
+    let (base, _) = pr_url.split_once("/pull/")?;
+    Some(format!("{base}.git"))
+}
+
+fn resolve_pr_refs(cwd: &Path, pr: Option<&str>) -> Result<PrRefs> {
     let mut args = vec![
         "pr".into(),
         "view".into(),
@@ -382,7 +415,7 @@ fn resolve_pr_refs(
             );
         }
         // No --pr and no PR for current branch — resume can prompt later
-        return Ok((None, None, None));
+        return Ok(PrRefs::default());
     }
     let v: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let base = v
@@ -393,10 +426,45 @@ fn resolve_pr_refs(
         .get("headRefOid")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string());
-    let num = v
+    let number = v
         .get("number")
         .and_then(|x| x.as_u64())
         .map(|n| n.to_string())
         .or_else(|| pr.map(|s| s.to_string()));
-    Ok((base, head, num))
+    let repo_url = v
+        .get("url")
+        .and_then(|x| x.as_str())
+        .and_then(repo_url_from_pr_url);
+    Ok(PrRefs {
+        base,
+        head,
+        number,
+        repo_url,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_url_strips_pull_suffix() {
+        assert_eq!(
+            repo_url_from_pr_url("https://github.com/tablecheck/manager-ember-desktop/pull/2302"),
+            Some("https://github.com/tablecheck/manager-ember-desktop.git".into())
+        );
+    }
+
+    #[test]
+    fn repo_url_preserves_enterprise_host() {
+        assert_eq!(
+            repo_url_from_pr_url("https://ghe.corp.example/team/repo/pull/7"),
+            Some("https://ghe.corp.example/team/repo.git".into())
+        );
+    }
+
+    #[test]
+    fn repo_url_none_without_pull_segment() {
+        assert_eq!(repo_url_from_pr_url("https://github.com/o/r"), None);
+    }
 }
