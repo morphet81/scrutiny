@@ -525,8 +525,8 @@ Output: JSON ONLY. No prose outside JSON.
 
 Rules:
 - Every finding: path + line (1-based).
-- **CRITICAL:** `line` MUST be a new-side line present in that path's pack unified diff (added `+` preferred; context ` ` only if issue is clearly there). GitHub will reject out-of-diff lines — never invent them from the full file.
-- If the issue is not on a PR/pack diff line → omit that finding.
+- **CRITICAL:** `line` MUST be a **changed** line in that path's pack unified diff — added `+` (new-side, RIGHT) preferred, or deleted `-` (old-side, LEFT). Never a context ` ` line. GitHub will reject out-of-diff lines — never invent them from the full file.
+- If the issue is only on an unchanged context line → omit that finding or attach at file level (omit `line`).
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
 "#,
@@ -618,9 +618,9 @@ When you spawn each member, the spawn message body MUST be the matching template
 
 1. Spawn **exactly** the counts above (parallel when possible).
 2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
-3. Reject / re-ask any finding missing path+line, or whose line is not on that path's pack unified diff (GitHub-attachable). Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
+3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`) in that path's pack unified diff. Context ` ` lines are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
 4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
-5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on the path unified_diff.
+5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on changed lines (added `+` or deleted `-`) in the path unified_diff.
 6. Return ONE final JSON on stdout (no prose outside JSON).
 
 Output: JSON ONLY.
@@ -654,13 +654,14 @@ pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
         "Revise code-review finding after reviewer question.\n\n\
          STYLE (mandatory): load + follow **caveman skill** if present (`/caveman ultra`). \
          Intensity ultra. Terse. Never announce style.\n\n\
-         Context:\n{context}\n\n\
+         Context (includes file diff and code window — answer from it; Read only if strictly necessary):\n\
+         {context}\n\n\
          Question:\n{question}\n\n\
          Output: JSON ONLY (no prose outside JSON):\n\
          {{\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
 \"path\":\"rel/path\",\"line\":1}}\n\
          Rules:\n\
-         - Keep or fix path+line so line is still on the PR/pack unified diff (GitHub-attachable).\n\
+         - path+line must point to a **changed** line: added `+` (RIGHT side) or deleted `-` (LEFT side). Never a context line.\n\
          - Prefer an added (+) line. Never invent out-of-diff lines.\n\
          - fix_options may be empty.\n"
     )

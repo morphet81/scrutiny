@@ -363,6 +363,87 @@ fn renumber(report: &mut FindingsReport) {
     }
 }
 
+/// Builds rich context for the ask-agent: finding metadata, anchor facts,
+/// file unified diff (from pack), head code window, and sibling finding titles.
+fn build_ask_context(
+    f: &TriageFinding,
+    cwd: Option<&Path>,
+    head_oid: &str,
+    all_findings: &[TriageFinding],
+    loaded_pack: Option<&PackReport>,
+) -> String {
+    let mut ctx = String::new();
+
+    ctx.push_str(&format!(
+        "Finding {} [{}]\nTitle: {}\nWhy: {}\nFix: {}\nOptions: {:?}\n",
+        f.id, f.severity, f.title, f.explanation, f.proposed_fix, f.fix_options
+    ));
+
+    ctx.push_str(&format!(
+        "\nAnchor:\n  path: {:?}\n  line: {:?}\n  side: {}\n  line_text: {:?}\n  in_diff: {:?}\n",
+        f.anchor.path, f.anchor.line, f.anchor.side, f.anchor.line_text, f.anchor.in_diff
+    ));
+    if let Some(fr) = &f.fail_reason {
+        ctx.push_str(&format!("  note: {fr}\n"));
+    }
+
+    // Unified diff for the file (from pack)
+    if let (Some(pack), Some(path)) = (loaded_pack, f.anchor.path.as_deref()) {
+        if let Some(slice) = pack.slices.iter().find(|s| s.path == path) {
+            if !slice.unified_diff.is_empty() {
+                ctx.push_str(&format!(
+                    "\nDiff for `{path}`:\n```diff\n{}\n```\n",
+                    slice.unified_diff
+                ));
+            }
+        }
+    }
+
+    // Head code window ±15 lines around anchor.line
+    if let (Some(cwd), Some(path), Some(line)) = (
+        cwd,
+        f.anchor.path.as_deref(),
+        f.anchor.line.filter(|&l| l > 0),
+    ) {
+        if let Ok(text) = git_show_file(cwd, head_oid, path) {
+            let file_lines: Vec<&str> = text.lines().collect();
+            if !file_lines.is_empty() {
+                let idx = (line as usize).saturating_sub(1);
+                if idx < file_lines.len() {
+                    let start = idx.saturating_sub(15);
+                    let end = (idx + 16).min(file_lines.len());
+                    ctx.push_str(&format!(
+                        "\n`{path}` lines {}-{} (> = anchor):\n```\n",
+                        start + 1,
+                        end
+                    ));
+                    for (i, l) in file_lines[start..end].iter().enumerate() {
+                        let n = (start + i + 1) as u32;
+                        let mark = if n == line { ">" } else { " " };
+                        ctx.push_str(&format!("{mark}{n:>4} | {l}\n"));
+                    }
+                    ctx.push_str("```\n");
+                }
+            }
+        }
+    }
+
+    // Sibling finding titles for cross-reference questions
+    let siblings: Vec<String> = all_findings
+        .iter()
+        .filter(|s| s.id != f.id)
+        .map(|s| format!("{} [{}]: {}", s.id, s.severity, s.title))
+        .collect();
+    if !siblings.is_empty() {
+        ctx.push_str("\nOther findings:\n");
+        for s in &siblings {
+            ctx.push_str(&format!("  - {s}\n"));
+        }
+    }
+
+    ctx
+}
+
 /// Optional ask hooks for triage (agent clarify before Post/Ignore).
 pub struct TriageAskCtx<'a> {
     pub client: Option<&'a crate::runtime::DetectedClient>,
@@ -431,6 +512,16 @@ pub fn run_findings_triage(
     let mut resolved_client: Option<crate::runtime::DetectedClient> = None;
     let head_oid = report.head_oid.clone();
     let n = report.findings.len();
+
+    // Load pack once so build_ask_context can embed the file diff inline.
+    let loaded_pack: Option<PackReport> = {
+        let path_str = report
+            .pack_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .or_else(|| ask.as_ref().map(|ctx| ctx.pack_hint).filter(|p| !p.is_empty()));
+        path_str.and_then(|p| read_json::<PackReport>(Path::new(p)).ok())
+    };
 
     for idx in 0..n {
         loop {
@@ -532,19 +623,21 @@ pub fn run_findings_triage(
                         model.as_str()
                     };
 
-                    let context = format!(
-                        "Finding {} (`{:?}`:{:?})\nTitle: {}\nWhy: {}\nFix: {}\nOptions: {:?}\nPack: {}\n\n\
-                         When revising anchors: path+line MUST stay on a line present in the PR/pack unified diff \
-                         (GitHub review comment attachable). Prefer an added (+) line. Do not invent out-of-diff lines.",
-                        f.id,
-                        f.anchor.path,
-                        f.anchor.line,
-                        f.title,
-                        f.explanation,
-                        f.proposed_fix,
-                        f.fix_options,
-                        pack_hint
-                    );
+                    let context = {
+                        let mut c = build_ask_context(
+                            f,
+                            cwd,
+                            &head_oid,
+                            &snapshot,
+                            loaded_pack.as_ref(),
+                        );
+                        if !pack_hint.is_empty() {
+                            c.push_str(&format!(
+                                "\nPack JSON: {pack_hint} (Read for additional detail if needed)\n"
+                            ));
+                        }
+                        c
+                    };
                     let prompt =
                         crate::agent_runner::build_ask_revise_prompt(&context, &question);
                     let out = crate::agent_runner::run_headless(
@@ -1045,6 +1138,7 @@ pub fn run_findings_resolve(findings_path: &Path, cwd: &Path, strict: bool) -> R
             None
         };
 
+    let base_ref = report.base_ref.clone();
     let mut critical_fail = false;
     for f in &mut report.findings {
         if f.include == Some(false) {
@@ -1061,6 +1155,15 @@ pub fn run_findings_resolve(findings_path: &Path, cwd: &Path, strict: bool) -> R
             continue;
         };
         f.anchor.path = Some(path.clone());
+
+        // Get unified diff for this file (prefer PR patches; fall back to pack).
+        let file_diff: Option<String> = if let Some(patches) = &pr_patches {
+            patches.get(&path).cloned()
+        } else {
+            pack.as_ref()
+                .and_then(|p| p.slices.iter().find(|s| s.path == path))
+                .map(|s| s.unified_diff.clone())
+        };
 
         let file_text = git_show_file(cwd, &report.head_oid, &path);
         let Ok(file_text) = file_text else {
@@ -1113,13 +1216,47 @@ pub fn run_findings_resolve(findings_path: &Path, cwd: &Path, strict: bool) -> R
             f.anchor.line_text = Some(text);
             f.anchor.line_resolved = true;
 
-            let in_diff = if let Some(patches) = &pr_patches {
-                patches
-                    .get(&path)
-                    .map(|p| line_in_unified_diff(p, line))
-                    .unwrap_or(false)
+            // Anchor must be on a changed line (added + or deleted -), never a context line.
+            // If not, try re-anchor to needle in added lines, then deleted-line LEFT anchor.
+            let in_diff = if let Some(ref diff) = file_diff {
+                if line_is_added(diff, line) {
+                    true
+                } else {
+                    let re_anchor = f
+                        .needle
+                        .as_deref()
+                        .and_then(|needle| find_needle_in_added_lines(diff, needle));
+                    if let Some(new_line) = re_anchor {
+                        if (new_line as usize) <= lines.len() {
+                            f.anchor.line = Some(new_line);
+                            f.anchor.line_text =
+                                Some(lines[(new_line as usize) - 1].to_string());
+                        }
+                        true
+                    } else {
+                        let del_anchor = f
+                            .needle
+                            .as_deref()
+                            .and_then(|needle| find_needle_in_deleted_lines(diff, needle));
+                        if let Some(old_line) = del_anchor {
+                            if let Ok(base_text) = git_show_file(cwd, &base_ref, &path) {
+                                let blines: Vec<&str> = base_text.lines().collect();
+                                if (old_line as usize) <= blines.len() {
+                                    f.anchor.line_text =
+                                        Some(blines[(old_line as usize) - 1].to_string());
+                                }
+                            }
+                            f.anchor.line = Some(old_line);
+                            f.anchor.side = "LEFT".into();
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
             } else {
-                line_in_pack_diff(pack.as_ref(), &path, line)
+                // No diff available — allow attempt (pack not loaded or file not in pack).
+                true
             };
             f.anchor.in_diff = Some(in_diff);
             if !in_diff {
@@ -2098,26 +2235,8 @@ fn ensure_ai_tag(body: &str) -> String {
     }
 }
 
-fn line_in_pack_diff(pack: Option<&PackReport>, path: &str, line: u32) -> bool {
-    let Some(pack) = pack else {
-        return true; // unknown — allow attempt (PR patches should have been preferred)
-    };
-    let Some(slice) = pack.slices.iter().find(|s| s.path == path) else {
-        return false;
-    };
-    if line_in_unified_diff(&slice.unified_diff, line) {
-        return true;
-    }
-    // Also accept if inside a symbol slice range
-    pack.slices
-        .iter()
-        .filter(|s| s.path == path)
-        .flat_map(|s| s.symbol_slices.iter())
-        .any(|sym| line as usize >= sym.start_line && line as usize <= sym.end_line)
-}
-
-/// True if `line` (1-based, new-file side) appears in a unified diff / PR file patch.
-fn line_in_unified_diff(diff: &str, line: u32) -> bool {
+/// Returns true only if `line` (1-based, new-side) is an **added** (`+`) line in the diff.
+fn line_is_added(diff: &str, line: u32) -> bool {
     let mut new_line: u32 = 0;
     for diff_line in diff.lines() {
         if let Some(rest) = diff_line.strip_prefix("@@") {
@@ -2139,16 +2258,104 @@ fn line_in_unified_diff(diff: &str, line: u32) -> bool {
             if new_line == line {
                 return true;
             }
-        } else if diff_line.starts_with('-') {
-            // old only
-        } else if diff_line.starts_with(' ') || diff_line.is_empty() {
+        } else if !diff_line.starts_with('-') {
+            // context line — advance new-side counter only
             new_line += 1;
-            if new_line == line {
-                return true;
-            }
         }
     }
     false
+}
+
+/// Returns true only if `line` (1-based, old-side) is a **deleted** (`-`) line in the diff.
+#[allow(dead_code)]
+fn line_is_deleted(diff: &str, line: u32) -> bool {
+    let mut old_line: u32 = 0;
+    for diff_line in diff.lines() {
+        if let Some(rest) = diff_line.strip_prefix("@@") {
+            if let Some(minus) = rest.split('-').nth(1) {
+                let start = minus
+                    .split(|c: char| c == ',' || c == ' ')
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                old_line = start.saturating_sub(1);
+            }
+            continue;
+        }
+        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+            continue;
+        }
+        if diff_line.starts_with('-') {
+            old_line += 1;
+            if old_line == line {
+                return true;
+            }
+        } else if !diff_line.starts_with('+') {
+            // context line — advance old-side counter only
+            old_line += 1;
+        }
+    }
+    false
+}
+
+/// Returns the new-side line number of the first added line containing `needle`, or None.
+fn find_needle_in_added_lines(diff: &str, needle: &str) -> Option<u32> {
+    let mut new_line: u32 = 0;
+    for diff_line in diff.lines() {
+        if let Some(rest) = diff_line.strip_prefix("@@") {
+            if let Some(plus) = rest.split('+').nth(1) {
+                let start = plus
+                    .split(|c: char| c == ',' || c == ' ')
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                new_line = start.saturating_sub(1);
+            }
+            continue;
+        }
+        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+            continue;
+        }
+        if diff_line.starts_with('+') {
+            new_line += 1;
+            if diff_line.get(1..).map_or(false, |s| s.contains(needle)) {
+                return Some(new_line);
+            }
+        } else if !diff_line.starts_with('-') {
+            new_line += 1;
+        }
+    }
+    None
+}
+
+/// Returns the old-side line number of the first deleted line containing `needle`, or None.
+fn find_needle_in_deleted_lines(diff: &str, needle: &str) -> Option<u32> {
+    let mut old_line: u32 = 0;
+    for diff_line in diff.lines() {
+        if let Some(rest) = diff_line.strip_prefix("@@") {
+            if let Some(minus) = rest.split('-').nth(1) {
+                let start = minus
+                    .split(|c: char| c == ',' || c == ' ')
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                old_line = start.saturating_sub(1);
+            }
+            continue;
+        }
+        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+            continue;
+        }
+        if diff_line.starts_with('-') {
+            old_line += 1;
+            if diff_line.get(1..).map_or(false, |s| s.contains(needle)) {
+                return Some(old_line);
+            }
+        } else if !diff_line.starts_with('+') {
+            old_line += 1;
+        }
+    }
+    None
 }
 
 fn fetch_pr_file_patches(
@@ -2360,11 +2567,39 @@ mod tests {
     }
 
     #[test]
-    fn unified_diff_line_detect() {
+    fn diff_changed_line_detect() {
+        // @@ -10,3 +10,4 @@
+        //  context  → new=10, old=10 (context)
+        // -old      → old=11 (deleted)
+        // +new      → new=11 (added)
+        //  more     → new=12, old=12 (context)
         let patch = "@@ -10,3 +10,4 @@\n context\n-old\n+new\n more\n";
-        // @@ +10 → context(10), +new(11), more(12)
-        assert!(line_in_unified_diff(patch, 11));
-        assert!(line_in_unified_diff(patch, 10));
-        assert!(!line_in_unified_diff(patch, 99));
+
+        assert!(line_is_added(patch, 11));   // "+new" is added at new-side line 11
+        assert!(!line_is_added(patch, 10));  // context line — not added
+        assert!(!line_is_added(patch, 12));  // context line — not added
+        assert!(!line_is_added(patch, 99));  // out of range
+
+        assert!(line_is_deleted(patch, 11));  // "-old" is deleted at old-side line 11
+        assert!(!line_is_deleted(patch, 10)); // context line — not deleted
+        assert!(!line_is_deleted(patch, 99)); // out of range
+    }
+
+    #[test]
+    fn diff_needle_in_added_lines() {
+        let patch = "@@ -1,2 +1,3 @@\n context\n+added_fn()\n-removed\n";
+        // "+added_fn()" → new-side line 2
+        assert_eq!(find_needle_in_added_lines(patch, "added_fn"), Some(2));
+        assert_eq!(find_needle_in_added_lines(patch, "removed"), None); // on deleted line
+        assert_eq!(find_needle_in_added_lines(patch, "missing"), None);
+    }
+
+    #[test]
+    fn diff_needle_in_deleted_lines() {
+        let patch = "@@ -1,2 +1,3 @@\n context\n+added_fn()\n-removed_fn()\n";
+        // "-removed_fn()" → old-side line 2
+        assert_eq!(find_needle_in_deleted_lines(patch, "removed_fn"), Some(2));
+        assert_eq!(find_needle_in_deleted_lines(patch, "added_fn"), None); // on added line
+        assert_eq!(find_needle_in_deleted_lines(patch, "missing"), None);
     }
 }
