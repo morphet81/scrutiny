@@ -26,6 +26,17 @@ pub fn discover_repo(cwd: &Path) -> Result<RepoContext> {
     })
 }
 
+/// Fail early with a clean message when `cwd` is not inside a git work tree.
+pub fn ensure_git_repo(cwd: &Path) -> Result<()> {
+    if !git_ok(cwd, &["rev-parse", "--is-inside-work-tree"]) {
+        bail!(
+            "not a git repository: {}. scrutiny must run inside a git repo.",
+            cwd.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .args(args)

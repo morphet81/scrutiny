@@ -12,7 +12,7 @@ use scrutiny_core::{
     ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
     PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
-use scrutiny_core::{ensure_config, find_shipped_default, load_config};
+use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -464,6 +464,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let shipped =
+        find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| PathBuf::from(".")));
+    ensure_config(&shipped)?;
     match cli.cmd {
         Commands::Eval {
             cwd,
@@ -473,6 +476,7 @@ fn run() -> Result<()> {
             pr,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, pr.as_deref(), &[])?;
             let (_report, path) = run_eval(EvalInput {
                 cwd,
@@ -484,12 +488,14 @@ fn run() -> Result<()> {
         }
         Commands::Map { eval, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[&eval])?;
             let (_report, path) = run_map(&eval, &cwd)?;
             println!("{}", path.display());
         }
         Commands::Pack { map, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[&map])?;
             let (_report, path) = run_pack(&map, &cwd)?;
             println!("{}", path.display());
@@ -501,6 +507,7 @@ fn run() -> Result<()> {
             cwd,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             let mut hints: Vec<&std::path::Path> = vec![map.as_path()];
             if let Some(p) = &pack {
                 hints.push(p.as_path());
@@ -519,6 +526,7 @@ fn run() -> Result<()> {
             from_json,
         } => {
             let cwd = std::env::current_dir().expect("cwd");
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[eval.as_path()])?;
             let (_answers, path) = run_plan_confirm(PlanConfirmInput {
                 eval_path: eval,
@@ -545,6 +553,7 @@ fn run() -> Result<()> {
             from_json,
         } => {
             let cwd = std::env::current_dir().expect("cwd");
+            ensure_git_repo(&cwd)?;
             let mut hints = vec![eval.as_path()];
             if let Some(p) = &map {
                 hints.push(p.as_path());
@@ -601,6 +610,7 @@ fn run() -> Result<()> {
                     Some(rest.join(" "))
                 }
             });
+            ensure_git_repo(&cwd)?;
             let (findings, _report) = run_review(ReviewCmdInput {
                 cwd,
                 pr,
@@ -674,6 +684,7 @@ fn run() -> Result<()> {
             from_json,
         } => {
             let cwd = std::env::current_dir().expect("cwd");
+            ensure_git_repo(&cwd)?;
             let mut hints = vec![plan.as_path()];
             if let Some(p) = &pack {
                 hints.push(p.as_path());
@@ -713,6 +724,7 @@ fn run() -> Result<()> {
                     Some(rest.join(" "))
                 }
             });
+            ensure_git_repo(&cwd)?;
             let path = run_parley(ParleyCmdInput {
                 cwd,
                 pr,
@@ -741,6 +753,7 @@ fn run() -> Result<()> {
                     Some(rest.join(" "))
                 }
             });
+            ensure_git_repo(&cwd)?;
             let path = run_pr(PrCmdInput {
                 cwd,
                 ticket,
@@ -759,6 +772,7 @@ fn run() -> Result<()> {
                     Some(rest.join(" "))
                 }
             });
+            ensure_git_repo(&cwd)?;
             let (_file, path) = run_parley_fetch(ParleyFetchInput { cwd, pr })?;
             println!("{}", path.display());
         }
@@ -768,6 +782,7 @@ fn run() -> Result<()> {
             cwd,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[comments.as_path()])?;
             let shipped = find_shipped_default(
                 &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
@@ -790,6 +805,7 @@ fn run() -> Result<()> {
         }
         Commands::ParleyReply { fixes, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[fixes.as_path()])?;
             let (result, path) = run_parley_reply(ParleyReplyInput {
                 fixes_path: fixes,
@@ -813,6 +829,7 @@ fn run() -> Result<()> {
             yes,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             // `scrutiny forge bulk [--dry] [--concurrency N]` → bulk orchestrator.
             if input.is_none() && rest.first().map(String::as_str) == Some("bulk") {
                 // Flags after `bulk` land in `rest` (trailing_var_arg), not their
@@ -873,6 +890,7 @@ fn run() -> Result<()> {
             title,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[])?;
             let input = input.or_else(|| {
                 if rest.is_empty() {
@@ -907,6 +925,7 @@ fn run() -> Result<()> {
             let cwd_path = cwd
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd_path)?;
             prepare_artifacts(&cwd_path, None, &[ticket.as_path()])?;
             let input = if let Some(raw) = from_json {
                 let mut v: ForgePlanWriteInput =
@@ -940,6 +959,7 @@ fn run() -> Result<()> {
         }
         Commands::ForgeContext { ticket, cwd } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[ticket.as_path()])?;
             let (_report, path) = run_forge_context(&ticket, &cwd)?;
             println!("{}", path.display());
@@ -950,6 +970,7 @@ fn run() -> Result<()> {
             context,
         } => {
             let cwd = std::env::current_dir().expect("cwd");
+            ensure_git_repo(&cwd)?;
             let mut hints = vec![ticket.as_path()];
             if let Some(p) = &session {
                 hints.push(p.as_path());
@@ -971,6 +992,7 @@ fn run() -> Result<()> {
             pr,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             let mut hints = vec![scan.as_path()];
             if let Some(p) = &eval {
                 hints.push(p.as_path());
@@ -998,6 +1020,7 @@ fn run() -> Result<()> {
             strict,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[findings.as_path()])?;
             let (_report, path) = run_findings_resolve(&findings, &cwd, strict)?;
             println!("{}", path.display());
@@ -1015,6 +1038,7 @@ fn run() -> Result<()> {
             event,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[findings.as_path()])?;
             let (result, path) = run_post_comments(PostCommentsInput {
                 findings_path: findings,
