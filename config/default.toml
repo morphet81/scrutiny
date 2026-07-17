@@ -184,6 +184,11 @@ verify_coverage = true
 enable_branch = true
 branch_headless = "auto"
 
+# Optional. When set, a dedicated headless agent writes the PR description from
+# this prompt + the diff (overrides the implement agent's pr_body). Leave unset
+# to keep the default deterministic body.
+# pr_description_prompt = "Summarize for reviewers: what changed, why, risk, test notes."
+
 [forge.complexity]
 # Jira field names that hold story-point estimates (tried in order).
 story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]

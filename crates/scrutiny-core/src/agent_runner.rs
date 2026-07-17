@@ -32,6 +32,45 @@ pub enum HeadlessKind {
     Forge,
     /// Parley: fix PR review comments; full tools, no findings schema.
     Parley,
+    /// One-shot free-form text (e.g. PR description). Read-only, no schema.
+    Text,
+}
+
+/// Whether `model` supports Claude Code `--permission-mode auto`. Unsupported
+/// models silently fall back to `default` (prompt on every action). Unsupported:
+/// haiku (all), sonnet/opus 4.5, claude-3. Bare aliases (opus/sonnet/fable)
+/// resolve to the latest model → supported.
+pub fn model_supports_auto(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    if m.contains("haiku") || m.contains("claude-3") {
+        return false;
+    }
+    if (m.contains("opus") || m.contains("sonnet")) && (m.contains("4-5") || m.contains("4.5")) {
+        return false;
+    }
+    true
+}
+
+/// Warn once per `(model, headless)` that a model does not support auto mode.
+fn disclose_no_auto_once(model: &str, headless: bool) {
+    use std::sync::OnceLock;
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let key = format!("{model}|{headless}");
+    if !seen.lock().expect("perm disclaimer lock").insert(key) {
+        return;
+    }
+    if headless {
+        eprintln!(
+            "⚠ scrutiny: {model} does not support auto permission mode — running headless with \
+             --dangerously-skip-permissions (bypasses all permission checks)."
+        );
+    } else {
+        eprintln!(
+            "⚠ scrutiny: {model} does not support auto permission mode — approve actions manually \
+             in each agent pane."
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,7 +212,7 @@ pub fn run_headless(
                 .arg("--workspace")
                 .arg(cwd);
             match kind {
-                HeadlessKind::Isolated | HeadlessKind::Ask => {
+                HeadlessKind::Isolated | HeadlessKind::Ask | HeadlessKind::Text => {
                     cmd.arg("--mode").arg("ask");
                 }
                 HeadlessKind::TeamLead | HeadlessKind::Forge | HeadlessKind::Parley => {}
@@ -195,6 +234,14 @@ pub fn run_headless(
             if use_bare {
                 cmd.arg("--bare");
             }
+            // Unattended: auto mode where the model supports it, else bypass all
+            // checks (headless can't approve interactively).
+            if model_supports_auto(model) {
+                cmd.arg("--permission-mode").arg("auto");
+            } else {
+                disclose_no_auto_once(model, true);
+                cmd.arg("--dangerously-skip-permissions");
+            }
             match kind {
                 HeadlessKind::Isolated | HeadlessKind::Ask => {
                     cmd.arg("--allowedTools")
@@ -204,6 +251,9 @@ pub fn run_headless(
                 }
                 HeadlessKind::TeamLead => {
                     cmd.arg("--json-schema").arg(FINDINGS_JSON_SCHEMA);
+                }
+                HeadlessKind::Text => {
+                    cmd.arg("--allowedTools").arg("Read");
                 }
                 HeadlessKind::Forge | HeadlessKind::Parley => {
                     // Full tools; no findings schema (implement / address comments).
@@ -394,10 +444,19 @@ fn build_agent_script(
     fs::write(&prompt_path, full_prompt.as_bytes())
         .with_context(|| format!("write {}", prompt_path.display()))?;
 
+    // Auto mode where the model supports it; otherwise fall back to interactive
+    // (the visible pane lets the user approve) and warn once.
+    let perm_flag = if model_supports_auto(model) {
+        "--permission-mode auto"
+    } else {
+        disclose_no_auto_once(model, false);
+        "--permission-mode default"
+    };
+
     let script_path = artifact_path_unique("agent-script");
     let script = format!(
         "#!/usr/bin/env bash\ncd '{cwd}'\n\
-         '{binary}' --permission-mode auto --model '{model}' \"$(cat '{prompt}')\"\n\
+         '{binary}' {perm_flag} --model '{model}' \"$(cat '{prompt}')\"\n\
          code=$?\n\
          if [ \"$code\" -eq 0 ]; then exit 0; fi\n\
          echo \"scrutiny: agent '{label}' failed (exit $code); pane kept open for inspection\"\n\
@@ -1264,6 +1323,22 @@ mod tests {
         assert_eq!(agent_type_from_label("parley-member#1"), "parley_member");
         assert_eq!(agent_type_from_label("forge-implement"), "forge_implement");
         assert_eq!(agent_type_from_label("lead#1"), "lead");
+    }
+
+    #[test]
+    fn auto_support_by_model() {
+        for m in ["opus", "sonnet", "fable", "claude-opus-4-8", "claude-sonnet-4-6"] {
+            assert!(model_supports_auto(m), "{m} should support auto");
+        }
+        for m in [
+            "haiku",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-3-5-sonnet",
+        ] {
+            assert!(!model_supports_auto(m), "{m} should NOT support auto");
+        }
     }
 
     #[test]

@@ -197,6 +197,10 @@ pub fn open_item_surface(ctx: TerminalContext, key: &str, cwd: &Path) -> Result<
         TerminalContext::Tmux => {
             let session = tmux_session_name(key);
             run_argv("tmux", &tmux_open_argv(&session, &cwd)).context("tmux new-session")?;
+            // `-c` only sets the initial dir; an interactive login shell profile can
+            // `cd` away during startup. Send an explicit cd so the placeholder pane
+            // lands in the worktree (mirrors the iTerm/Terminal.app open scripts).
+            let _ = run_argv("tmux", &tmux_cd_argv(&session, &cwd));
             Ok(ItemSurface::Tmux { session })
         }
         TerminalContext::Zellij => {
@@ -330,6 +334,14 @@ fn tmux_launch_argv(session: &str, run_cmd: &str) -> Vec<String> {
     ["split-window", "-t", session, run_cmd].map(String::from).to_vec()
 }
 
+/// Send an explicit `cd` into the session's (placeholder) pane after startup, so a
+/// profile that `cd`s during shell init cannot leave it outside the worktree.
+fn tmux_cd_argv(session: &str, cwd: &str) -> Vec<String> {
+    ["send-keys", "-t", session, &format!("cd '{cwd}'; clear"), "Enter"]
+        .map(String::from)
+        .to_vec()
+}
+
 fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
     ["action", "new-tab", "--name", tab, "--cwd", cwd].map(String::from).to_vec()
 }
@@ -442,6 +454,14 @@ mod tests {
         assert_eq!(
             tmux_launch_argv("nero-8729", "bash '/tmp/s.sh'"),
             vec!["split-window", "-t", "nero-8729", "bash '/tmp/s.sh'"]
+        );
+    }
+
+    #[test]
+    fn tmux_cd_argv_sends_cd_and_enter() {
+        assert_eq!(
+            tmux_cd_argv("nero-8729", "/tmp/wt"),
+            vec!["send-keys", "-t", "nero-8729", "cd '/tmp/wt'; clear", "Enter"]
         );
     }
 

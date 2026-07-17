@@ -184,6 +184,10 @@ pub struct ForgeConfig {
     /// Max items `forge bulk` runs concurrently (CLI `--concurrency` overrides).
     #[serde(default = "default_bulk_concurrency")]
     pub bulk_concurrency: usize,
+    /// Optional. When set, a dedicated headless agent writes the PR description
+    /// from this prompt + the diff, overriding the implement agent's pr_body.
+    #[serde(default)]
+    pub pr_description_prompt: Option<String>,
     #[serde(default)]
     pub complexity: ComplexityConfig,
 }
@@ -238,6 +242,7 @@ impl Default for ForgeConfig {
             enable_branch: true,
             branch_headless: default_branch_headless(),
             bulk_concurrency: default_bulk_concurrency(),
+            pr_description_prompt: None,
             complexity: ComplexityConfig::default(),
         }
     }

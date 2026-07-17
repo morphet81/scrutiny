@@ -460,10 +460,73 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         }
     }
 
+    // Optional: a dedicated headless agent rewrites the PR body from a custom prompt.
+    if let Some(tmpl) = cfg.forge.pr_description_prompt.as_deref() {
+        let tmpl = tmpl.trim();
+        if !tmpl.is_empty() {
+            if let Err(e) =
+                generate_custom_pr_body(detected, &session.model, &cwd, ticket, tmpl, &pr_meta_path)
+            {
+                eprintln!("scrutiny forge: custom PR description skipped: {e:#}");
+            }
+        }
+    }
+
     Ok(ForgeItemOutcome {
         pr_meta_path,
         session_path,
     })
+}
+
+/// Run a dedicated headless agent that writes the PR body from `prompt_tmpl` + the
+/// diff, overwriting `pr.json`'s `pr_body`. Best-effort: on any failure the caller
+/// logs and the existing body is kept.
+fn generate_custom_pr_body(
+    client: &crate::runtime::DetectedClient,
+    model: &str,
+    cwd: &Path,
+    ticket: &TicketReport,
+    prompt_tmpl: &str,
+    pr_meta_path: &Path,
+) -> Result<()> {
+    let mut diff = git_stdout(cwd, &["diff", "HEAD"]).unwrap_or_default();
+    if diff.trim().is_empty() {
+        diff = git_stdout(cwd, &["diff"]).unwrap_or_default();
+    }
+    let prompt = format!(
+        "{prompt_tmpl}\n\n\
+         Write the pull-request description body for the change below.\n\
+         Output ONLY the PR body as Markdown — no code fences around the whole thing, \
+         no preamble, no commentary.\n\n\
+         ## Ticket\n{id} — {title}\n{desc}\n\n\
+         ## Diff\n```diff\n{diff}\n```\n",
+        id = ticket.id.trim(),
+        title = ticket.title.trim(),
+        desc = ticket.description.trim(),
+    );
+    eprintln!("scrutiny forge: generating custom PR description…");
+    let out = run_headless(
+        client,
+        model,
+        cwd,
+        &prompt,
+        HeadlessKind::Text,
+        "forge-pr-description",
+        Duration::from_secs(AGENT_WALL_SECS),
+    )?;
+    let body = extract_markdownish(&out.stdout);
+    let body = body.trim();
+    if body.is_empty() {
+        bail!("PR description agent returned empty output");
+    }
+    let mut meta = load_pr_meta(pr_meta_path)?;
+    meta.pr_body = body.to_string();
+    write_json_pretty(pr_meta_path, &meta)?;
+    eprintln!(
+        "scrutiny forge: custom PR description written → {}",
+        pr_meta_path.display()
+    );
+    Ok(())
 }
 
 /// Dry mode: open a role-named placeholder pane (non-headless) or just log it.
