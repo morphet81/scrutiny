@@ -104,6 +104,29 @@ pub fn branch_name(ticket: &TicketReport, prefix: &str) -> String {
     }
 }
 
+/// Bulk branch name: `<type>-<projectkey>-<number>` (e.g. `feat-nero-8729`).
+///
+/// Jira `NERO-8729` → key `nero`, number `8729`. GitHub/GitLab `#123` → key =
+/// `repo_slug`, number `123`. Inline / no numeric id → falls back to
+/// [`branch_name`] (with slashes replaced by dashes).
+pub fn bulk_branch_name(ticket: &TicketReport, prefix: &str, repo_slug: &str) -> String {
+    let seg = |s: &str| slug(s).to_ascii_lowercase();
+    let id = ticket.id.trim();
+    // Jira-style KEY-NUMBER.
+    if let Some((key, num)) = id.rsplit_once('-') {
+        if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) && !key.is_empty() {
+            return format!("{prefix}-{}-{}", seg(key), num);
+        }
+    }
+    // GitHub/GitLab #NUMBER (or bare number).
+    let bare = id.trim_start_matches('#');
+    if !bare.is_empty() && bare.chars().all(|c| c.is_ascii_digit()) {
+        return format!("{prefix}-{}-{}", seg(repo_slug), bare);
+    }
+    // Inline / non-numeric: reuse the slugged branch name, dashes only.
+    branch_name(ticket, prefix).replace('/', "-")
+}
+
 fn title_slug(title: &str) -> String {
     let words: Vec<&str> = title.split_whitespace().take(TITLE_MAX_WORDS).collect();
     let mut s = slug(&words.join("-")).to_ascii_lowercase();
@@ -286,6 +309,24 @@ mod tests {
         let long = "x".repeat(200);
         let t = ticket("jira", "PROJ-1", &long, &[], json!({}));
         assert!(guess_commit_subject(&t, "feat").chars().count() <= SUBJECT_MAX_LEN);
+    }
+
+    #[test]
+    fn bulk_branch_name_jira() {
+        let t = ticket("jira", "NERO-8729", "Add search", &[], json!({}));
+        assert_eq!(bulk_branch_name(&t, "feat", "repo"), "feat-nero-8729");
+    }
+
+    #[test]
+    fn bulk_branch_name_github_uses_repo_slug() {
+        let t = ticket("github", "#123", "Fix bug", &[], json!({}));
+        assert_eq!(bulk_branch_name(&t, "fix", "MyRepo"), "fix-myrepo-123");
+    }
+
+    #[test]
+    fn bulk_branch_name_inline_fallback() {
+        let t = ticket("inline", "inline", "Add a thing", &[], json!({}));
+        assert_eq!(bulk_branch_name(&t, "feat", "repo"), "feat-add-a-thing");
     }
 
     #[test]

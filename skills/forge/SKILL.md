@@ -51,6 +51,28 @@ Sibling of `/scrutiny` and `/parley` (same binary, `~/.scrutiny/config.toml`).
 - `/forge` — ask for URL or description
 - Branch name with `PROJ-123` → Jira fetch when no arg
 
+## Bulk mode
+
+```bash
+"$SCRUTINY_BIN" forge bulk [--dry] [--concurrency <N>] [--yes]
+```
+
+Many tickets in one run, each on its own branch + worktree, run concurrently.
+
+- Collect: menu (**Paste ticket URL/key** / **Done**), one at a time. Done ends; Done on first prompt exits doing nothing.
+- Validate all (fetch + complexity), then ask **same settings for all** or **per-item** (same questions as single forge).
+- Per item: new branch + git worktree `<type>-<projectkey>-<number>` (e.g. `feat-nero-8729`).
+- Concurrency cap `forge.bulk_concurrency` (default **3**); override `--concurrency <N>`.
+- Non-headless (claude + tmux/zellij/iTerm2/Terminal.app): each item = own terminal container named by ticket key; panes named by role (PO/developer/tester/reviewer/evangelist/tdd-plan/implement) in that item's worktree; TDD plan validated in that item's pane.
+- Ship step (confirm commit subject, PR title/body, draft PR) serialized on main terminal, one item at a time.
+- Requires a git repo. tmux most reliable; Terminal.app best-effort.
+
+Flags:
+
+- `--yes` — headless: newline-separated keys/URLs from stdin, auto-answer from complexity, auto-commit + auto draft PR, no prompts.
+- `--dry` — full flow, **no** agents, **no** real PR. Branches + worktrees still created; panes shown but never auto-closed; offered to delete created branches + worktrees at end.
+- `--concurrency <N>` — override cap.
+
 ## Binary
 
 Skill root = folder containing **this** `SKILL.md`.

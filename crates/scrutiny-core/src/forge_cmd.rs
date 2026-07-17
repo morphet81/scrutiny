@@ -10,8 +10,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::agent_runner::{
-    run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind, HeadlessOutcome,
-    AGENT_WALL_SECS,
+    run_dry_placeholder_in, run_headless, run_nonheadless, run_nonheadless_in, wait_for_sentinels,
+    HeadlessKind, HeadlessOutcome, AGENT_WALL_SECS,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::brief::run_forge_brief;
@@ -28,7 +28,7 @@ use crate::forge::verify::{
 use crate::git::{self, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
-use crate::terminal::{resolve_terminal, TerminalContext};
+use crate::terminal::{resolve_terminal, ItemSurface, TerminalContext};
 
 /// Shared case-title rules for TDD test-plan + implement agents.
 const TEST_TITLE_GUIDELINES: &str = "\
@@ -44,9 +44,18 @@ Test case titles (it/test strings in the plan and in code):\n\
 /// Wall clock for a non-headless agent window (user may be watching — be generous).
 const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
 
+/// Where a forge agent runs: headless (captured), a shared visible window
+/// (`term`), or a per-item surface (`surface`, bulk mode). `dry` spawns no agent.
+#[derive(Clone, Copy)]
+struct AgentTarget<'a> {
+    term: Option<TerminalContext>,
+    surface: Option<&'a ItemSurface>,
+    dry: bool,
+}
+
 /// Run one forge agent either headless (captured, returns the outcome) or in a
-/// visible window (`term = Some`, returns `None` — results are read from disk by
-/// the caller). Forge agents always communicate via disk (test-plan.md, pr.json,
+/// visible window/surface (returns `None` — results are read from disk by the
+/// caller). Forge agents always communicate via disk (test-plan.md, pr.json,
 /// source, coverage), so the non-headless path needs no stdout.
 fn run_forge_agent(
     client: &crate::runtime::DetectedClient,
@@ -54,10 +63,29 @@ fn run_forge_agent(
     cwd: &Path,
     prompt: &str,
     label: &str,
-    term: Option<TerminalContext>,
+    target: AgentTarget,
     wall: Duration,
 ) -> Result<Option<HeadlessOutcome>> {
-    if let Some(ctx) = term {
+    let role = label.strip_prefix("forge-").unwrap_or(label);
+    if target.dry {
+        match target.surface {
+            Some(surface) => run_dry_placeholder_in(cwd, role, surface)?,
+            None => eprintln!("scrutiny forge: [dry] would run {role}"),
+        }
+        return Ok(None);
+    }
+    if let Some(surface) = target.surface {
+        let sentinel = run_nonheadless_in(client, model, cwd, prompt, role, surface, true)?;
+        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        if !missing.is_empty() {
+            eprintln!(
+                "scrutiny forge: {role} pane did not signal done within {}s — using disk state",
+                NONHEADLESS_WALL_SECS
+            );
+        }
+        return Ok(None);
+    }
+    if let Some(ctx) = target.term {
         let sentinel = run_nonheadless(client, model, cwd, prompt, label, ctx)?;
         let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
         if !missing.is_empty() {
@@ -66,18 +94,17 @@ fn run_forge_agent(
                 NONHEADLESS_WALL_SECS
             );
         }
-        Ok(None)
-    } else {
-        Ok(Some(run_headless(
-            client,
-            model,
-            cwd,
-            prompt,
-            HeadlessKind::Forge,
-            label,
-            wall,
-        )?))
+        return Ok(None);
     }
+    Ok(Some(run_headless(
+        client,
+        model,
+        cwd,
+        prompt,
+        HeadlessKind::Forge,
+        label,
+        wall,
+    )?))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +136,7 @@ struct ForgeFromJson {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ForgeAnswers {
+pub(crate) struct ForgeAnswers {
     pub client: String,
     pub model: String,
     #[serde(default = "default_single")]
@@ -227,6 +254,87 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         prompt_forge_answers(&detected.client, &ticket)?
     };
 
+    let skip_prompts = input.non_interactive || input.from_json.is_some();
+    let scaffold = resolve_scaffold(&cfg, &ticket, &cwd, skip_prompts)?;
+    let prefix = scaffold.prefix;
+    cwd = scaffold.cwd;
+
+    let outcome = run_forge_item_body(ForgeItemCtx {
+        detected: &detected,
+        cwd: cwd.clone(),
+        session_root: session_root.clone(),
+        ticket: &ticket,
+        ticket_path: ticket_path.clone(),
+        answers,
+        cfg: &cfg,
+        prefix: prefix.clone(),
+        term,
+        surface: None,
+        tdd_interactive: true,
+        dry: false,
+    })?;
+
+    run_forge_ship(
+        &cwd,
+        &session_root,
+        &outcome.pr_meta_path,
+        &cfg,
+        skip_prompts,
+        /* create_pr_noninteractive */ false,
+        &prefix,
+        &ticket,
+    )?;
+
+    eprintln!(
+        "scrutiny forge: done. session={} ticket={} pr_meta={}",
+        outcome.session_path.display(),
+        ticket_path.display(),
+        outcome.pr_meta_path.display()
+    );
+    Ok(outcome.session_path)
+}
+
+/// Everything for one item between params and ship: plan-write → context →
+/// brief → (TDD plan) → implement → verify gate. Shared by single `run_forge`
+/// and each bulk item driver. Returns the pr-meta + session paths.
+pub(crate) struct ForgeItemCtx<'a> {
+    pub detected: &'a crate::runtime::DetectedClient,
+    pub cwd: PathBuf,
+    pub session_root: PathBuf,
+    pub ticket: &'a TicketReport,
+    pub ticket_path: PathBuf,
+    pub answers: ForgeAnswers,
+    pub cfg: &'a Config,
+    pub prefix: String,
+    pub term: Option<TerminalContext>,
+    pub surface: Option<ItemSurface>,
+    /// When true and on a TTY, the TDD plan is validated interactively.
+    pub tdd_interactive: bool,
+    /// When true: spawn no agents, guess pr.json, skip the verify gate.
+    pub dry: bool,
+}
+
+pub(crate) struct ForgeItemOutcome {
+    pub pr_meta_path: PathBuf,
+    pub session_path: PathBuf,
+}
+
+pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome> {
+    let ForgeItemCtx {
+        detected,
+        cwd,
+        session_root,
+        ticket,
+        ticket_path,
+        answers,
+        cfg,
+        prefix,
+        term,
+        surface,
+        tdd_interactive,
+        dry,
+    } = ctx;
+
     let (_session, session_path) = run_forge_plan_write(ForgePlanWriteInput {
         ticket_path: ticket_path.clone(),
         client: answers.client.clone(),
@@ -255,28 +363,51 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
     )?;
 
     eprintln!("scrutiny forge: context + brief…");
-    let (ctx, context_path) = run_forge_context(&ticket_path, &cwd)?;
+    let (cx, context_path) = run_forge_context(&ticket_path, &cwd)?;
     let (_brief, brief_path) =
         run_forge_brief(&ticket_path, Some(&session_path), Some(&context_path))?;
-
-    let skip_prompts = input.non_interactive || input.from_json.is_some();
-    let scaffold = resolve_scaffold(&cfg, &ticket, &cwd, skip_prompts)?;
-    let prefix = scaffold.prefix;
-    cwd = scaffold.cwd;
 
     let verify_plan = build_verify_plan(
         &cwd,
         &cfg.forge.verify_commands,
-        &ctx.test_harness,
+        &cx.test_harness,
         session.e2e,
         cfg.forge.verify_coverage,
         session.coverage_pct,
         cfg.forge.verify_max_loops,
     );
 
+    let pr_meta_path = session_root.join("pr.json");
+    let target = AgentTarget {
+        term,
+        surface: surface.as_ref(),
+        dry,
+    };
+
+    if dry {
+        if session.tdd {
+            dry_role(&cwd, "tdd-plan", &target)?;
+        }
+        let impl_role = if session.spawn_mode == "team" {
+            "po-team"
+        } else {
+            "implement"
+        };
+        dry_role(&cwd, impl_role, &target)?;
+        write_dry_pr_meta(&pr_meta_path, ticket, &prefix)?;
+        eprintln!(
+            "scrutiny forge: [dry] guessed pr.json → {}",
+            pr_meta_path.display()
+        );
+        return Ok(ForgeItemOutcome {
+            pr_meta_path,
+            session_path,
+        });
+    }
+
     if session.tdd {
         let plan_path = run_tdd_plan_loop(
-            &detected,
+            detected,
             &session.model,
             &cwd,
             &session_root,
@@ -285,19 +416,16 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
             &brief_path,
             &context_path,
             &session,
-            term,
+            tdd_interactive,
+            target,
         )?;
         session.tdd_plan_path = Some(plan_path.display().to_string());
         write_json_pretty(&session_path, &session)?;
     }
 
-    eprintln!(
-        "scrutiny forge: implement ({})…",
-        session.spawn_mode
-    );
-    let pr_meta_path = session_root.join("pr.json");
+    eprintln!("scrutiny forge: implement ({})…", session.spawn_mode);
     run_implement_agent(
-        &detected,
+        detected,
         &session.model,
         &cwd,
         &ticket_path,
@@ -305,15 +433,15 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         &brief_path,
         &context_path,
         &session,
-        &ticket,
+        ticket,
         &pr_meta_path,
         &verify_plan,
         &prefix,
-        term,
+        target,
     )?;
 
     match run_verify_gate(
-        &detected,
+        detected,
         &session.model,
         &cwd,
         &ticket_path,
@@ -321,7 +449,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         &brief_path,
         &context_path,
         &verify_plan,
-        term,
+        target,
     )? {
         GateOutcome::Green => {}
         GateOutcome::Red { proceed: true } => {
@@ -332,23 +460,32 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         }
     }
 
-    run_forge_ship(
-        &cwd,
-        &session_root,
-        &pr_meta_path,
-        &cfg,
-        skip_prompts,
-        &prefix,
-        &ticket,
-    )?;
+    Ok(ForgeItemOutcome {
+        pr_meta_path,
+        session_path,
+    })
+}
 
-    eprintln!(
-        "scrutiny forge: done. session={} ticket={} pr_meta={}",
-        session_path.display(),
-        ticket_path.display(),
-        pr_meta_path.display()
-    );
-    Ok(session_path)
+/// Dry mode: open a role-named placeholder pane (non-headless) or just log it.
+fn dry_role(cwd: &Path, role: &str, target: &AgentTarget) -> Result<()> {
+    match target.surface {
+        Some(surface) => run_dry_placeholder_in(cwd, role, surface),
+        None => {
+            eprintln!("scrutiny forge: [dry] would run {role}");
+            Ok(())
+        }
+    }
+}
+
+/// Dry mode has no agent to author pr.json — synthesize it from ticket guesses.
+fn write_dry_pr_meta(path: &Path, ticket: &TicketReport, prefix: &str) -> Result<()> {
+    let meta = PrMeta {
+        pr_title: scaffold::guess_pr_title(ticket, prefix),
+        pr_body: scaffold::guess_pr_body(ticket),
+        commit_subject: scaffold::guess_commit_subject(ticket, prefix),
+        commit_body: String::new(),
+    };
+    write_json_pretty(path, &meta)
 }
 
 struct ScaffoldOutcome {
@@ -438,7 +575,7 @@ fn resolve_scaffold(
     }
 }
 
-fn worktree_dir(repo: &git::RepoContext, branch_name: &str) -> PathBuf {
+pub(crate) fn worktree_dir(repo: &git::RepoContext, branch_name: &str) -> PathBuf {
     let san = branch_name.replace('/', "-");
     let base = repo
         .root
@@ -448,7 +585,7 @@ fn worktree_dir(repo: &git::RepoContext, branch_name: &str) -> PathBuf {
     base.join(format!("{}-{}", repo.repo_slug, san))
 }
 
-fn prompt_forge_answers(client: &str, ticket: &TicketReport) -> Result<ForgeAnswers> {
+pub(crate) fn prompt_forge_answers(client: &str, ticket: &TicketReport) -> Result<ForgeAnswers> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "forge needs a TTY for knobs (or pass --from-json / --yes).\n\
@@ -551,7 +688,8 @@ fn run_tdd_plan_loop(
     brief_path: &Path,
     context_path: &Path,
     session: &ForgeSessionPlan,
-    term: Option<TerminalContext>,
+    tdd_interactive: bool,
+    target: AgentTarget,
 ) -> Result<PathBuf> {
     let plan_path = session_root.join("test-plan.md");
     let theme = ColorfulTheme::default();
@@ -559,7 +697,7 @@ fn run_tdd_plan_loop(
     // Generate once up front; the loop only re-renders and (on Revise) re-runs.
     run_test_plan_agent(
         client, model, cwd, ticket_path, session_path, brief_path, context_path, session,
-        &plan_path, None, "forge-test-plan", term,
+        &plan_path, None, "forge-test-plan", target,
     )?;
 
     loop {
@@ -570,8 +708,8 @@ fn run_tdd_plan_loop(
             plan_path.display()
         );
 
-        if !std::io::stdin().is_terminal() {
-            eprintln!("scrutiny forge: non-TTY — auto-confirm test plan");
+        if !tdd_interactive || !std::io::stdin().is_terminal() {
+            eprintln!("scrutiny forge: non-interactive — auto-confirm test plan");
             break;
         }
 
@@ -595,7 +733,7 @@ fn run_tdd_plan_loop(
                     .context("test plan comment")?;
                 run_test_plan_agent(
                     client, model, cwd, ticket_path, session_path, brief_path, context_path,
-                    session, &plan_path, Some(&comment), "forge-test-plan-revise", term,
+                    session, &plan_path, Some(&comment), "forge-test-plan-revise", target,
                 )?;
             }
         }
@@ -619,7 +757,7 @@ fn run_test_plan_agent(
     plan_path: &Path,
     comment: Option<&str>,
     label: &str,
-    term: Option<TerminalContext>,
+    target: AgentTarget,
 ) -> Result<()> {
     let prompt = build_test_plan_prompt(
         ticket_path,
@@ -640,7 +778,7 @@ fn run_test_plan_agent(
         cwd,
         &prompt,
         label,
-        term,
+        target,
         Duration::from_secs(AGENT_WALL_SECS),
     )?;
     match out {
@@ -737,7 +875,7 @@ fn run_implement_agent(
     pr_meta_path: &Path,
     verify: &VerifyPlan,
     prefix: &str,
-    term: Option<TerminalContext>,
+    target: AgentTarget,
 ) -> Result<()> {
     let prompt = build_implement_prompt(
         ticket_path,
@@ -761,7 +899,7 @@ fn run_implement_agent(
         cwd,
         &prompt,
         label,
-        term,
+        target,
         Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
     )?;
     if let Some(o) = out {
@@ -927,7 +1065,7 @@ fn run_verify_gate(
     brief_path: &Path,
     context_path: &Path,
     plan: &VerifyPlan,
-    term: Option<TerminalContext>,
+    target: AgentTarget,
 ) -> Result<GateOutcome> {
     if plan.is_empty() {
         eprintln!("scrutiny forge: no verify commands — skip gate");
@@ -991,7 +1129,8 @@ fn run_verify_gate(
                 summarize_report(&report)
             );
             let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-            if !tty {
+            // Bulk items (surface) never block a pane on a prompt — record red.
+            if !tty || target.surface.is_some() {
                 return Ok(GateOutcome::Red { proceed: false });
             }
             let proceed = Confirm::with_theme(&ColorfulTheme::default())
@@ -1017,7 +1156,7 @@ fn run_verify_gate(
             cwd,
             &prompt,
             "forge-verify-fix",
-            term,
+            target,
             Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
         )?;
         if let Some(o) = out {
@@ -1120,12 +1259,14 @@ fn load_pr_meta(path: &Path) -> Result<PrMeta> {
     Ok(meta)
 }
 
-fn run_forge_ship(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_forge_ship(
     cwd: &Path,
     session_root: &Path,
     pr_meta_path: &Path,
     cfg: &Config,
     skip_prompts: bool,
+    create_pr_noninteractive: bool,
     prefix: &str,
     ticket: &TicketReport,
 ) -> Result<()> {
@@ -1205,25 +1346,6 @@ fn run_forge_ship(
         eprintln!("scrutiny forge: committed — {commit_subject}");
     }
 
-    if skip_prompts || !tty {
-        eprintln!(
-            "scrutiny forge: skip draft PR prompt (non-interactive). \
-             pr.json ready at {}",
-            pr_meta_path.display()
-        );
-        return Ok(());
-    }
-
-    let create = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Create draft PR?")
-        .default(false)
-        .interact()
-        .context("draft PR confirm")?;
-    if !create {
-        eprintln!("scrutiny forge: draft PR skipped");
-        return Ok(());
-    }
-
     let suggested_title = {
         let ai = meta.pr_title.trim();
         if ai.is_empty() {
@@ -1240,6 +1362,45 @@ fn run_forge_ship(
             meta.pr_body.clone()
         }
     };
+
+    if skip_prompts || !tty {
+        if create_pr_noninteractive {
+            let choice = crate::pr::confirm_pr_meta(
+                cfg,
+                cwd,
+                session_root,
+                &suggested_title,
+                &suggested_body,
+                /* skip_prompts */ true,
+            )?;
+            let url = crate::pr::create_pr(
+                cwd,
+                session_root,
+                &choice.base,
+                &choice.title,
+                &choice.body,
+                /* draft */ true,
+            )?;
+            eprintln!("scrutiny forge: draft PR → {url}");
+        } else {
+            eprintln!(
+                "scrutiny forge: skip draft PR prompt (non-interactive). \
+                 pr.json ready at {}",
+                pr_meta_path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let create = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Create draft PR?")
+        .default(false)
+        .interact()
+        .context("draft PR confirm")?;
+    if !create {
+        eprintln!("scrutiny forge: draft PR skipped");
+        return Ok(());
+    }
 
     let choice = crate::pr::confirm_pr_meta(
         cfg,

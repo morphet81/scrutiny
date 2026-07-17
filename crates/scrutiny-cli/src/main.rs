@@ -3,10 +3,11 @@ use clap::{Parser, Subcommand};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_eval,
     run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate, run_forge,
-    run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map, run_pack,
-    run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply, run_plan_confirm,
-    run_plan_write, run_post_comments, run_pr, run_review, run_review_session_write, run_scan,
-    run_skills_install, AgentPromptInput, EvalInput, FindingsInitInput, ForgeCmdInput,
+    run_forge_brief, run_forge_bulk, run_forge_bulk_item, run_forge_context, run_forge_fetch,
+    run_forge_plan_write, run_map, run_pack, run_parley, run_parley_fetch, run_parley_plan_write,
+    run_parley_reply, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
+    run_review_session_write, run_scan, run_skills_install, AgentPromptInput, EvalInput,
+    FindingsInitInput, ForgeBulkInput, ForgeCmdInput,
     ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput,
     ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
     PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
@@ -287,7 +288,14 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
+    /// Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent.
+    ///
+    /// `scrutiny forge bulk` runs several tickets at once — each on its own
+    /// branch + worktree, concurrently, with the commit/PR conclude serialized
+    /// on this terminal. Bulk flags (after `bulk`): `--dry` (no agents, no PR,
+    /// offers to delete the branches/worktrees at the end), `--concurrency N`
+    /// (cap, default `forge.bulk_concurrency`), `--yes` (headless: keys from
+    /// stdin, auto commit + draft PR).
     #[command(hide = true)]
     Forge {
         #[arg(long)]
@@ -312,6 +320,19 @@ enum Commands {
         /// Non-interactive defaults (no TTY menus)
         #[arg(long, default_value_t = false)]
         yes: bool,
+    },
+    /// Internal: run one `forge bulk` item as a child driver process.
+    #[command(hide = true)]
+    ForgeBulkItem {
+        /// Path to the item plan JSON written by the orchestrator.
+        #[arg(long)]
+        item: PathBuf,
+        /// Headless (captured child, no panes, auto commit + draft PR).
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+        /// Dry run: spawn no agents, guess pr.json, no real PR.
+        #[arg(long, default_value_t = false)]
+        dry: bool,
     },
     /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
@@ -788,6 +809,30 @@ fn run() -> Result<()> {
             yes,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            // `scrutiny forge bulk [--dry] [--concurrency N]` → bulk orchestrator.
+            if input.is_none() && rest.first().map(String::as_str) == Some("bulk") {
+                // Flags after `bulk` land in `rest` (trailing_var_arg), not their
+                // own clap fields — parse them here.
+                let dry = rest.iter().any(|t| t == "--dry");
+                let non_interactive = yes || rest.iter().any(|t| t == "--yes");
+                let concurrency = rest
+                    .iter()
+                    .position(|t| t == "--concurrency")
+                    .and_then(|i| rest.get(i + 1))
+                    .and_then(|v| v.parse::<usize>().ok());
+                let sessions = run_forge_bulk(ForgeBulkInput {
+                    cwd,
+                    client,
+                    source,
+                    non_interactive,
+                    concurrency,
+                    dry,
+                })?;
+                for p in sessions {
+                    println!("{}", p.display());
+                }
+                return Ok(());
+            }
             let input = input.or_else(|| {
                 if rest.is_empty() {
                     None
@@ -806,6 +851,13 @@ fn run() -> Result<()> {
                 non_interactive: yes,
             })?;
             println!("{}", path.display());
+        }
+        Commands::ForgeBulkItem {
+            item,
+            headless,
+            dry,
+        } => {
+            run_forge_bulk_item(&item, headless, dry)?;
         }
         Commands::ForgeFetch {
             cwd,

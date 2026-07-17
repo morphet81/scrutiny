@@ -206,6 +206,26 @@ pub fn create_worktree(root: &Path, name: &str, dir: &Path) -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
+/// Remove the worktree at `dir` (force, to drop any uncommitted files).
+pub fn remove_worktree(root: &Path, dir: &Path) -> Result<()> {
+    let dir_str = dir.to_string_lossy().to_string();
+    if !git_ok(root, &["worktree", "remove", "--force", &dir_str]) {
+        bail!("git worktree remove failed for {}", dir.display());
+    }
+    Ok(())
+}
+
+/// Delete branch `name` (force). Not an error if it does not exist.
+pub fn delete_branch(root: &Path, name: &str) -> Result<()> {
+    if !ref_exists(root, name) {
+        return Ok(());
+    }
+    if !git_ok(root, &["branch", "-D", name]) {
+        bail!("git branch -D {name} failed");
+    }
+    Ok(())
+}
+
 pub fn ref_exists(root: &Path, name: &str) -> bool {
     git_ok(root, &["rev-parse", "--verify", &format!("{name}^{{commit}}")])
         || git_ok(

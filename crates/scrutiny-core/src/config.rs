@@ -181,6 +181,9 @@ pub struct ForgeConfig {
     /// Headless branch behavior: "auto" (follow detection) | "never" (use current).
     #[serde(default = "default_branch_headless")]
     pub branch_headless: String,
+    /// Max items `forge bulk` runs concurrently (CLI `--concurrency` overrides).
+    #[serde(default = "default_bulk_concurrency")]
+    pub bulk_concurrency: usize,
     #[serde(default)]
     pub complexity: ComplexityConfig,
 }
@@ -205,6 +208,9 @@ fn default_verify_loops() -> u32 {
 }
 fn default_branch_headless() -> String {
     "auto".into()
+}
+fn default_bulk_concurrency() -> usize {
+    3
 }
 
 impl Default for ForgeConfig {
@@ -231,6 +237,7 @@ impl Default for ForgeConfig {
             verify_coverage: true,
             enable_branch: true,
             branch_headless: default_branch_headless(),
+            bulk_concurrency: default_bulk_concurrency(),
             complexity: ComplexityConfig::default(),
         }
     }

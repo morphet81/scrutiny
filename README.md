@@ -106,6 +106,29 @@ Artifacts live under **`<repo>/.scrutiny/<pr>/`** (or `.scrutiny/local/` without
 ./target/release/scrutiny forge --from-json '{"client":"claude","model":"sonnet","spawn_mode":"single","tdd":true,"e2e":true,"coverage_pct":100}' --yes --input KEY-1
 ```
 
+### Forge bulk mode
+
+Implement several tickets in one run — each on its own branch + worktree, run concurrently.
+
+```bash
+scrutiny forge bulk
+scrutiny forge bulk --dry
+scrutiny forge bulk --yes < tickets.txt
+scrutiny forge bulk --concurrency 5
+```
+
+Interactive flow: a menu (**Paste ticket URL/key** / **Done**) collects tickets one at a time; **Done** ends collection (Done on the first prompt exits doing nothing). All tickets are validated (fetch + complexity sizing), then you pick **same settings for all** or **per-item settings** (same questions as single `forge`). Each item gets its own new branch + git worktree named `<type>-<projectkey>-<number>` (e.g. `feat-nero-8729`).
+
+Items run concurrently, capped at `forge.bulk_concurrency` (default `3`; override with `--concurrency <N>`). Non-headless (claude + tmux/zellij/iTerm2/Terminal.app): each item opens its own terminal container (tmux session / zellij tab / iTerm2 window) named after the ticket key; agent panes are named by role (PO/developer/tester/reviewer/evangelist/tdd-plan/implement) and run in that item's worktree, where you validate its TDD plan. As each item finishes, the concluding step (confirm commit subject, PR title/body, create draft PR) is handled one item at a time on the main terminal.
+
+Requires a git repository (per-item worktrees). tmux is the most reliable multiplexer; Terminal.app grouping is best-effort.
+
+Flags:
+
+- `--yes` — headless/non-interactive: reads newline-separated ticket keys/URLs from stdin, auto-answers from complexity suggestions, auto-commits, auto-creates draft PRs, no prompts.
+- `--dry` — runs the whole flow but spawns **no** agents and creates **no** real PR. Branches + worktrees are still created; non-headless panes are created (showing what would run) but never auto-closed; at the end you're offered to delete the created branches + worktrees.
+- `--concurrency <N>` — override the concurrency cap.
+
 ### One-shot parley (preferred)
 
 ```bash

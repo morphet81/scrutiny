@@ -6,6 +6,7 @@ pub mod diff_loc;
 pub mod eval;
 pub mod findings;
 pub mod forge;
+pub mod forge_bulk;
 pub mod forge_cmd;
 pub mod gh;
 pub mod git;
@@ -44,6 +45,7 @@ pub use forge::{
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, ForgeFetchInput,
     ForgePlanWriteInput, ForgeSessionPlan, TicketReport,
 };
+pub use forge_bulk::{run_forge_bulk, run_forge_bulk_item, ForgeBulkInput};
 pub use forge_cmd::{run_forge, ForgeCmdInput};
 pub use map::{run_map, MapReport};
 pub use parley::{

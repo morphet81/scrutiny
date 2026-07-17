@@ -16,7 +16,7 @@ use crate::plan::ConfirmedPlan;
 use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
-use crate::terminal::{launch_agent_window, TerminalContext};
+use crate::terminal::{launch_agent_in_surface, launch_agent_window, ItemSurface, TerminalContext};
 
 const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
 
@@ -327,6 +327,53 @@ pub fn run_nonheadless(
     label: &str,
     ctx: TerminalContext,
 ) -> Result<PathBuf> {
+    let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, label)?;
+    eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
+    launch_agent_window(ctx, label, &script_path)?;
+    Ok(sentinel)
+}
+
+/// Like [`run_nonheadless`] but launches the agent into a per-item [`ItemSurface`]
+/// as a pane named after its `role` (bulk mode). `close_on_exit=false` keeps the
+/// pane open after a clean exit (dry mode).
+pub fn run_nonheadless_in(
+    client: &DetectedClient,
+    model: &str,
+    cwd: &Path,
+    prompt: &str,
+    role: &str,
+    surface: &ItemSurface,
+    close_on_exit: bool,
+) -> Result<PathBuf> {
+    let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, role)?;
+    eprintln!("scrutiny: launch {role} into item surface (auto mode)");
+    launch_agent_in_surface(surface, role, &script_path, close_on_exit)?;
+    Ok(sentinel)
+}
+
+/// Dry mode: open a role-named pane that only prints what *would* run and stays
+/// open (`close_on_exit=false`). No agent is spawned, no sentinel to wait on.
+pub fn run_dry_placeholder_in(cwd: &Path, role: &str, surface: &ItemSurface) -> Result<()> {
+    let script_path = artifact_path_unique("dry-script");
+    let script = format!(
+        "#!/usr/bin/env bash\ncd '{cwd}'\n\
+         echo '[dry] would run {role} here — no agent spawned'\n\
+         exec bash\n",
+        cwd = cwd.display(),
+    );
+    fs::write(&script_path, script.as_bytes())
+        .with_context(|| format!("write {}", script_path.display()))?;
+    launch_agent_in_surface(surface, role, &script_path, false)
+}
+
+/// Write the agent prompt + launcher script; return `(sentinel, script_path)`.
+fn build_agent_script(
+    client: &DetectedClient,
+    model: &str,
+    cwd: &Path,
+    prompt: &str,
+    label: &str,
+) -> Result<(PathBuf, PathBuf)> {
     if client.client != "claude" {
         bail!(
             "non-headless mode supports claude only (got {})",
@@ -362,10 +409,7 @@ pub fn run_nonheadless(
     );
     fs::write(&script_path, script.as_bytes())
         .with_context(|| format!("write {}", script_path.display()))?;
-
-    eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
-    launch_agent_window(ctx, label, &script_path)?;
-    Ok(sentinel)
+    Ok((sentinel, script_path))
 }
 
 /// Poll until every sentinel file exists or the wall clock elapses.
