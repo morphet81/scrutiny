@@ -20,6 +20,7 @@ use std::process::ExitCode;
 #[command(
     name = "scrutiny",
     version,
+    disable_version_flag = true,
     about = "PR complexity eval + forge ticket implement helpers",
     help_template = "\
 {about-with-newline}
@@ -33,6 +34,9 @@ Main commands:
 {all-args}{after-help}"
 )]
 struct Cli {
+    /// Print version
+    #[arg(short = 'v', short_alias = 'V', long = "version", action = clap::ArgAction::Version)]
+    version: Option<bool>,
     #[command(subcommand)]
     cmd: Commands,
 }
