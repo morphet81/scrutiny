@@ -273,7 +273,7 @@ base_candidates = ["develop", "main"]   # replaces the global list
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `default_client` | `"claude"` | AI client: `claude` \| `cursor` \| `codex` |
-| `headless` | `true` | Capture agent stdout. `false` → open each agent in a visible terminal window (claude only; tmux/zellij/macOS Terminal/iTerm2). Applies to probe, parley, forge |
+| `headless` | `true` | Capture agent stdout. `false` → open each agent in a visible terminal window (claude only; tmux/zellij/macOS Terminal/iTerm2). Applies to probe, parley, forge. Permission mode is model-aware: models that support `--permission-mode auto` (opus/sonnet 4.6+, fable) run unattended; older ones (haiku, sonnet/opus 4.5, claude-3) fall back to manual approval in the pane (non-headless) or `--dangerously-skip-permissions` (headless), with a one-time warning |
 | `force_client` | _(unset)_ | Skip the client prompt for `scrutiny probe` |
 | `force_spawn_mode` | _(unset)_ | Skip spawn-mode prompt: `isolated` \| `team`. Unset → `isolated` |
 | `editor` | _(unset)_ | Editor for PR descriptions; falls back to `$VISUAL` → `$EDITOR` → `vi`. Supports args (`"code --wait"`) |
@@ -294,7 +294,7 @@ base_candidates = ["develop", "main"]   # replaces the global list
 
 **`[scan]` / `[scan.i18n]`** — deterministic scan: `enable` (`true`), `commands` (extra lint hooks); i18n `enable` (`true`), `reference_locale` (`"en"`), `path_globs`, `check_placeholders` (`true`), `check_empty_values` (`true`), `full_catalog` (`false`).
 
-**`[forge]`** — force approach / e2e / agent counts (omit = prompt): `approach`, `e2e`, `agents`, `testers`, `reviewers`, `evangelists`, `model`; toggles `enable_figma`/`enable_lore`/`enable_po`/`enable_ticket_writeback`/`enable_branch` (all `true`); defaults `default_approach` (`"tdd"`), `default_agents` (`2`), `default_testers` (`1`), `default_reviewers` (`1`), `default_evangelists` (`0`); verify gate `verify_commands`, `verify_max_loops` (`2`), `verify_coverage` (`true`); `branch_headless` (`"auto"`).
+**`[forge]`** — force approach / e2e / agent counts (omit = prompt): `approach`, `e2e`, `agents`, `testers`, `reviewers`, `evangelists`, `model`; toggles `enable_figma`/`enable_lore`/`enable_po`/`enable_ticket_writeback`/`enable_branch` (all `true`); defaults `default_approach` (`"tdd"`), `default_agents` (`2`), `default_testers` (`1`), `default_reviewers` (`1`), `default_evangelists` (`0`); verify gate `verify_commands`, `verify_max_loops` (`2`), `verify_coverage` (`true`); `branch_headless` (`"auto"`); `bulk_concurrency` (`3`); `pr_description_prompt` _(unset)_ — when set, a dedicated headless agent writes the PR body from this prompt + the diff (overrides the implement agent's `pr_body`).
 
 **`[forge.complexity]`** — keyword lists, story-point field names, and tier thresholds that drive automatic model selection.
 
@@ -365,6 +365,7 @@ evangelists = 0
 model = "sonnet"      # pin model, skip complexity prompt
 enable_figma = false
 enable_lore = false
+# pr_description_prompt = "Summarize for reviewers: what changed, why, risk, test notes."
 
 [forge.complexity]
 # Extend risk keywords for your domain
