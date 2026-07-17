@@ -415,6 +415,18 @@ fn build_agent_script(
 /// Poll until every sentinel file exists or the wall clock elapses.
 /// Returns the sentinels that never appeared (empty = all agents finished).
 pub fn wait_for_sentinels(sentinels: &[PathBuf], wall: Duration) -> Vec<PathBuf> {
+    static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    wait_for_sentinels_cancellable(sentinels, wall, &NEVER)
+}
+
+/// Like [`wait_for_sentinels`] but returns early (with the still-missing set)
+/// when `cancel` flips true — used by bulk `q` abort.
+pub fn wait_for_sentinels_cancellable(
+    sentinels: &[PathBuf],
+    wall: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<PathBuf> {
+    use std::sync::atomic::Ordering;
     let start = std::time::Instant::now();
     let mut last_tick = start;
     loop {
@@ -425,6 +437,9 @@ pub fn wait_for_sentinels(sentinels: &[PathBuf], wall: Duration) -> Vec<PathBuf>
             .collect();
         if missing.is_empty() {
             return Vec::new();
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return missing;
         }
         if start.elapsed() >= wall {
             return missing;

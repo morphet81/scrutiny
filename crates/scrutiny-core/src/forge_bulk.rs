@@ -5,12 +5,14 @@
 use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{mpsc, Mutex};
+use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-use crate::agent_runner::{wait_for_sentinels, AGENT_WALL_SECS};
+use crate::agent_runner::{wait_for_sentinels_cancellable, AGENT_WALL_SECS};
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::scaffold;
@@ -22,7 +24,7 @@ use crate::git;
 use crate::paths::{init_artifact_ctx, prepare_artifacts, session_name, slug, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{
-    launch_agent_in_surface, open_item_surface, resolve_terminal, ItemSurface,
+    kill_item_surface, launch_agent_in_surface, open_item_surface, resolve_terminal, ItemSurface,
 };
 
 /// Whole-item wall clock (body drives its own per-agent sub-waits).
@@ -160,33 +162,95 @@ pub fn run_forge_bulk(input: ForgeBulkInput) -> Result<Vec<PathBuf>> {
         items.push(plan);
     }
 
-    // Stage 6 — launch drivers (capped) + serialized conclude.
+    // Stage 6 — phase A: run every item's agents (capped, abortable). Phase B:
+    // conclude serially on the main terminal (no listener → clean prompts).
     let cap = input
         .concurrency
         .unwrap_or(cfg.forge.bulk_concurrency)
         .max(1);
     let scrutiny_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scrutiny"));
-    let conclude = Mutex::new(());
     let dry = input.dry;
-    let cfg_ref = &cfg;
     let bin = scrutiny_bin.as_path();
-    let conclude_ref = &conclude;
 
-    let results = run_pool(items.clone(), cap, |item| {
-        let res = run_one_item(&item, cfg_ref, bin, headless, dry, conclude_ref)
-            .map_err(|e| e.to_string());
-        (item.id.clone(), res)
-    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let children: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
 
+    // `q` abort listener owns stdin for the whole of phase A.
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener = spawn_quit_listener(cancel.clone(), stop.clone());
+    if listener.is_some() {
+        eprintln!(
+            "scrutiny forge bulk: running {} item(s) — press q to abort all agents",
+            items.len()
+        );
+    }
+
+    // Phase A.
+    {
+        let cancel_ref = &cancel;
+        let children_ref = &children;
+        run_pool(items.clone(), cap, |item| {
+            let res = run_item_agents(&item, bin, headless, dry, cancel_ref, children_ref)
+                .map_err(|e| e.to_string());
+            (item.id.clone(), res)
+        });
+    }
+
+    // Release stdin before any interactive prompt below.
+    stop.store(true, Ordering::Relaxed);
+    if let Some(h) = listener {
+        let _ = h.join();
+    }
+
+    // Aborted: kill agents first, then ask about cleanup.
+    if cancel.load(Ordering::Relaxed) {
+        eprintln!("\nscrutiny forge bulk: aborting — killing agents…");
+        for it in &items {
+            if let Some(surface) = &it.surface {
+                if let Err(e) = kill_item_surface(surface) {
+                    eprintln!("  surface {}: {e}", it.id);
+                }
+            }
+        }
+        for (id, mut ch) in children.lock().expect("children lock").drain() {
+            if let Err(e) = ch.kill() {
+                eprintln!("  child {id}: {e}");
+            }
+        }
+        let del = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "Delete the {} worktree(s) + branch(es) created by this run?",
+                items.len()
+            ))
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if del {
+            for it in &items {
+                if let Err(e) = git::remove_worktree(&repo.root, &it.worktree) {
+                    eprintln!("  worktree {}: {e}", it.branch);
+                }
+                if let Err(e) = git::delete_branch(&repo.root, &it.branch) {
+                    eprintln!("  branch {}: {e}", it.branch);
+                }
+            }
+            eprintln!("scrutiny forge bulk: cleanup done");
+        } else {
+            eprintln!("scrutiny forge bulk: kept branches + worktrees");
+        }
+        return Ok(vec![]);
+    }
+
+    // Phase B — serial concludes.
     let mut sessions: Vec<PathBuf> = Vec::new();
     eprintln!("\nscrutiny forge bulk: results");
-    for (id, res) in results {
-        match res {
+    for item in &items {
+        match conclude_item(item, &cfg, headless, dry) {
             Ok(p) => {
-                eprintln!("  ok  {id}");
+                eprintln!("  ok  {}", item.id);
                 sessions.push(p);
             }
-            Err(e) => eprintln!("  ERR {id}: {e}"),
+            Err(e) => eprintln!("  ERR {}: {e}", item.id),
         }
     }
 
@@ -220,6 +284,84 @@ pub fn run_forge_bulk(input: ForgeBulkInput) -> Result<Vec<PathBuf>> {
     }
 
     Ok(sessions)
+}
+
+/// Spawn a background thread that flips `cancel` when the user presses `q`, and
+/// exits when `stop` is set (releasing the terminal). Unix + interactive only;
+/// returns `None` otherwise. Polls stdin so it never blocks holding the tty.
+#[cfg(unix)]
+fn spawn_quit_listener(
+    cancel: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    Some(std::thread::spawn(move || {
+        let _raw = match RawMode::enable() {
+            Some(r) => r,
+            None => return,
+        };
+        let mut buf = [0u8; 1];
+        while !stop.load(Ordering::Relaxed) {
+            let mut fds = libc::pollfd {
+                fd: 0,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let n = unsafe { libc::poll(&mut fds, 1, 200) };
+            if n > 0 && (fds.revents & libc::POLLIN) != 0 {
+                let r = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+                if r == 1 && (buf[0] == b'q' || buf[0] == b'Q') {
+                    cancel.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+    }))
+}
+
+#[cfg(not(unix))]
+fn spawn_quit_listener(
+    _cancel: Arc<AtomicBool>,
+    _stop: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    None
+}
+
+/// RAII terminal raw mode (no echo, no canonical line buffering) so a single
+/// keypress is readable without Enter. Restores the original termios on drop.
+#[cfg(unix)]
+struct RawMode(libc::termios);
+
+#[cfg(unix)]
+impl RawMode {
+    fn enable() -> Option<Self> {
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) != 0 {
+                return None;
+            }
+            let orig = t;
+            t.c_lflag &= !(libc::ICANON | libc::ECHO);
+            t.c_cc[libc::VMIN] = 1;
+            t.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(0, libc::TCSANOW, &t) != 0 {
+                return None;
+            }
+            Some(RawMode(orig))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &self.0);
+        }
+    }
 }
 
 /// Fan `items` across at most `cap` worker threads, collecting each `work`
@@ -259,16 +401,17 @@ where
     rrx.iter().collect()
 }
 
-/// Run one item: launch its driver (into its surface, or a captured headless
-/// child), wait for done, then hold the conclude mutex to ship serially.
-fn run_one_item(
+/// Phase A: launch one item's driver (into its surface, or a captured headless
+/// child registered for kill-on-abort) and wait for it to signal done. Returns
+/// early without error when `cancel` flips.
+fn run_item_agents(
     item: &ItemPlan,
-    cfg: &Config,
     scrutiny_bin: &Path,
     headless: bool,
     dry: bool,
-    conclude: &Mutex<()>,
-) -> Result<PathBuf> {
+    cancel: &AtomicBool,
+    children: &Mutex<HashMap<String, Child>>,
+) -> Result<()> {
     let _ = std::fs::remove_file(&item.done_sentinel);
 
     if headless {
@@ -281,12 +424,37 @@ fn run_one_item(
             c.arg("--dry");
         }
         c.current_dir(&item.worktree);
-        let status = c.status().context("spawn forge-bulk-item")?;
-        if !status.success() {
-            eprintln!(
-                "scrutiny forge bulk: item {} driver exit {} — using disk state",
-                item.id, status
-            );
+        let child = c.spawn().context("spawn forge-bulk-item")?;
+        children
+            .lock()
+            .expect("children lock")
+            .insert(item.id.clone(), child);
+
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let mut guard = children.lock().expect("children lock");
+            let Some(ch) = guard.get_mut(&item.id) else {
+                break; // killed by the abort path
+            };
+            match ch.try_wait().context("wait forge-bulk-item")? {
+                Some(status) => {
+                    guard.remove(&item.id);
+                    drop(guard);
+                    if !status.success() {
+                        eprintln!(
+                            "scrutiny forge bulk: item {} driver exit {} — using disk state",
+                            item.id, status
+                        );
+                    }
+                    break;
+                }
+                None => {
+                    drop(guard);
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            }
         }
     } else {
         let surface = item
@@ -295,23 +463,26 @@ fn run_one_item(
             .context("non-headless item without a surface")?;
         let script = write_driver_script(scrutiny_bin, item, dry)?;
         launch_agent_in_surface(surface, "driver", &script, /* close_on_exit */ !dry)?;
-        let missing = wait_for_sentinels(
+        let missing = wait_for_sentinels_cancellable(
             std::slice::from_ref(&item.done_sentinel),
             Duration::from_secs(BULK_ITEM_WALL_SECS),
+            cancel,
         );
-        if !missing.is_empty() {
+        if !missing.is_empty() && !cancel.load(Ordering::Relaxed) {
             eprintln!(
                 "scrutiny forge bulk: item {} did not signal done within {}s — using disk state",
                 item.id, BULK_ITEM_WALL_SECS
             );
         }
     }
+    Ok(())
+}
 
-    // Serialized conclude on the main terminal.
-    let _guard = conclude.lock().expect("conclude lock");
-    let ticket: TicketReport =
-        serde_json::from_str(&std::fs::read_to_string(&item.ticket_path)?)
-            .with_context(|| format!("read {}", item.ticket_path.display()))?;
+/// Phase B: conclude one item on the main terminal (interactive ship unless
+/// headless). Serial across items, so no locking needed.
+fn conclude_item(item: &ItemPlan, cfg: &Config, headless: bool, dry: bool) -> Result<PathBuf> {
+    let ticket: TicketReport = serde_json::from_str(&std::fs::read_to_string(&item.ticket_path)?)
+        .with_context(|| format!("read {}", item.ticket_path.display()))?;
 
     if dry {
         eprintln!("\n===== [dry] {} — would ship =====", item.id);
@@ -334,7 +505,6 @@ fn run_one_item(
             &ticket,
         )?;
     }
-    drop(_guard);
     Ok(item.session_root.clone())
 }
 

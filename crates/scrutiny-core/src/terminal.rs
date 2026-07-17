@@ -30,9 +30,45 @@ pub enum ItemSurface {
     Apple { window_id: String },
 }
 
+/// Intra-process half of the focus serialization (see [`focus_guard`]).
+static TERM_LAUNCH: Mutex<()> = Mutex::new(());
+
 /// Serializes focus-dependent launches (zellij tab focus, Terminal.app) so a
 /// pane never lands in the wrong container when items launch concurrently.
-static TERM_LAUNCH: Mutex<()> = Mutex::new(());
+///
+/// A per-process mutex alone is not enough: bulk spawns the real agents from
+/// separate child driver processes, so `TERM_LAUNCH` in one process cannot see
+/// the others. We also hold an `flock` on a shared lockfile — cross-process, and
+/// auto-released when the fd closes on process death (no stale locks).
+struct FocusGuard {
+    _proc: std::sync::MutexGuard<'static, ()>,
+    #[cfg(unix)]
+    _lock: Option<std::fs::File>,
+}
+
+fn focus_guard() -> FocusGuard {
+    let _proc = TERM_LAUNCH.lock().expect("term launch lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(std::env::temp_dir().join("scrutiny-term-focus.lock"))
+            .ok();
+        if let Some(f) = &lock {
+            unsafe {
+                libc::flock(f.as_raw_fd(), libc::LOCK_EX);
+            }
+        }
+        FocusGuard { _proc, _lock: lock }
+    }
+    #[cfg(not(unix))]
+    {
+        FocusGuard { _proc }
+    }
+}
 
 /// Detect the active terminal surface from the environment.
 ///
@@ -164,7 +200,7 @@ pub fn open_item_surface(ctx: TerminalContext, key: &str, cwd: &Path) -> Result<
             Ok(ItemSurface::Tmux { session })
         }
         TerminalContext::Zellij => {
-            let _g = TERM_LAUNCH.lock().expect("term launch lock");
+            let _g = focus_guard();
             run_argv("zellij", &zellij_open_argv(key, &cwd)).context("zellij new-tab")?;
             Ok(ItemSurface::Zellij { tab: key.to_string() })
         }
@@ -173,6 +209,7 @@ pub fn open_item_surface(ctx: TerminalContext, key: &str, cwd: &Path) -> Result<
             Ok(ItemSurface::ITerm2 { window_id: id })
         }
         TerminalContext::AppleTerminal => {
+            let _g = focus_guard();
             let id = osascript_capture(&apple_open_script(key, &cwd)).unwrap_or_default();
             Ok(ItemSurface::Apple { window_id: id })
         }
@@ -198,7 +235,7 @@ pub fn launch_agent_in_surface(
             Ok(())
         }
         ItemSurface::Zellij { tab } => {
-            let _g = TERM_LAUNCH.lock().expect("term launch lock");
+            let _g = focus_guard();
             run_argv("zellij", &zellij_goto_argv(tab)).context("zellij go-to-tab-name")?;
             run_argv("zellij", &zellij_run_argv(role, &script, close_on_exit))
                 .context("zellij run")?;
@@ -214,8 +251,47 @@ pub fn launch_agent_in_surface(
         ItemSurface::Apple { .. } => {
             // Terminal.app has no clean create-tab-in-window verb — best-effort
             // new window per agent, titled by role.
+            let _g = focus_guard();
             run_argv("osascript", &["-e".to_string(), apple_launch_script(role, &run_cmd)])
                 .context("Terminal.app window")
+        }
+    }
+}
+
+/// Tear down an item container and everything running in it (the agents). Called
+/// on `q` abort. Best-effort per surface — the caller logs and continues.
+pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
+    match surface {
+        ItemSurface::Tmux { session } => {
+            run_argv("tmux", &["kill-session", "-t", session].map(String::from))
+                .context("tmux kill-session")
+        }
+        ItemSurface::Zellij { tab } => {
+            let _g = focus_guard();
+            run_argv("zellij", &zellij_goto_argv(tab)).context("zellij go-to-tab-name")?;
+            run_argv("zellij", &["action", "close-tab"].map(String::from))
+                .context("zellij close-tab")
+        }
+        ItemSurface::ITerm2 { window_id } => {
+            if window_id.is_empty() {
+                return Ok(());
+            }
+            run_argv(
+                "osascript",
+                &["-e".to_string(), format!("tell application \"iTerm\" to close (window id {window_id})")],
+            )
+            .context("iTerm2 close window")
+        }
+        ItemSurface::Apple { window_id } => {
+            if window_id.is_empty() {
+                return Ok(());
+            }
+            let _g = focus_guard();
+            run_argv(
+                "osascript",
+                &["-e".to_string(), format!("tell application \"Terminal\" to close window id {window_id}")],
+            )
+            .context("Terminal.app close window")
         }
     }
 }

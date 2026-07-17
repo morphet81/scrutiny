@@ -545,6 +545,7 @@ dependencies = [
  "dialoguer",
  "flate2",
  "globset",
+ "libc",
  "regex",
  "serde",
  "serde_json",
