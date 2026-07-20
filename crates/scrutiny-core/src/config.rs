@@ -102,9 +102,16 @@ pub struct ParleyConfig {
     /// Verifiers that check fixes actually address comments (before evangelist).
     #[serde(default = "default_parley_verifiers")]
     pub default_verifiers: u32,
-    /// Max push→fail→agent-fix→retry cycles after the initial push attempt.
+    /// Deprecated — retained for back-compat deserialization. See `prepush_fix_max_loops`.
     #[serde(default = "default_parley_push_fix_loops")]
     pub push_fix_max_loops: u32,
+    /// Override command for the quiet pre-push gate. Empty → run the repo's
+    /// actual pre-push hook (`git hook run pre-push`).
+    #[serde(default)]
+    pub prepush_cmd: Option<String>,
+    /// Max scrutiny-runs-checks → fix-agent → re-check cycles in the pre-push gate.
+    #[serde(default = "default_prepush_fix_loops")]
+    pub prepush_fix_max_loops: u32,
 }
 
 fn default_parley_members() -> u32 {
@@ -119,6 +126,9 @@ fn default_parley_verifiers() -> u32 {
 fn default_parley_push_fix_loops() -> u32 {
     2
 }
+fn default_prepush_fix_loops() -> u32 {
+    5
+}
 
 impl Default for ParleyConfig {
     fn default() -> Self {
@@ -127,6 +137,8 @@ impl Default for ParleyConfig {
             default_evangelists: default_parley_evangelists(),
             default_verifiers: default_parley_verifiers(),
             push_fix_max_loops: default_parley_push_fix_loops(),
+            prepush_cmd: None,
+            prepush_fix_max_loops: default_prepush_fix_loops(),
         }
     }
 }
@@ -172,6 +184,10 @@ pub struct ForgeConfig {
     /// Max fix-loops the verify gate runs before it stops and gates the commit.
     #[serde(default = "default_verify_loops")]
     pub verify_max_loops: u32,
+    /// Override command for the pre-push checks appended to the verify gate.
+    /// Empty → run the repo's actual pre-push hook (`git hook run pre-push`).
+    #[serde(default)]
+    pub prepush_cmd: Option<String>,
     /// Gate on coverage % when measurable (auto-derived commands only).
     #[serde(default = "default_true")]
     pub verify_coverage: bool,
@@ -208,7 +224,7 @@ fn default_reviewers_1() -> u32 {
     1
 }
 fn default_verify_loops() -> u32 {
-    2
+    5
 }
 fn default_branch_headless() -> String {
     "auto".into()
@@ -238,6 +254,7 @@ impl Default for ForgeConfig {
             default_evangelists: 0,
             verify_commands: Vec::new(),
             verify_max_loops: default_verify_loops(),
+            prepush_cmd: None,
             verify_coverage: true,
             enable_branch: true,
             branch_headless: default_branch_headless(),

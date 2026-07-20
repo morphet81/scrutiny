@@ -18,6 +18,7 @@ pub mod parley_cmd;
 pub mod paths;
 pub mod plan;
 pub mod pr;
+pub mod prepush;
 pub mod pr_cmd;
 pub mod review_cmd;
 pub mod review_session;

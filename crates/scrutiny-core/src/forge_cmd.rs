@@ -23,7 +23,7 @@ use crate::forge::scaffold;
 use crate::forge::tools::playwright_cli_available;
 use crate::forge::verify::{
     build_verify_plan, coverage_gaps, filter_playwright_cmd, measure_coverage, parse_test_failures,
-    raw_tail, run_command, FailureReport, VerifyPlan,
+    raw_tail, run_command, FailureReport, VerifyCmd, VerifyPlan,
 };
 use crate::git::{self, git_stdout};
 use crate::paths::{prepare_artifacts, write_json_pretty};
@@ -367,7 +367,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
     let (_brief, brief_path) =
         run_forge_brief(&ticket_path, Some(&session_path), Some(&context_path))?;
 
-    let verify_plan = build_verify_plan(
+    let mut verify_plan = build_verify_plan(
         &cwd,
         &cfg.forge.verify_commands,
         &cx.test_harness,
@@ -376,6 +376,16 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         session.coverage_pct,
         cfg.forge.verify_max_loops,
     );
+    // Cover the repo's pre-push checks in the gate (forge doesn't push, so the
+    // hook is our only guard that the branch would survive a push).
+    if let Some(cmd) =
+        crate::prepush::resolve_prepush_command(&cwd, cfg.forge.prepush_cmd.as_deref())
+    {
+        verify_plan.commands.push(VerifyCmd {
+            command: cmd,
+            framework: None,
+        });
+    }
 
     let pr_meta_path = session_root.join("pr.json");
     let target = AgentTarget {
@@ -887,6 +897,7 @@ fn build_test_plan_prompt(
 ) -> String {
     let mut p = String::new();
     p.push_str("You are a test planner. Do NOT implement production code.\n");
+    p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
     p.push_str("Read these paths only:\n");
     p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
     p.push_str(&format!("- session: {}\n", session_path.display()));
@@ -1003,6 +1014,7 @@ fn build_implement_prompt(
              Do not invent ticket facts — read local files only.\n",
         );
     }
+    p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
     p.push_str("\nRead:\n");
     p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
     p.push_str(&format!("- session: {}\n", session_path.display()));
@@ -1266,7 +1278,9 @@ fn build_verify_fix_prompt(
     let mut p = String::new();
     p.push_str(
         "The previous attempt failed the verify gate. Fix ONLY what is listed below.\n\
-         Do NOT weaken, skip, or delete tests. Do NOT commit, push, or open a PR.\n",
+         Do NOT weaken, skip, or delete tests. Do NOT commit, push, or open a PR.\n\
+         Do NOT run the tests, lint, build, or any check command yourself — \
+         scrutiny re-runs them and verifies your fix.\n",
     );
     p.push_str("\nContext (already on disk — read only if needed):\n");
     p.push_str(&format!("- ticket: {}\n", ticket_path.display()));

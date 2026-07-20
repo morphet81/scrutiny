@@ -27,6 +27,7 @@ use crate::parley::plan::{
 };
 use crate::parley::reply::{run_parley_reply, ParleyReplyInput};
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
+use crate::prepush;
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{resolve_terminal, TerminalContext};
 
@@ -202,7 +203,8 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             skip_prompts: input.non_interactive,
             client: &detected,
             model: &plan.model,
-            push_fix_max_loops: cfg.parley.push_fix_max_loops,
+            prepush_cmd: cfg.parley.prepush_cmd.clone(),
+            prepush_fix_max_loops: cfg.parley.prepush_fix_max_loops,
         })?;
         eprintln!("scrutiny parley: post thread replies…");
         let (result, reply_path) = run_parley_reply(ParleyReplyInput {
@@ -567,8 +569,10 @@ fn build_member_prompt(
     p.push_str(&format!(
         "You are parley member #{index}. Address ONLY the PR review comments listed below.\n\
          Do NOT git commit, git push, or call gh to reply — the host script does that.\n\
-         Do NOT touch comments outside your assignment.\n\n"
+         Do NOT touch comments outside your assignment.\n"
     ));
+    p.push_str(prepush::PREPUSH_OWNERSHIP);
+    p.push('\n');
     if team_verify {
         p.push_str(
             "After fixing, do a clean-code / consistency pass on touched files before writing fixes.\n\n",
@@ -596,8 +600,10 @@ fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFil
     p.push_str(
         "You are the parley team lead. Spawn/coordinate member agents for each bucket below \
          (or do the work yourself if you cannot spawn). Cover EVERY thread.\n\
-         Do NOT git commit, git push, or call gh to reply — the host script does that.\n\n",
+         Do NOT git commit, git push, or call gh to reply — the host script does that.\n",
     );
+    p.push_str(prepush::PREPUSH_OWNERSHIP);
+    p.push('\n');
     if plan.evangelists > 0 {
         p.push_str(&format!(
             "Also perform {} evangelist-style verify pass(es) on touches (architecture/consistency) before finishing.\n\n",
@@ -698,7 +704,8 @@ struct ParleyShipInput<'a> {
     skip_prompts: bool,
     client: &'a crate::runtime::DetectedClient,
     model: &'a str,
-    push_fix_max_loops: u32,
+    prepush_cmd: Option<String>,
+    prepush_fix_max_loops: u32,
 }
 
 struct PushAttempt {
@@ -857,67 +864,97 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
+    // Scrutiny owns the checks: run the pre-push hook quietly before pushing,
+    // fixing via agent up to N times. On green, push with --no-verify so the
+    // hook does not re-run (no redundant multi-minute rerun, no terminal flood).
+    run_parley_prepush_gate(
+        cwd,
+        session_root,
+        input.client,
+        input.model,
+        input.prepush_cmd.as_deref(),
+        input.prepush_fix_max_loops,
+    )?;
+
     let push_args: Vec<&str> = if upstream.is_some() {
-        vec!["push"]
+        vec!["push", "--no-verify"]
     } else {
-        vec!["push", "-u", "origin", "HEAD"]
+        vec!["push", "--no-verify", "-u", "origin", "HEAD"]
     };
-    let max_fix = input.push_fix_max_loops;
-    // Total push attempts = 1 initial + max_fix retries after agent
-    let max_push_attempts = 1 + max_fix;
+    let dest = match upstream {
+        Some(ref up) => up.clone(),
+        None => "origin (git push -u)".to_string(),
+    };
+    let sp = crate::spinner::Spinner::start(format!("git push {branch} → {dest}"));
+    let log_path = session_root.join("push.log");
+    let result = run_git_push_tee(cwd, &push_args, &log_path)?;
+    if result.ok {
+        sp.stop_ok("push complete");
+        return Ok(());
+    }
+    sp.stop_fail(format!(
+        "push failed (exit {}) — log {}",
+        result.exit_code,
+        result.log_path.display()
+    ));
+    // Checks already passed, so a failure here is auth/network — short tail only.
+    let hint = if is_non_fixable_push_error(&result.log) {
+        "auth/remote error"
+    } else {
+        "unexpected push error"
+    };
+    bail!(
+        "git push failed ({hint}, exit {}) — see {}\n{}",
+        result.exit_code,
+        result.log_path.display(),
+        push_log_tail(&result.log, 800)
+    );
+}
 
-    for attempt in 1..=max_push_attempts {
-        let dest = match upstream {
-            Some(ref up) => up.clone(),
-            None => "origin (git push -u)".to_string(),
-        };
-        let sp = crate::spinner::Spinner::start(format!(
-            "git push {branch} → {dest} — running pre-push hooks (attempt {attempt}/{max_push_attempts})"
-        ));
-
-        let log_path = session_root.join(format!("push-attempt-{attempt}.log"));
-        let result = run_git_push_tee(cwd, &push_args, &log_path)?;
-        if result.ok {
-            sp.stop_ok("push complete");
+/// Quietly run the repo's pre-push checks; on failure spawn a fix agent that
+/// works only from the logged findings, commit its changes, and re-run — up to
+/// `max_loops` cycles. Ok when green (or when the repo has no pre-push hook).
+fn run_parley_prepush_gate(
+    cwd: &Path,
+    session_root: &Path,
+    client: &crate::runtime::DetectedClient,
+    model: &str,
+    prepush_cmd: Option<&str>,
+    max_loops: u32,
+) -> Result<()> {
+    let Some(cmd) = prepush::resolve_prepush_command(cwd, prepush_cmd) else {
+        eprintln!("scrutiny parley: no pre-push hook — skipping pre-push gate");
+        return Ok(());
+    };
+    let max = max_loops.max(1);
+    for attempt in 1..=max {
+        let sp =
+            crate::spinner::Spinner::start(format!("pre-push checks (attempt {attempt}/{max})"));
+        let log_path = session_root.join(format!("prepush-check-{attempt}.log"));
+        let res = prepush::run_checks_to_log(cwd, &cmd, &log_path)
+            .with_context(|| format!("write {}", log_path.display()))?;
+        if res.ok {
+            sp.stop_ok("pre-push checks green");
             return Ok(());
         }
         sp.stop_fail(format!(
-            "push failed (exit {}) — log {}",
-            result.exit_code,
-            result.log_path.display()
+            "pre-push checks failed (exit {}) — log {}",
+            res.exit_code,
+            res.log_path.display()
         ));
-
-        // Log is on disk; show a short tail so the failure is visible at a glance.
-        eprintln!(
-            "scrutiny parley: push log (tail)\n{}",
-            push_log_tail(&result.log, 2_000)
-        );
-
-        if is_non_fixable_push_error(&result.log) {
+        if attempt == max {
             bail!(
-                "git push failed with auth/remote error (exit {}) — not spawning fix agent. See {}",
-                result.exit_code,
-                result.log_path.display()
+                "pre-push checks still failing after {max} attempt(s) — see {}",
+                res.log_path.display()
             );
         }
-
-        // No more fix cycles after this push attempt
-        if attempt >= max_push_attempts {
-            bail!(
-                "git push failed (exit {}) after {max_push_attempts} attempt(s) — see {}",
-                result.exit_code,
-                result.log_path.display()
-            );
-        }
-
-        let fix_n = attempt; // 1-based fix cycle matching failed push attempt
         eprintln!(
-            "scrutiny parley: push failed — spawning fix agent (attempt {fix_n}/{max_fix})…"
+            "scrutiny parley: pre-push failed — spawning fix agent (attempt {attempt}/{max})…"
         );
-        let prompt = build_push_fix_prompt(&result.log_path, &result.log);
+        let prompt = prepush::build_prepush_fix_prompt(&res.log_path);
         let out = run_headless(
-            input.client,
-            input.model,
+            client,
+            model,
             cwd,
             &prompt,
             HeadlessKind::Parley,
@@ -925,37 +962,20 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
             Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
         )?;
         if out.code != 0 && !out.timed_out {
-            eprintln!(
-                "scrutiny parley: fix agent exit {} — checking for changes",
-                out.code
-            );
+            eprintln!("scrutiny parley: fix agent exit {} — re-checking", out.code);
         }
-
         let dirty = git_stdout(cwd, &["status", "--porcelain"])?;
         if dirty.trim().is_empty() {
-            eprintln!("scrutiny parley: fix agent left tree clean — retrying push anyway");
+            eprintln!("scrutiny parley: fix agent left tree clean — re-checking anyway");
         } else {
             host_commit(cwd, session_root, "fix: repair pre-push failures")?;
         }
     }
-
-    unreachable!("loop returns on success or bails")
+    unreachable!("loop returns green or bails on final attempt")
 }
 
-fn build_push_fix_prompt(log_path: &Path, log: &str) -> String {
-    let tail = push_log_tail(log, 12_000);
-    format!(
-        "git push failed (likely a pre-push hook: tests, lint, or typecheck).\n\
-         Fix ONLY what blocks the push. Do NOT weaken, skip, or delete tests.\n\
-         Do NOT git commit, git push, or call gh — the host script will commit and retry push.\n\n\
-         Full push log on disk:\n- {}\n\n\
-         ### Push log (tail)\n```\n{}\n```\n",
-        log_path.display(),
-        tail
-    )
-}
-
-/// Run `git <args>`, stream stdout+stderr to the terminal, write combined log to `log_path`.
+/// Run `git <args>` quietly, writing combined stdout+stderr to `log_path` only
+/// (no terminal echo — a spinner covers the wait).
 fn run_git_push_tee(cwd: &Path, args: &[&str], log_path: &Path) -> Result<PushAttempt> {
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)
