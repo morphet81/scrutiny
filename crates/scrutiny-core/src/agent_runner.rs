@@ -24,6 +24,8 @@ const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
 pub enum HeadlessKind {
     /// Read-focused specialist (no team spawn).
     Isolated,
+    /// Consolidator: dedupe isolated findings, keep higher severity. Read-only + findings schema.
+    Consolidate,
     /// Lead agent may spawn a team.
     TeamLead,
     /// Follow-up Q&A.
@@ -212,7 +214,10 @@ pub fn run_headless(
                 .arg("--workspace")
                 .arg(cwd);
             match kind {
-                HeadlessKind::Isolated | HeadlessKind::Ask | HeadlessKind::Text => {
+                HeadlessKind::Isolated
+                | HeadlessKind::Consolidate
+                | HeadlessKind::Ask
+                | HeadlessKind::Text => {
                     cmd.arg("--mode").arg("ask");
                 }
                 HeadlessKind::TeamLead | HeadlessKind::Forge | HeadlessKind::Parley => {}
@@ -243,7 +248,7 @@ pub fn run_headless(
                 cmd.arg("--dangerously-skip-permissions");
             }
             match kind {
-                HeadlessKind::Isolated | HeadlessKind::Ask => {
+                HeadlessKind::Isolated | HeadlessKind::Consolidate | HeadlessKind::Ask => {
                     cmd.arg("--allowedTools")
                         .arg("Read")
                         .arg("--json-schema")
@@ -789,6 +794,41 @@ Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
     )
 }
 
+/// Consolidation agent prompt (isolated mode). Input = the raw findings from
+/// all reviewers; output = the same JSON shape, semantically deduped.
+pub fn build_consolidation_prompt(findings_json: &str, pack_path: &Path) -> String {
+    format!(
+        r#"Scrutiny consolidator. ISOLATED mode. Input = raw findings from all reviewers. You dedupe. You do not review.
+
+STYLE (mandatory):
+- Load + follow **caveman skill** if present (skill `name: caveman`, `/caveman ultra`).
+- Intensity: **ultra**. Terse. No fluff. Substance stay. Normal pronouns (`I`/`you`).
+- Finding text in output JSON: caveman ultra. Never announce style.
+
+Pack (reference only — Read to disambiguate a duplicate if needed): `{pack}`
+
+## Rules (mandatory)
+
+1. Merge findings that describe the **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently by different reviewers.
+2. On duplicates with differing `severity`, keep the **higher** one. Rank: critical > warning > suggestion.
+3. Do **NOT** invent new findings. Do **NOT** change anchors. Do **NOT** drop a unique finding. Consolidate only.
+4. Every kept finding must retain `path` + `line`.
+5. Prefer the clearest `title`/`explanation`/`proposed_fix` among merged duplicates.
+
+## Input findings
+{findings}
+
+## Output
+JSON ONLY (no prose outside JSON):
+{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
+
+Nothing to merge → return the input findings unchanged. Empty input → {{"findings":[]}}.
+"#,
+        pack = pack_path.display(),
+        findings = findings_json,
+    )
+}
+
 pub fn build_ask_prompt(context: &str, question: &str) -> String {
     format!(
         "Clarify code-review finding.\n\n\
@@ -833,15 +873,21 @@ fn nonheadless_findings_suffix(out_path: &Path) -> String {
 }
 
 /// Collate a vec of `AgentRunResult` into a deduped `ReviewReport` and write it.
+///
+/// Isolated-only path: after a cheap Rust dedupe pass, an LLM consolidation
+/// agent semantically merges what the heuristic missed (keeps higher severity).
 fn collate_review_report(
     agents: Vec<AgentRunResult>,
     spawn_mode: &str,
+    client: &DetectedClient,
     model: &str,
-    client: &str,
+    pack_path: &Path,
+    cwd: &Path,
 ) -> Result<(ReviewReport, PathBuf)> {
     let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum();
     let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
-    let findings = dedupe_findings(&mut all);
+    let deduped = dedupe_findings(&mut all);
+    let findings = consolidate_findings(client, model, pack_path, cwd, deduped);
     let report = ReviewReport {
         version: 1,
         spawn_mode: spawn_mode.to_string(),
@@ -850,9 +896,63 @@ fn collate_review_report(
         agents,
         deduped_from: raw_count,
     };
-    let out = temp_artifact_path(client, "review", "report");
+    let out = temp_artifact_path(&client.client, "review", "report");
     write_json_pretty(&out, &report)?;
     Ok((report, out))
+}
+
+/// Spawn one headless consolidation agent to semantically dedupe isolated
+/// findings. Falls back to the input list on any failure (empty/parse/auth) or
+/// when `SCRUTINY_NO_CONSOLIDATE` is set. No-op for <=1 finding.
+fn consolidate_findings(
+    client: &DetectedClient,
+    model: &str,
+    pack_path: &Path,
+    cwd: &Path,
+    findings: Vec<AgentFinding>,
+) -> Vec<AgentFinding> {
+    if findings.len() <= 1 || std::env::var_os("SCRUTINY_NO_CONSOLIDATE").is_some() {
+        return findings;
+    }
+    let findings_json = match serde_json::to_string(&serde_json::json!({ "findings": &findings })) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("scrutiny: consolidate: serialize failed ({e}) — using Rust-deduped findings");
+            return findings;
+        }
+    };
+    let prompt = build_consolidation_prompt(&findings_json, pack_path);
+    eprintln!("scrutiny: consolidating {} findings…", findings.len());
+    match run_headless(
+        client,
+        model,
+        cwd,
+        &prompt,
+        HeadlessKind::Consolidate,
+        "consolidator",
+        Duration::from_secs(AGENT_WALL_SECS),
+    ) {
+        Ok(out) => {
+            if let Some(err) = claude_error_message(&out.stdout) {
+                eprintln!("scrutiny: consolidate: agent error ({err}) — using Rust-deduped findings");
+                return findings;
+            }
+            match parse_findings_json(&out.stdout, "consolidator") {
+                Ok(f) if !f.is_empty() => {
+                    eprintln!("scrutiny: consolidated {} → {} findings", findings.len(), f.len());
+                    f
+                }
+                _ => {
+                    eprintln!("scrutiny: consolidate: empty/unparseable output — using Rust-deduped findings");
+                    findings
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("scrutiny: consolidate: spawn failed ({e:#}) — using Rust-deduped findings");
+            findings
+        }
+    }
 }
 
 /// Run isolated parallel specialists; collate + dedupe into ReviewReport.
@@ -931,7 +1031,7 @@ pub fn run_isolated_review(
             }
             agents.push(AgentRunResult { role, index, paths, findings, ok, stderr });
         }
-        return collate_review_report(agents, "isolated", &plan.model, &plan.client);
+        return collate_review_report(agents, "isolated", client, &plan.model, pack_path, cwd);
     }
 
     let wall = Duration::from_secs(AGENT_WALL_SECS);
@@ -1105,7 +1205,7 @@ pub fn run_isolated_review(
         );
     }
 
-    collate_review_report(agents, "isolated", &plan.model, &plan.client)
+    collate_review_report(agents, "isolated", client, &plan.model, pack_path, cwd)
 }
 
 pub fn run_team_review(
@@ -1418,5 +1518,16 @@ mod tests {
         assert!(!p.contains("Scrutiny performance specialist"));
         assert!(p.contains("higher") && p.contains("severity"));
         assert!(p.contains("Wait for **ALL** members"));
+    }
+
+    #[test]
+    fn consolidation_prompt_has_severity_rule() {
+        let raw = r#"{"findings":[{"path":"a.rs","line":1,"title":"t","severity":"warning"}]}"#;
+        let p = build_consolidation_prompt(raw, Path::new("/tmp/pack.json"));
+        assert!(p.contains("consolidator") || p.contains("Consolidator"));
+        assert!(p.contains("higher") && p.contains("severity"));
+        assert!(p.contains("critical > warning > suggestion"));
+        assert!(p.contains(r#""findings":["#));
+        assert!(p.contains(raw));
     }
 }
