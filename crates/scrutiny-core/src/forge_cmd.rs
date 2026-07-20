@@ -496,8 +496,10 @@ fn generate_custom_pr_body(
     let prompt = format!(
         "{prompt_tmpl}\n\n\
          Write the pull-request description body for the change below.\n\
-         Output ONLY the PR body as Markdown — no code fences around the whole thing, \
-         no preamble, no commentary.\n\n\
+         Output ONLY the PR body as GitHub-flavored Markdown — no code fences around the \
+         whole thing, no preamble, no commentary. Structure it with short `##` sections, \
+         paragraphs separated by blank lines, `-` bullet lists, and `**bold**` for emphasis; \
+         never one unbroken block of text.\n\n\
          ## Ticket\n{id} — {title}\n{desc}\n\n\
          ## Diff\n```diff\n{diff}\n```\n",
         id = ticket.id.trim(),
@@ -1064,8 +1066,10 @@ fn build_implement_prompt(
     );
     p.push_str(&format!(
         "- pr_title: short PR title for this branch.\n\
-         - pr_body: PR description based on the ticket. Must reference the ticket URL below \
-         (that URL only — do not invent or link a different ticket).\n\
+         - pr_body: PR description in GitHub-flavored Markdown. Use short `##` sections \
+         (e.g. Summary, Changes, Testing), paragraphs separated by blank lines, `-` bullet \
+         lists, and `**bold**` for emphasis — never one unbroken block of text. Must reference \
+         the ticket URL below (that URL only — do not invent or link a different ticket).\n\
          - commit_subject / commit_body: conventional commit message for one final commit \
          the host script will create. commit_subject MUST start with the prefix `{prefix}:` \
          (the host already picked this prefix).\n"

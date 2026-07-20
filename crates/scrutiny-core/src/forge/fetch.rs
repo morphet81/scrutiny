@@ -443,42 +443,157 @@ fn extract_jira_description(raw: &Value) -> String {
     }
 }
 
+/// Render Atlassian Document Format (ADF) into GitHub-flavored Markdown so PR
+/// bodies and comments keep their structure (headings, paragraphs, lists,
+/// emphasis) instead of collapsing into one plain-text block.
 fn flatten_adf_text(v: &Value) -> String {
     let mut out = String::new();
-    flatten_adf_rec(v, &mut out);
-    out
+    render_adf(v, &mut out, "");
+    // Collapse runs of 3+ newlines to a single blank line, then trim edges.
+    let mut cleaned = String::with_capacity(out.len());
+    let mut nl = 0usize;
+    for ch in out.chars() {
+        if ch == '\n' {
+            nl += 1;
+            if nl <= 2 {
+                cleaned.push(ch);
+            }
+        } else {
+            nl = 0;
+            cleaned.push(ch);
+        }
+    }
+    cleaned.trim().to_string()
 }
 
-fn flatten_adf_rec(v: &Value, out: &mut String) {
+/// Recursively render an ADF node. `prefix` is prepended to every line the node
+/// produces (used for blockquotes); block nodes end with a blank line.
+fn render_adf(v: &Value, out: &mut String, prefix: &str) {
     match v {
-        Value::String(s) => {
-            if !out.is_empty() && !out.ends_with('\n') {
-                out.push(' ');
-            }
-            out.push_str(s);
-        }
+        Value::String(s) => out.push_str(s),
         Value::Array(arr) => {
             for item in arr {
-                flatten_adf_rec(item, out);
+                render_adf(item, out, prefix);
             }
         }
         Value::Object(map) => {
-            if let Some(t) = map.get("type").and_then(|x| x.as_str()) {
-                if t == "paragraph" || t == "heading" || t == "listItem" {
-                    if !out.is_empty() && !out.ends_with('\n') {
+            let node_type = map.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            match node_type {
+                "text" => {
+                    let text = map.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                    out.push_str(&apply_marks(text, map.get("marks")));
+                }
+                "hardBreak" => out.push('\n'),
+                "heading" => {
+                    ensure_block_gap(out, prefix);
+                    let level = v
+                        .pointer("/attrs/level")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(2)
+                        .clamp(1, 6) as usize;
+                    out.push_str(prefix);
+                    out.push_str(&"#".repeat(level));
+                    out.push(' ');
+                    render_children(v, out, prefix);
+                    out.push_str("\n\n");
+                }
+                "paragraph" => {
+                    ensure_block_gap(out, prefix);
+                    out.push_str(prefix);
+                    render_children(v, out, prefix);
+                    out.push_str("\n\n");
+                }
+                "bulletList" | "orderedList" => {
+                    ensure_block_gap(out, prefix);
+                    let ordered = node_type == "orderedList";
+                    if let Some(items) = map.get("content").and_then(|c| c.as_array()) {
+                        for (i, item) in items.iter().enumerate() {
+                            out.push_str(prefix);
+                            if ordered {
+                                out.push_str(&format!("{}. ", i + 1));
+                            } else {
+                                out.push_str("- ");
+                            }
+                            let mut inner = String::new();
+                            render_children(item, &mut inner, prefix);
+                            out.push_str(inner.trim());
+                            out.push('\n');
+                        }
+                    }
+                    out.push('\n');
+                }
+                "blockquote" => {
+                    ensure_block_gap(out, prefix);
+                    let quote_prefix = format!("{prefix}> ");
+                    render_children(v, out, &quote_prefix);
+                    out.push('\n');
+                }
+                "codeBlock" => {
+                    ensure_block_gap(out, prefix);
+                    let lang = v
+                        .pointer("/attrs/language")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    out.push_str(&format!("```{lang}\n"));
+                    render_children(v, out, "");
+                    if !out.ends_with('\n') {
                         out.push('\n');
                     }
+                    out.push_str("```\n\n");
                 }
-            }
-            if let Some(text) = map.get("text").and_then(|x| x.as_str()) {
-                out.push_str(text);
-            }
-            if let Some(content) = map.get("content") {
-                flatten_adf_rec(content, out);
+                "rule" => {
+                    ensure_block_gap(out, prefix);
+                    out.push_str("---\n\n");
+                }
+                _ => render_children(v, out, prefix),
             }
         }
         _ => {}
     }
+}
+
+/// Render an object's `content` children.
+fn render_children(map: &Value, out: &mut String, prefix: &str) {
+    if let Some(content) = map.get("content") {
+        render_adf(content, out, prefix);
+    }
+}
+
+/// Ensure the output is at the start of a fresh line with a blank line before a
+/// new block (unless we're already at the very beginning).
+fn ensure_block_gap(out: &mut String, prefix: &str) {
+    if out.is_empty() || out == prefix {
+        return;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+}
+
+/// Wrap `text` with the Markdown emphasis implied by an ADF `marks` array.
+fn apply_marks(text: &str, marks: Option<&Value>) -> String {
+    let Some(marks) = marks.and_then(|m| m.as_array()) else {
+        return text.to_string();
+    };
+    let mut out = text.to_string();
+    for mark in marks {
+        match mark.get("type").and_then(|x| x.as_str()) {
+            Some("strong") => out = format!("**{out}**"),
+            Some("em") => out = format!("*{out}*"),
+            Some("code") => out = format!("`{out}`"),
+            Some("strike") => out = format!("~~{out}~~"),
+            Some("link") => {
+                if let Some(href) = mark.pointer("/attrs/href").and_then(|x| x.as_str()) {
+                    out = format!("[{out}]({href})");
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn extract_jira_comments(raw: &Value) -> Vec<TicketComment> {
@@ -1119,6 +1234,46 @@ mod tests {
         );
         assert_eq!(detect_source("42"), TicketSource::Github);
         assert_eq!(detect_source("do the thing"), TicketSource::Inline);
+    }
+
+    #[test]
+    fn adf_renders_structured_markdown() {
+        let doc = serde_json::json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "heading",
+                    "attrs": { "level": 2 },
+                    "content": [{ "type": "text", "text": "Acceptance Criteria" }]
+                },
+                {
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "Calendar day cells hide meal lines." }]
+                },
+                {
+                    "type": "bulletList",
+                    "content": [
+                        {
+                            "type": "listItem",
+                            "content": [{
+                                "type": "paragraph",
+                                "content": [
+                                    { "type": "text", "text": "Meals with " },
+                                    { "type": "text", "text": "reservations", "marks": [{ "type": "strong" }] },
+                                    { "type": "text", "text": " still show." }
+                                ]
+                            }]
+                        }
+                    ]
+                }
+            ]
+        });
+        let md = flatten_adf_text(&doc);
+        assert!(md.contains("## Acceptance Criteria"), "heading: {md}");
+        assert!(md.contains("\n\n"), "blank-line separation: {md}");
+        assert!(md.contains("- Meals with **reservations** still show."), "bullet+bold: {md}");
+        // Headers no longer glue onto following text.
+        assert!(!md.contains("CriteriaCalendar"), "no glued text: {md}");
     }
 
     #[test]

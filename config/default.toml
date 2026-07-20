@@ -187,7 +187,7 @@ branch_headless = "auto"
 # Optional. When set, a dedicated headless agent writes the PR description from
 # this prompt + the diff (overrides the implement agent's pr_body). Leave unset
 # to keep the default deterministic body.
-# pr_description_prompt = "Summarize for reviewers: what changed, why, risk, test notes."
+# pr_description_prompt = "Summarize for reviewers in structured Markdown (## sections, paragraphs, bullet lists, bold): what changed, why, risk, test notes."
 
 [forge.complexity]
 # Jira field names that hold story-point estimates (tried in order).

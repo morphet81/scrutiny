@@ -226,6 +226,17 @@ mod tests {
     }
 
     #[test]
+    fn pr_body_preserves_markdown_structure() {
+        let mut t = ticket("jira", "PROJ-9", "Title", &[], json!({}));
+        t.description = "## Acceptance Criteria\n\n- Hide empty meal lines".into();
+        t.url = Some("https://jira/browse/PROJ-9".into());
+        assert_eq!(
+            guess_pr_body(&t),
+            "## Acceptance Criteria\n\n- Hide empty meal lines\n\nAddresses [PROJ-9](https://jira/browse/PROJ-9)"
+        );
+    }
+
+    #[test]
     fn pr_body_url_only_when_no_description() {
         let mut t = ticket("jira", "PROJ-9", "Title", &[], json!({}));
         t.url = Some("https://jira/browse/PROJ-9".into());
