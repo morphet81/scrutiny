@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::agent_runner::{
@@ -25,7 +24,10 @@ use crate::forge::verify::{
     build_verify_plan, coverage_gaps, filter_playwright_cmd, measure_coverage, parse_test_failures,
     raw_tail, run_command, FailureReport, VerifyCmd, VerifyPlan,
 };
-use crate::git::{self, git_stdout};
+use crate::git::{
+    self, clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree,
+    WorktreeSnapshot,
+};
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{resolve_terminal, ItemSurface, TerminalContext};
@@ -283,6 +285,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         /* create_pr_noninteractive */ false,
         &prefix,
         &ticket,
+        &outcome.base,
     )?;
 
     eprintln!(
@@ -317,6 +320,9 @@ pub(crate) struct ForgeItemCtx<'a> {
 pub(crate) struct ForgeItemOutcome {
     pub pr_meta_path: PathBuf,
     pub session_path: PathBuf,
+    /// Working-tree snapshot before agents ran; ship commits only paths changed
+    /// since (minus artifacts).
+    pub base: WorktreeSnapshot,
 }
 
 pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome> {
@@ -334,6 +340,9 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         tdd_interactive,
         dry,
     } = ctx;
+
+    // Snapshot before any agent runs so ship commits only agent-authored changes.
+    let base: WorktreeSnapshot = snapshot_worktree(&cwd).unwrap_or_default();
 
     let (_session, session_path) = run_forge_plan_write(ForgePlanWriteInput {
         ticket_path: ticket_path.clone(),
@@ -412,6 +421,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         return Ok(ForgeItemOutcome {
             pr_meta_path,
             session_path,
+            base,
         });
     }
 
@@ -485,6 +495,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
     Ok(ForgeItemOutcome {
         pr_meta_path,
         session_path,
+        base,
     })
 }
 
@@ -898,6 +909,7 @@ fn build_test_plan_prompt(
     let mut p = String::new();
     p.push_str("You are a test planner. Do NOT implement production code.\n");
     p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
+    p.push_str(crate::prepush::NO_ARTIFACTS);
     p.push_str("Read these paths only:\n");
     p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
     p.push_str(&format!("- session: {}\n", session_path.display()));
@@ -1015,6 +1027,7 @@ fn build_implement_prompt(
         );
     }
     p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
+    p.push_str(crate::prepush::NO_ARTIFACTS);
     p.push_str("\nRead:\n");
     p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
     p.push_str(&format!("- session: {}\n", session_path.display()));
@@ -1341,6 +1354,7 @@ fn load_pr_meta(path: &Path) -> Result<PrMeta> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_forge_ship(
     cwd: &Path,
     session_root: &Path,
@@ -1350,6 +1364,7 @@ pub(crate) fn run_forge_ship(
     create_pr_noninteractive: bool,
     prefix: &str,
     ticket: &TicketReport,
+    base: &WorktreeSnapshot,
 ) -> Result<()> {
     let meta = load_pr_meta(pr_meta_path)?;
     eprintln!(
@@ -1383,22 +1398,20 @@ pub(crate) fn run_forge_ship(
         bail!("commit subject empty");
     }
 
-    let status = git_stdout(cwd, &["status", "--porcelain"])?;
-    if status.trim().is_empty() {
-        eprintln!("scrutiny forge: working tree clean — skip commit");
+    // Commit only agent-authored changes — skip build/test artifacts (agent
+    // coverage dirs, verify-gate byproducts) and any pre-existing WIP.
+    let (to_stage, skipped) = paths_changed_since(cwd, base, &cfg.git.artifact_globs)?;
+    if !skipped.is_empty() {
+        let sample: Vec<&str> = skipped.iter().take(3).map(|s| s.as_str()).collect();
+        eprintln!(
+            "scrutiny forge: skipped {} build/test artifact path(s) (e.g. {})",
+            skipped.len(),
+            sample.join(", ")
+        );
+    }
+    if to_stage.is_empty() {
+        eprintln!("scrutiny forge: no agent changes to commit");
     } else {
-        let add = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(cwd)
-            .output()
-            .context("git add -A")?;
-        if !add.status.success() {
-            bail!(
-                "git add -A failed: {}",
-                String::from_utf8_lossy(&add.stderr).trim()
-            );
-        }
-
         let mut msg = commit_subject.clone();
         let body = meta.commit_body.trim();
         if !body.is_empty() {
@@ -1409,22 +1422,22 @@ pub(crate) fn run_forge_ship(
             msg.push('\n');
         }
         let msg_path = session_root.join("commit-msg.txt");
-        fs::write(&msg_path, &msg)
-            .with_context(|| format!("write {}", msg_path.display()))?;
+        fs::write(&msg_path, &msg).with_context(|| format!("write {}", msg_path.display()))?;
 
-        let commit = Command::new("git")
-            .args(["commit", "-F"])
-            .arg(&msg_path)
-            .current_dir(cwd)
-            .output()
-            .context("git commit")?;
-        if !commit.status.success() {
-            bail!(
-                "git commit failed: {}",
-                String::from_utf8_lossy(&commit.stderr).trim()
+        if commit_paths(cwd, &msg_path, &to_stage)? {
+            eprintln!("scrutiny forge: committed — {commit_subject}");
+        }
+    }
+
+    // Wipe artifacts / verify-gate byproducts left dirty, preserving pre-existing WIP.
+    if let Ok((leftover, _)) = paths_changed_since(cwd, base, &[]) {
+        if !leftover.is_empty() {
+            let _ = clean_paths(cwd, &leftover);
+            eprintln!(
+                "scrutiny forge: cleaned {} build/test byproduct path(s) from the working tree",
+                leftover.len()
             );
         }
-        eprintln!("scrutiny forge: committed — {commit_subject}");
     }
 
     let suggested_title = {

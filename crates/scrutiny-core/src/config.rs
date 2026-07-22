@@ -112,6 +112,12 @@ pub struct ParleyConfig {
     /// Max scrutiny-runs-checks → fix-agent → re-check cycles in the pre-push gate.
     #[serde(default = "default_prepush_fix_loops")]
     pub prepush_fix_max_loops: u32,
+    /// Wall-clock seconds for each pre-push fix agent in the gate.
+    #[serde(default = "default_prepush_fix_wall_secs")]
+    pub prepush_fix_wall_secs: u64,
+    /// Wall-clock seconds for each member / verifier / evangelist agent.
+    #[serde(default = "default_agent_wall_secs")]
+    pub agent_wall_secs: u64,
 }
 
 fn default_parley_members() -> u32 {
@@ -129,6 +135,12 @@ fn default_parley_push_fix_loops() -> u32 {
 fn default_prepush_fix_loops() -> u32 {
     5
 }
+fn default_prepush_fix_wall_secs() -> u64 {
+    1200
+}
+fn default_agent_wall_secs() -> u64 {
+    600
+}
 
 impl Default for ParleyConfig {
     fn default() -> Self {
@@ -139,6 +151,8 @@ impl Default for ParleyConfig {
             push_fix_max_loops: default_parley_push_fix_loops(),
             prepush_cmd: None,
             prepush_fix_max_loops: default_prepush_fix_loops(),
+            prepush_fix_wall_secs: default_prepush_fix_wall_secs(),
+            agent_wall_secs: default_agent_wall_secs(),
         }
     }
 }
@@ -540,6 +554,27 @@ fn default_max_evangelists_cap() -> u32 {
 pub struct GitConfig {
     pub base_candidates: Vec<String>,
     pub exclude_globs: Vec<String>,
+    /// Build/test artifact globs never staged by parley/forge commits (they are
+    /// cleaned from the working tree instead). Guards against agent-created
+    /// coverage dirs and similar leftovers that are not gitignored.
+    #[serde(default = "default_artifact_globs")]
+    pub artifact_globs: Vec<String>,
+}
+
+fn default_artifact_globs() -> Vec<String> {
+    [
+        "coverage-*/*",
+        "coverage/*",
+        ".nyc_output/*",
+        ".vitest/*",
+        "playwright-report/*",
+        "test-results/*",
+        "*.tsbuildinfo",
+        "*.log",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1196,6 +1231,30 @@ mod tests {
         // global first, then agent, blank-line joined.
         assert_eq!(both.prefix_for("reviewer"), "G\n\nR");
         assert_eq!(both.prefix_for("security"), "G");
+    }
+
+    #[test]
+    fn parley_timeout_defaults_and_override() {
+        // Defaults match the documented values.
+        let d = ParleyConfig::default();
+        assert_eq!(d.prepush_fix_wall_secs, 1200);
+        assert_eq!(d.agent_wall_secs, 600);
+
+        // Shipped default.toml round-trips the defaults.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, DEFAULT_TOML).unwrap();
+        let cfg = load_config(&path).unwrap();
+        assert_eq!(cfg.parley.prepush_fix_wall_secs, 1200);
+        assert!(!cfg.git.artifact_globs.is_empty());
+
+        // Missing field falls back to the serde default.
+        let partial: ParleyConfig = toml::from_str("default_members = 2").unwrap();
+        assert_eq!(partial.prepush_fix_wall_secs, 1200);
+        // A user override is honored.
+        let overridden: ParleyConfig =
+            toml::from_str("prepush_fix_wall_secs = 300").unwrap();
+        assert_eq!(overridden.prepush_fix_wall_secs, 300);
     }
 
     #[test]

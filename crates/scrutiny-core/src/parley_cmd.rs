@@ -15,7 +15,9 @@ use crate::agent_runner::{
     run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind, AGENT_WALL_SECS,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
-use crate::git::git_stdout;
+use crate::git::{
+    clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
+};
 use crate::parley::fetch::{run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput};
 use crate::parley::fixes::{
     init_fixes_file, load_fixes, merge_fix_entries, parse_fixes_from_agent_stdout, save_fixes,
@@ -63,6 +65,10 @@ pub struct ParleySessionSummary {
 pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     let cwd = input.cwd.clone();
     prepare_artifacts(&cwd, input.pr.as_deref(), &[])?;
+
+    // Snapshot the working tree before agents run so we commit only their
+    // authored changes — never pre-existing WIP or build/test artifacts.
+    let base_pre_agents: WorktreeSnapshot = snapshot_worktree(&cwd).unwrap_or_default();
 
     let shipped = find_shipped_default(
         &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
@@ -145,13 +151,14 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     if !input.skip_agents {
         // Non-headless: open each agent in a visible window (claude + tmux/zellij/macOS).
         let term = resolve_terminal(cfg.headless, &detected.client, "parley");
+        let agent_wall = cfg.parley.agent_wall_secs;
 
         if plan.spawn_mode == "team" {
             eprintln!("scrutiny parley: team lead…");
-            run_team_parley(&detected, &plan, &comments, &cwd, term)?;
+            run_team_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
         } else {
             eprintln!("scrutiny parley: isolated members…");
-            run_isolated_parley(&detected, &plan, &comments, &cwd, term)?;
+            run_isolated_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
 
         // Verifier pass — both spawn modes, after fixes, before evangelist.
@@ -160,7 +167,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} verifier(s) check fixes…",
                 plan.verifiers
             );
-            run_verifier_parley(&detected, &plan, &comments, &cwd, term)?;
+            run_verifier_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
 
         // Evangelist verify pass — isolated only
@@ -169,7 +176,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} evangelist(s) verify…",
                 plan.evangelists
             );
-            run_evangelist_parley(&detected, &plan, &comments, &cwd, term)?;
+            run_evangelist_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
     }
 
@@ -205,6 +212,9 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             model: &plan.model,
             prepush_cmd: cfg.parley.prepush_cmd.clone(),
             prepush_fix_max_loops: cfg.parley.prepush_fix_max_loops,
+            prepush_fix_wall_secs: cfg.parley.prepush_fix_wall_secs,
+            base: &base_pre_agents,
+            artifact_globs: &cfg.git.artifact_globs,
         })?;
         eprintln!("scrutiny parley: post thread replies…");
         let (result, reply_path) = run_parley_reply(ParleyReplyInput {
@@ -278,6 +288,7 @@ fn run_isolated_parley(
     comments: &ParleyCommentsFile,
     cwd: &Path,
     term: Option<TerminalContext>,
+    wall_secs: u64,
 ) -> Result<()> {
     if plan.buckets.is_empty() {
         bail!("parley isolated: no buckets");
@@ -309,7 +320,7 @@ fn run_isolated_parley(
         );
     }
 
-    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let wall = Duration::from_secs(wall_secs);
     let (tx, rx) = mpsc::channel();
     let job_count = plan.buckets.len();
     if job_count == 0 {
@@ -415,8 +426,9 @@ fn run_team_parley(
     comments: &ParleyCommentsFile,
     cwd: &Path,
     term: Option<TerminalContext>,
+    wall_secs: u64,
 ) -> Result<()> {
-    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let wall = Duration::from_secs(wall_secs);
     let prompt = build_team_lead_parley_prompt(plan, comments);
 
     if let Some(ctx) = term {
@@ -482,9 +494,19 @@ fn run_verifier_parley(
     comments: &ParleyCommentsFile,
     cwd: &Path,
     term: Option<TerminalContext>,
+    wall_secs: u64,
 ) -> Result<()> {
     let prompt = build_verifier_prompt(plan, comments);
-    run_verify_agents(client, plan, cwd, term, plan.verifiers, "parley-verifier", &prompt)
+    run_verify_agents(
+        client,
+        plan,
+        cwd,
+        term,
+        plan.verifiers,
+        "parley-verifier",
+        &prompt,
+        wall_secs,
+    )
 }
 
 fn run_evangelist_parley(
@@ -493,6 +515,7 @@ fn run_evangelist_parley(
     comments: &ParleyCommentsFile,
     cwd: &Path,
     term: Option<TerminalContext>,
+    wall_secs: u64,
 ) -> Result<()> {
     let prompt = build_evangelist_prompt(plan, comments);
     run_verify_agents(
@@ -503,12 +526,14 @@ fn run_evangelist_parley(
         plan.evangelists,
         "parley-evangelist",
         &prompt,
+        wall_secs,
     )
 }
 
 /// Run `count` verify-style agents (verifier / evangelist) that read comments +
 /// fixes and amend the fixes file. Headless captures stdout; non-headless opens
 /// one window per agent and waits on completion sentinels.
+#[allow(clippy::too_many_arguments)]
 fn run_verify_agents(
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
@@ -517,6 +542,7 @@ fn run_verify_agents(
     count: u32,
     label_prefix: &str,
     prompt: &str,
+    wall_secs: u64,
 ) -> Result<()> {
     if let Some(ctx) = term {
         let mut sentinels = Vec::new();
@@ -535,7 +561,7 @@ fn run_verify_agents(
         return Ok(());
     }
 
-    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let wall = Duration::from_secs(wall_secs);
     for i in 0..count {
         let label = format!("{label_prefix}#{}", i + 1);
         let out = run_headless(client, &plan.model, cwd, prompt, HeadlessKind::Parley, &label, wall)?;
@@ -572,6 +598,7 @@ fn build_member_prompt(
          Do NOT touch comments outside your assignment.\n"
     ));
     p.push_str(prepush::PREPUSH_OWNERSHIP);
+    p.push_str(prepush::NO_ARTIFACTS);
     p.push('\n');
     if team_verify {
         p.push_str(
@@ -603,6 +630,7 @@ fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFil
          Do NOT git commit, git push, or call gh to reply — the host script does that.\n",
     );
     p.push_str(prepush::PREPUSH_OWNERSHIP);
+    p.push_str(prepush::NO_ARTIFACTS);
     p.push('\n');
     if plan.evangelists > 0 {
         p.push_str(&format!(
@@ -706,6 +734,11 @@ struct ParleyShipInput<'a> {
     model: &'a str,
     prepush_cmd: Option<String>,
     prepush_fix_max_loops: u32,
+    prepush_fix_wall_secs: u64,
+    /// Working-tree snapshot taken before agents ran; commits stage only paths
+    /// that changed since (excluding artifacts), leaving pre-existing WIP alone.
+    base: &'a WorktreeSnapshot,
+    artifact_globs: &'a [String],
 }
 
 struct PushAttempt {
@@ -720,39 +753,35 @@ fn commit_msg_path(session_root: &Path) -> PathBuf {
     session_root.join("commit-msg.txt")
 }
 
-fn host_commit(cwd: &Path, session_root: &Path, subject: &str) -> Result<()> {
-    let status = git_stdout(cwd, &["status", "--porcelain"])?;
-    if status.trim().is_empty() {
-        return Ok(());
+/// One-line notice when scrutiny leaves build/test artifacts out of a commit,
+/// so the exclusion is never silent.
+fn log_skipped_artifacts(skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
     }
-    let add = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(cwd)
-        .output()
-        .context("git add -A")?;
-    if !add.status.success() {
-        bail!(
-            "git add -A failed: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        );
+    let sample: Vec<&str> = skipped.iter().take(3).map(|s| s.as_str()).collect();
+    eprintln!(
+        "scrutiny parley: skipped {} build/test artifact path(s) (e.g. {})",
+        skipped.len(),
+        sample.join(", ")
+    );
+}
+
+/// Commit exactly `paths` with `subject`. Ok(false) when `paths` is empty or
+/// nothing ended up staged. Staging is scoped (never `git add -A` of the whole
+/// tree) so build/test artifacts and pre-existing WIP are left out.
+fn host_commit(cwd: &Path, session_root: &Path, subject: &str, paths: &[String]) -> Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
     }
     let msg = format!("{subject}\n");
     let msg_path = commit_msg_path(session_root);
     fs::write(&msg_path, &msg).with_context(|| format!("write {}", msg_path.display()))?;
-    let commit = Command::new("git")
-        .args(["commit", "-F"])
-        .arg(&msg_path)
-        .current_dir(cwd)
-        .output()
-        .context("git commit")?;
-    if !commit.status.success() {
-        bail!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        );
+    let committed = commit_paths(cwd, &msg_path, paths)?;
+    if committed {
+        eprintln!("scrutiny parley: committed — {subject}");
     }
-    eprintln!("scrutiny parley: committed — {subject}");
-    Ok(())
+    Ok(committed)
 }
 
 /// True when push failed for auth/remote reasons an agent cannot fix.
@@ -845,11 +874,14 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         bail!("commit subject empty");
     }
 
-    let status = git_stdout(cwd, &["status", "--porcelain"])?;
-    if status.trim().is_empty() {
-        eprintln!("scrutiny parley: working tree clean — skip commit");
+    // Commit only what the agents authored — skip pre-existing WIP and any
+    // build/test artifacts (agent-created coverage dirs et al).
+    let (to_stage, skipped) = paths_changed_since(cwd, input.base, input.artifact_globs)?;
+    log_skipped_artifacts(&skipped);
+    if to_stage.is_empty() {
+        eprintln!("scrutiny parley: no agent changes to commit");
     } else {
-        host_commit(cwd, session_root, &commit_subject)?;
+        host_commit(cwd, session_root, &commit_subject, &to_stage)?;
     }
 
     let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -874,7 +906,22 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         input.model,
         input.prepush_cmd.as_deref(),
         input.prepush_fix_max_loops,
+        input.prepush_fix_wall_secs,
+        input.artifact_globs,
     )?;
+
+    // Wipe anything scrutiny's run left dirty but did not commit — coverage dirs
+    // and pre-push-gate regenerated files — while leaving the user's pre-existing
+    // WIP untouched (unchanged since `base`).
+    if let Ok((leftover, _)) = paths_changed_since(cwd, input.base, &[]) {
+        if !leftover.is_empty() {
+            let _ = clean_paths(cwd, &leftover);
+            eprintln!(
+                "scrutiny parley: cleaned {} build/test byproduct path(s) from the working tree",
+                leftover.len()
+            );
+        }
+    }
 
     let push_args: Vec<&str> = if upstream.is_some() {
         vec!["push", "--no-verify"]
@@ -914,6 +961,7 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
 /// Quietly run the repo's pre-push checks; on failure spawn a fix agent that
 /// works only from the logged findings, commit its changes, and re-run — up to
 /// `max_loops` cycles. Ok when green (or when the repo has no pre-push hook).
+#[allow(clippy::too_many_arguments)]
 fn run_parley_prepush_gate(
     cwd: &Path,
     session_root: &Path,
@@ -921,6 +969,8 @@ fn run_parley_prepush_gate(
     model: &str,
     prepush_cmd: Option<&str>,
     max_loops: u32,
+    fix_wall_secs: u64,
+    artifact_globs: &[String],
 ) -> Result<()> {
     let Some(cmd) = prepush::resolve_prepush_command(cwd, prepush_cmd) else {
         eprintln!("scrutiny parley: no pre-push hook — skipping pre-push gate");
@@ -952,6 +1002,9 @@ fn run_parley_prepush_gate(
             "scrutiny parley: pre-push failed — spawning fix agent (attempt {attempt}/{max})…"
         );
         let prompt = prepush::build_prepush_fix_prompt(&res.log_path);
+        // Snapshot after the failing check ran (its artifacts already present) so
+        // the fix commit captures only the agent's edits, not gate byproducts.
+        let snap_before_fix = snapshot_worktree(cwd).unwrap_or_default();
         let out = run_headless(
             client,
             model,
@@ -959,16 +1012,17 @@ fn run_parley_prepush_gate(
             &prompt,
             HeadlessKind::Parley,
             "parley-push-fix",
-            Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
+            Duration::from_secs(fix_wall_secs),
         )?;
         if out.code != 0 && !out.timed_out {
             eprintln!("scrutiny parley: fix agent exit {} — re-checking", out.code);
         }
-        let dirty = git_stdout(cwd, &["status", "--porcelain"])?;
-        if dirty.trim().is_empty() {
-            eprintln!("scrutiny parley: fix agent left tree clean — re-checking anyway");
+        let (to_stage, skipped) = paths_changed_since(cwd, &snap_before_fix, artifact_globs)?;
+        log_skipped_artifacts(&skipped);
+        if to_stage.is_empty() {
+            eprintln!("scrutiny parley: fix agent made no committable change — re-checking");
         } else {
-            host_commit(cwd, session_root, "fix: repair pre-push failures")?;
+            host_commit(cwd, session_root, "fix: repair pre-push failures", &to_stage)?;
         }
     }
     unreachable!("loop returns green or bails on final attempt")

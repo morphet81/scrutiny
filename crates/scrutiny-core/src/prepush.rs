@@ -16,6 +16,14 @@ pub const PREPUSH_OWNERSHIP: &str =
     "Your changes must pass the repo's pre-push checks (lint / tests / typecheck). \
      Make every file you touch pass them before you finish.\n";
 
+/// One line telling agents not to strew build/test artifacts across the repo.
+/// scrutiny excludes known artifact globs from commits, but agents inventing new
+/// output dirs defeats that — keep coverage in the repo's own gitignored dir.
+pub const NO_ARTIFACTS: &str =
+    "Do NOT run coverage/tests into custom output directories. Use the repo's own \
+     scripts (e.g. `npm run test:coverage` writes to the gitignored `coverage/`). \
+     Leave no build or coverage artifacts behind.\n";
+
 /// Outcome of one quiet check run.
 pub struct PrepushResult {
     pub ok: bool,

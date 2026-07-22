@@ -395,6 +395,154 @@ pub fn diff_unified_paths(root: &Path, base: &str, head: &str, paths: &[String])
     git_stdout(root, &args)
 }
 
+/// A snapshot of the working-tree change set: `path -> two-char porcelain
+/// status`. Used to distinguish agent-authored changes from build/test
+/// artifacts (agent-created coverage dirs, pre-existing WIP, pre-push-gate
+/// byproducts) so scrutiny commits only what its agents intended.
+pub type WorktreeSnapshot = std::collections::BTreeMap<String, String>;
+
+/// Capture the current change set (dirty tracked + all untracked files).
+pub fn snapshot_worktree(cwd: &Path) -> Result<WorktreeSnapshot> {
+    let out = git_stdout(
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    Ok(parse_porcelain_z(&out))
+}
+
+/// Parse `git status --porcelain=v1 -z` into `path -> status`. Rename/copy
+/// entries carry a trailing origin-path field which is consumed and ignored.
+fn parse_porcelain_z(s: &str) -> WorktreeSnapshot {
+    let mut map = WorktreeSnapshot::new();
+    let mut it = s.split('\0');
+    while let Some(entry) = it.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let status = entry[..2].to_string();
+        let path = entry[3..].to_string();
+        if status.starts_with('R') || status.starts_with('C') {
+            let _ = it.next(); // origin path
+        }
+        map.insert(path, status);
+    }
+    map
+}
+
+fn build_globset(patterns: &[String]) -> Result<globset::GlobSet> {
+    let mut b = globset::GlobSetBuilder::new();
+    for p in patterns {
+        b.add(globset::Glob::new(p).with_context(|| format!("bad glob: {p}"))?);
+    }
+    Ok(b.build()?)
+}
+
+/// Paths dirty now that are new or changed relative to `base`, split into
+/// `(to_stage, skipped_artifacts)` where any path matching `artifact_globs`
+/// lands in `skipped_artifacts`. Excludes anything unchanged since `base`
+/// (pre-existing WIP) and anything git ignores (never in porcelain output).
+pub fn paths_changed_since(
+    cwd: &Path,
+    base: &WorktreeSnapshot,
+    artifact_globs: &[String],
+) -> Result<(Vec<String>, Vec<String>)> {
+    let now = snapshot_worktree(cwd)?;
+    let set = build_globset(artifact_globs)?;
+    let mut to_stage = Vec::new();
+    let mut skipped = Vec::new();
+    for (path, status) in &now {
+        let changed = base.get(path).map(|prev| prev != status).unwrap_or(true);
+        if !changed {
+            continue;
+        }
+        if set.is_match(path) {
+            skipped.push(path.clone());
+        } else {
+            to_stage.push(path.clone());
+        }
+    }
+    Ok((to_stage, skipped))
+}
+
+/// Stage exactly `paths` (adds/mods/deletes under them) and commit with the
+/// message file. Resets the index first so only `paths` are committed even if
+/// a prior aborted run left files staged. Commits with `--no-verify` — scrutiny
+/// owns the checks via its pre-push gate; re-running the repo's pre-commit hook
+/// only re-introduces artifact churn. Returns `Ok(false)` when nothing to commit.
+pub fn commit_paths(cwd: &Path, msg_path: &Path, paths: &[String]) -> Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    // Drop any stale index state so we commit our paths only.
+    let _ = Command::new("git")
+        .args(["reset", "-q"])
+        .current_dir(cwd)
+        .output();
+    for chunk in paths.chunks(500) {
+        let mut args: Vec<&str> = vec!["add", "-A", "--"];
+        args.extend(chunk.iter().map(|s| s.as_str()));
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(cwd)
+            .output()
+            .context("git add -- <paths>")?;
+        if !out.status.success() {
+            bail!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    let staged = git_stdout(cwd, &["diff", "--cached", "--name-only"])?;
+    if staged.trim().is_empty() {
+        return Ok(false);
+    }
+    let commit = Command::new("git")
+        .args(["commit", "--no-verify", "-F"])
+        .arg(msg_path)
+        .current_dir(cwd)
+        .output()
+        .context("git commit")?;
+    if !commit.status.success() {
+        bail!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        );
+    }
+    Ok(true)
+}
+
+/// Restore the working tree for `paths`: remove untracked files, revert
+/// tracked-file modifications. Best-effort; paths no longer dirty are skipped.
+/// Used to wipe pre-push-gate byproducts (coverage dirs, regenerated baselines)
+/// that were deliberately excluded from the commit.
+pub fn clean_paths(cwd: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let now = snapshot_worktree(cwd)?;
+    let mut untracked: Vec<&str> = Vec::new();
+    let mut tracked: Vec<&str> = Vec::new();
+    for p in paths {
+        match now.get(p) {
+            Some(s) if s == "??" => untracked.push(p.as_str()),
+            Some(_) => tracked.push(p.as_str()),
+            None => {}
+        }
+    }
+    for chunk in untracked.chunks(500) {
+        let mut args: Vec<&str> = vec!["clean", "-f", "-d", "--"];
+        args.extend_from_slice(chunk);
+        let _ = Command::new("git").args(&args).current_dir(cwd).output();
+    }
+    for chunk in tracked.chunks(500) {
+        let mut args: Vec<&str> = vec!["restore", "--"];
+        args.extend_from_slice(chunk);
+        let _ = Command::new("git").args(&args).current_dir(cwd).output();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +635,56 @@ mod tests {
         let cands = vec!["feat/z".to_string(), "main".to_string()];
         let base = resolve_base_branch(&dir, &cands, None).unwrap();
         assert_eq!(normalize_ref(&base), "main");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scoped_commit_excludes_and_cleans_artifacts() {
+        let dir = std::env::temp_dir().join(format!("git-scoped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["checkout", "-q", "-b", "main"]);
+        std::fs::write(dir.join("src.txt"), "1").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+
+        let base = snapshot_worktree(&dir).unwrap();
+
+        // Agent edits a tracked file and creates a coverage-artifact dir.
+        std::fs::write(dir.join("src.txt"), "2").unwrap();
+        std::fs::create_dir_all(dir.join("coverage-pages")).unwrap();
+        std::fs::write(dir.join("coverage-pages/index.html"), "x").unwrap();
+
+        let globs = vec!["coverage-*/*".to_string()];
+        let (stage, skipped) = paths_changed_since(&dir, &base, &globs).unwrap();
+        assert_eq!(stage, vec!["src.txt".to_string()]);
+        assert_eq!(skipped, vec!["coverage-pages/index.html".to_string()]);
+
+        let msg = dir.join("msg.txt");
+        std::fs::write(&msg, "fix: scoped\n").unwrap();
+        assert!(commit_paths(&dir, &msg, &stage).unwrap());
+        // Coverage artifact must remain untracked (not committed).
+        let tracked = git_stdout(&dir, &["ls-files", "coverage-pages/index.html"]).unwrap();
+        assert!(tracked.trim().is_empty());
+
+        clean_paths(&dir, &skipped).unwrap();
+        assert!(!dir.join("coverage-pages/index.html").exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }

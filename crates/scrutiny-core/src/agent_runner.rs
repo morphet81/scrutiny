@@ -168,14 +168,20 @@ fn agent_type_from_label(label: &str) -> String {
         .replace('-', "_")
 }
 
-/// Prepend the user's configured prompt overrides (global + per-agent) to a
-/// prompt. Order: global → agent → scrutiny's prompt. Unchanged when none set.
+/// Mandatory caveman style directive prepended to every spawned-agent prompt.
+pub const CAVEMAN_STYLE: &str = "STYLE (mandatory): load + follow **caveman skill** if present \
+     (skill `name: caveman`, `/caveman ultra`). Intensity ultra. Terse. No fluff. \
+     Substance stay. Never announce style.";
+
+/// Prepend the caveman style directive, then the user's configured prompt
+/// overrides (global + per-agent), to a prompt. Order: caveman → global → agent
+/// → scrutiny's prompt. Caveman is always injected; overrides only when set.
 fn inject_overrides(label: &str, prompt: &str) -> String {
     let prefix = crate::config::resolve_prompt_prefix(&agent_type_from_label(label));
     if prefix.is_empty() {
-        prompt.to_string()
+        format!("{CAVEMAN_STYLE}\n\n{prompt}")
     } else {
-        format!("{prefix}\n\n{prompt}")
+        format!("{CAVEMAN_STYLE}\n\n{prefix}\n\n{prompt}")
     }
 }
 
@@ -1423,6 +1429,15 @@ mod tests {
         assert_eq!(agent_type_from_label("parley-member#1"), "parley_member");
         assert_eq!(agent_type_from_label("forge-implement"), "forge_implement");
         assert_eq!(agent_type_from_label("lead#1"), "lead");
+    }
+
+    #[test]
+    fn caveman_always_injected() {
+        // Every spawned prompt carries the caveman directive, even with no
+        // configured overrides.
+        let out = inject_overrides("parley-member#1", "Fix the thing.");
+        assert!(out.starts_with(CAVEMAN_STYLE));
+        assert!(out.ends_with("Fix the thing."));
     }
 
     #[test]

@@ -213,6 +213,10 @@ default_evangelists = 1
 # Verifiers check that fixes actually address comments (runs before evangelist).
 default_verifiers = 1
 push_fix_max_loops = 2
+# Wall-clock seconds for each pre-push fix agent in the gate.
+prepush_fix_wall_secs = 1200
+# Wall-clock seconds for each member / verifier / evangelist agent.
+agent_wall_secs = 600
 
 [git]
 base_candidates = ["main", "master", "develop"]
@@ -227,6 +231,18 @@ exclude_globs = [
   "**/generated/**",
   "**/*.pb.go",
   "**/*.pb.ts",
+]
+# Build/test artifacts never committed by parley/forge (cleaned instead).
+# Guards against agent-created coverage dirs that are not gitignored.
+artifact_globs = [
+  "coverage-*/*",
+  "coverage/*",
+  ".nyc_output/*",
+  ".vitest/*",
+  "playwright-report/*",
+  "test-results/*",
+  "*.tsbuildinfo",
+  "*.log",
 ]
 
 # Custom prompt injection. Text here is prepended to spawned-agent prompts.

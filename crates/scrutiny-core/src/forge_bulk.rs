@@ -494,6 +494,10 @@ fn conclude_item(item: &ItemPlan, cfg: &Config, headless: bool, dry: bool) -> Re
         }
     } else {
         init_artifact_ctx(&item.worktree, &item.session)?;
+        // Each bulk item runs in a fresh worktree (clean at creation), so an
+        // empty baseline means "commit everything the agents changed" — build
+        // artifacts are still filtered out by artifact_globs in run_forge_ship.
+        let base = crate::git::WorktreeSnapshot::default();
         run_forge_ship(
             &item.worktree,
             &item.session_root,
@@ -503,6 +507,7 @@ fn conclude_item(item: &ItemPlan, cfg: &Config, headless: bool, dry: bool) -> Re
             /* create_pr_noninteractive */ headless,
             &item.prefix,
             &ticket,
+            &base,
         )?;
     }
     Ok(item.session_root.clone())
