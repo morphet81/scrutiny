@@ -118,6 +118,10 @@ pub struct ParleyConfig {
     /// Wall-clock seconds for each member / verifier / evangelist agent.
     #[serde(default = "default_agent_wall_secs")]
     pub agent_wall_secs: u64,
+    /// Run a repair pass that re-implements threads left as stubs or rejected by
+    /// a verifier, so failures never post as PR replies.
+    #[serde(default = "default_parley_repair")]
+    pub repair: bool,
 }
 
 fn default_parley_members() -> u32 {
@@ -141,6 +145,9 @@ fn default_prepush_fix_wall_secs() -> u64 {
 fn default_agent_wall_secs() -> u64 {
     600
 }
+fn default_parley_repair() -> bool {
+    true
+}
 
 impl Default for ParleyConfig {
     fn default() -> Self {
@@ -153,6 +160,7 @@ impl Default for ParleyConfig {
             prepush_fix_max_loops: default_prepush_fix_loops(),
             prepush_fix_wall_secs: default_prepush_fix_wall_secs(),
             agent_wall_secs: default_agent_wall_secs(),
+            repair: default_parley_repair(),
         }
     }
 }

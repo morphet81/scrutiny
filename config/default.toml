@@ -217,6 +217,9 @@ push_fix_max_loops = 2
 prepush_fix_wall_secs = 1200
 # Wall-clock seconds for each member / verifier / evangelist agent.
 agent_wall_secs = 600
+# Re-implement threads left as stubs or rejected by a verifier so failures
+# never post as PR replies. Runs after verifiers, before evangelists.
+repair = true
 
 [git]
 base_candidates = ["main", "master", "develop"]

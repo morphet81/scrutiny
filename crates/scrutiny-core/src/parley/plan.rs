@@ -102,11 +102,7 @@ pub fn prompt_parley_answers(
     }
 
     let max_members = comment_count.max(1) as u32;
-    let default_members = cfg
-        .parley
-        .default_members
-        .max(1)
-        .min(max_members);
+    let default_members = suggested_members(cfg.parley.default_members, comment_count);
     let default_evangelists = cfg
         .parley
         .default_evangelists
@@ -212,6 +208,18 @@ pub fn prompt_parley_answers(
         evangelists,
         spawn_mode,
     })
+}
+
+/// Suggested member count: never below the config default, ~1 per 3 comments so
+/// one agent isn't handed many heavy fixes (a common timeout cause), capped at 4
+/// and the comment count.
+fn suggested_members(cfg_default: u32, comment_count: usize) -> u32 {
+    let by_volume = comment_count.div_ceil(3) as u32;
+    cfg_default
+        .max(by_volume)
+        .max(1)
+        .min(comment_count.max(1) as u32)
+        .min(4)
 }
 
 pub fn run_parley_plan_write(input: ParleyPlanWriteInput) -> Result<(ParleyPlan, PathBuf)> {
@@ -360,6 +368,16 @@ mod tests {
         let raw = r#"{"client":"claude","model":"opus","members":1,"spawn_mode":"isolated"}"#;
         let a = prompt_parley_answers(&cfg, "claude", "opus", 3, None, Some(raw), true).unwrap();
         assert_eq!(a.verifiers, default_verifiers().min(cfg.agents.max_evangelists));
+    }
+
+    #[test]
+    fn suggested_members_scales_and_caps() {
+        assert_eq!(suggested_members(1, 1), 1);
+        assert_eq!(suggested_members(1, 3), 1);
+        assert_eq!(suggested_members(1, 5), 2); // 5 comments → 2 agents
+        assert_eq!(suggested_members(1, 12), 4); // capped at 4
+        assert_eq!(suggested_members(3, 2), 2); // never exceed comment count
+        assert_eq!(suggested_members(1, 0), 1);
     }
 
     #[test]

@@ -27,6 +27,10 @@ pub struct FixEntry {
     /// Verifier note on what was checked / why it failed.
     #[serde(default)]
     pub verification: Option<String>,
+    /// True when the host synthesized this entry as a fallback (agent timed out,
+    /// errored, or omitted a fix) — NOT an agent-authored reply. Never posted.
+    #[serde(default)]
+    pub stub: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +43,33 @@ pub struct ParleyFixesFile {
 
 fn default_version() -> u32 {
     1
+}
+
+impl ParleyFixesFile {
+    /// Thread ids whose entry is a host-synthesized stub (agent produced nothing
+    /// real for them). These must never be posted verbatim.
+    pub fn stub_ids(&self) -> Vec<String> {
+        self.fixes
+            .iter()
+            .filter(|f| f.stub)
+            .map(|f| f.comment_id.clone())
+            .collect()
+    }
+
+    /// True when any entry is a host stub.
+    pub fn has_stub(&self) -> bool {
+        self.fixes.iter().any(|f| f.stub)
+    }
+
+    /// Thread ids the host must still repair: host stubs OR entries a verifier
+    /// marked `verified: false`.
+    pub fn needs_repair_ids(&self) -> Vec<String> {
+        self.fixes
+            .iter()
+            .filter(|f| f.stub || f.verified == Some(false))
+            .map(|f| f.comment_id.clone())
+            .collect()
+    }
 }
 
 pub fn init_fixes_file(path: &Path, pr_number: u64) -> Result<()> {
@@ -267,6 +298,47 @@ Done.
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].comment_id, "PRRT_1");
         assert!(entries[0].addressed);
+    }
+
+    #[test]
+    fn stub_helpers_and_serde_round_trip() {
+        let file = ParleyFixesFile {
+            version: 1,
+            pr_number: 1,
+            fixes: vec![
+                FixEntry {
+                    comment_id: "a".into(),
+                    addressed: true,
+                    reply_body: "done".into(),
+                    ..Default::default()
+                },
+                FixEntry {
+                    comment_id: "b".into(),
+                    reply_body: "agent omitted".into(),
+                    stub: true,
+                    ..Default::default()
+                },
+                FixEntry {
+                    comment_id: "c".into(),
+                    reply_body: "verifier rejected".into(),
+                    verified: Some(false),
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(file.has_stub());
+        assert_eq!(file.stub_ids(), vec!["b".to_string()]);
+        let mut repair = file.needs_repair_ids();
+        repair.sort();
+        assert_eq!(repair, vec!["b".to_string(), "c".to_string()]);
+
+        // stub survives a serde round-trip; legacy JSON without the field defaults false.
+        let json = serde_json::to_string(&file).unwrap();
+        let back: ParleyFixesFile = serde_json::from_str(&json).unwrap();
+        assert!(back.fixes[1].stub);
+        let legacy = r#"{"pr_number":1,"fixes":[{"comment_id":"x","addressed":true}]}"#;
+        let f: ParleyFixesFile = serde_json::from_str(legacy).unwrap();
+        assert!(!f.fixes[0].stub);
     }
 
     #[test]

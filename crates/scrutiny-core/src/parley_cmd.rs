@@ -170,6 +170,12 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             run_verifier_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
 
+        // Repair pass — re-implement threads left as stubs or rejected by the
+        // verifier so failures never get posted as PR replies.
+        if cfg.parley.repair {
+            run_parley_repair(&detected, &plan, &comments, &cwd, term, agent_wall)?;
+        }
+
         // Evangelist verify pass — isolated only
         if plan.evangelists > 0 && plan.spawn_mode == "isolated" {
             eprintln!(
@@ -193,6 +199,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                         addressed: false,
                         reply_body: "Skipped (no agent)".into(),
                         explanation: "skip_agents".into(),
+                        stub: true,
                         ..Default::default()
                     });
                 }
@@ -275,6 +282,7 @@ fn collect_disk_fixes(fixes_path: &str, expected: &[String], note: &str) -> Resu
                 addressed: false,
                 reply_body: note.to_string(),
                 explanation: "no fix entry".into(),
+                stub: true,
                 ..Default::default()
             });
         }
@@ -361,63 +369,109 @@ fn run_isolated_parley(
     }
     collected.sort_by_key(|(i, _, _)| *i);
 
-    let mut file = load_fixes(Path::new(&plan.fixes_path))?;
+    // Merge each member's output; collect ids that still lack a real (non-stub)
+    // entry — a timeout/empty pass leaves nothing usable.
+    let mut still_missing: Vec<String> = Vec::new();
     for (index, ids, out) in collected {
-        match out {
-            Ok(o) => {
-                let mut entries = parse_fixes_from_agent_stdout(&o.stdout);
-                if entries.is_empty() {
-                    // Agent may have written fixes file directly
-                    let disk = load_fixes(Path::new(&plan.fixes_path))?;
-                    for id in &ids {
-                        if let Some(e) = disk.fixes.iter().find(|f| &f.comment_id == id) {
-                            entries.push(e.clone());
-                        }
+        merge_member_outcome(&plan.fixes_path, &ids, &out, &format!("member#{index}"))?;
+        let file = load_fixes(Path::new(&plan.fixes_path))?;
+        still_missing.extend(missing_real_ids(&file, &ids));
+    }
+
+    // Retry unaddressed threads once, one comment per pass — a single member
+    // handling many heavy fixes commonly times out; per-comment passes fit the
+    // wall and salvage the run before we fall back to a stub.
+    if !still_missing.is_empty() {
+        eprintln!(
+            "scrutiny parley: {} thread(s) unaddressed after first pass — retrying individually…",
+            still_missing.len()
+        );
+        for id in &still_missing {
+            let one = std::slice::from_ref(id);
+            let slice = comments_for_ids(comments, one);
+            let prompt = build_member_prompt(&plan.comments_path, &plan.fixes_path, &slice, 1, false);
+            let label = format!("parley-retry#{id}");
+            let out = run_headless(
+                client,
+                &plan.model,
+                cwd,
+                &prompt,
+                HeadlessKind::Parley,
+                &label,
+                wall,
+            );
+            merge_member_outcome(&plan.fixes_path, one, &out, &format!("retry {id}"))?;
+        }
+    }
+
+    // Final fallback: stub whatever is still absent so ship/reply stay complete.
+    let mut file = load_fixes(Path::new(&plan.fixes_path))?;
+    for id in comments.comments.iter().map(|c| &c.id) {
+        if !file.fixes.iter().any(|f| &f.comment_id == id) {
+            file.fixes.push(FixEntry {
+                comment_id: id.clone(),
+                addressed: false,
+                reply_body: "Agent finished without a structured fix entry.".into(),
+                explanation: "agent omitted fix JSON".into(),
+                stub: true,
+                ..Default::default()
+            });
+        }
+    }
+    save_fixes(Path::new(&plan.fixes_path), &file)?;
+    Ok(())
+}
+
+/// Merge one member's headless outcome into the fixes file (parsed stdout JSON,
+/// or the entries it wrote to disk). No stubbing here — callers decide when a
+/// missing id becomes a stub.
+fn merge_member_outcome(
+    fixes_path: &str,
+    ids: &[String],
+    out: &Result<crate::agent_runner::HeadlessOutcome>,
+    who: &str,
+) -> Result<()> {
+    match out {
+        Ok(o) => {
+            let mut entries = parse_fixes_from_agent_stdout(&o.stdout);
+            if entries.is_empty() {
+                // Agent may have written the fixes file directly.
+                let disk = load_fixes(Path::new(fixes_path))?;
+                for id in ids {
+                    if let Some(e) = disk.fixes.iter().find(|f| &f.comment_id == id) {
+                        entries.push(e.clone());
                     }
-                }
-                // Reload file before merge in case peers wrote
-                file = load_fixes(Path::new(&plan.fixes_path))?;
-                merge_fix_entries(&mut file, &entries);
-                // Ensure every assigned id has something
-                for id in &ids {
-                    if !file.fixes.iter().any(|f| &f.comment_id == id) {
-                        file.fixes.push(FixEntry {
-                            comment_id: id.clone(),
-                            addressed: false,
-                            reply_body: format!(
-                                "Member #{index} finished without a structured fix entry."
-                            ),
-                            explanation: "agent omitted fix JSON".into(),
-                            ..Default::default()
-                        });
-                    }
-                }
-                save_fixes(Path::new(&plan.fixes_path), &file)?;
-                if o.code != 0 {
-                    eprintln!(
-                        "scrutiny parley: member#{index} exit {} — using available fixes",
-                        o.code
-                    );
                 }
             }
-            Err(e) => {
-                eprintln!("scrutiny parley: member#{index} failed: {e:#}");
-                for id in &ids {
-                    if !file.fixes.iter().any(|f| &f.comment_id == id) {
-                        file.fixes.push(FixEntry {
-                            comment_id: id.clone(),
-                            addressed: false,
-                            reply_body: format!("Agent member#{index} failed: {e}"),
-                            explanation: "agent error".into(),
-                            ..Default::default()
-                        });
-                    }
-                }
-                save_fixes(Path::new(&plan.fixes_path), &file)?;
+            // Reload before merge in case peers wrote concurrently.
+            let mut file = load_fixes(Path::new(fixes_path))?;
+            merge_fix_entries(&mut file, &entries);
+            save_fixes(Path::new(fixes_path), &file)?;
+            if o.code != 0 {
+                eprintln!(
+                    "scrutiny parley: {who} exit {} — using available fixes",
+                    o.code
+                );
             }
+        }
+        Err(e) => {
+            eprintln!("scrutiny parley: {who} failed: {e:#}");
         }
     }
     Ok(())
+}
+
+/// Assigned ids that still lack a real (non-stub) entry.
+fn missing_real_ids(file: &crate::parley::fixes::ParleyFixesFile, ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| {
+            !file
+                .fixes
+                .iter()
+                .any(|f| &f.comment_id == *id && !f.stub)
+        })
+        .cloned()
+        .collect()
 }
 
 fn run_team_parley(
@@ -474,6 +528,7 @@ fn run_team_parley(
                 addressed: false,
                 reply_body: "Team lead finished without a structured fix entry.".into(),
                 explanation: "lead omitted fix".into(),
+                stub: true,
                 ..Default::default()
             });
         }
@@ -608,6 +663,13 @@ fn build_member_prompt(
     p.push_str(&format!("Comments file (full): {comments_path}\n"));
     p.push_str(&format!("Fixes file to update: {fixes_path}\n\n"));
     p.push_str("## Assigned threads\n");
+    push_threads(&mut p, slice);
+    p.push_str(FIXES_PROTOCOL);
+    p
+}
+
+/// Render assigned/repair threads (id, location, author, body) into a prompt.
+fn push_threads(p: &mut String, slice: &[ParleyComment]) {
     for c in slice {
         let line = c
             .line
@@ -618,8 +680,79 @@ fn build_member_prompt(
             c.id, c.path, line, c.author, c.body
         ));
     }
+}
+
+/// Prompt for the repair pass: implement fixes for threads the first pass left
+/// as stubs or a verifier rejected, and overwrite their fix entries for real.
+fn build_repair_prompt(comments_path: &str, fixes_path: &str, slice: &[ParleyComment]) -> String {
+    let mut p = String::new();
+    p.push_str(
+        "You are the parley repair agent. The threads below were NOT properly addressed on the \
+         first pass — the member timed out / errored, or a verifier rejected the fix. \
+         Actually implement each fix now.\n\
+         Do NOT git commit, git push, or call gh to reply — the host script does that.\n",
+    );
+    p.push_str(prepush::PREPUSH_OWNERSHIP);
+    p.push_str(prepush::NO_ARTIFACTS);
+    p.push('\n');
+    p.push_str(&format!("Comments file (full): {comments_path}\n"));
+    p.push_str(&format!("Fixes file to update: {fixes_path}\n\n"));
+    p.push_str("## Threads to repair\n");
+    push_threads(&mut p, slice);
+    p.push_str(
+        "Overwrite each thread's fix entry with a REAL reply_body and correct `addressed` — \
+         remove any placeholder / failure text. Only set `addressed: false` for a genuine, \
+         explained won't-fix.\n\n",
+    );
     p.push_str(FIXES_PROTOCOL);
     p
+}
+
+/// Repair pass: re-implement threads still flagged as stubs or rejected by a
+/// verifier. No-op when nothing needs repair.
+fn run_parley_repair(
+    client: &crate::runtime::DetectedClient,
+    plan: &ParleyPlan,
+    comments: &ParleyCommentsFile,
+    cwd: &Path,
+    term: Option<TerminalContext>,
+    wall_secs: u64,
+) -> Result<()> {
+    let file = load_fixes(Path::new(&plan.fixes_path))?;
+    let ids = file.needs_repair_ids();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "scrutiny parley: {} thread(s) need repair (stub / verifier-rejected) — repair pass…",
+        ids.len()
+    );
+    let slice = comments_for_ids(comments, &ids);
+    let prompt = build_repair_prompt(&plan.comments_path, &plan.fixes_path, &slice);
+    let label = "parley-repair";
+
+    if let Some(ctx) = term {
+        let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, label, ctx)?;
+        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        if !missing.is_empty() {
+            eprintln!(
+                "scrutiny parley: repair window did not signal done within {}s",
+                NONHEADLESS_WALL_SECS
+            );
+        }
+        return Ok(());
+    }
+
+    let out = run_headless(
+        client,
+        &plan.model,
+        cwd,
+        &prompt,
+        HeadlessKind::Parley,
+        label,
+        Duration::from_secs(wall_secs),
+    );
+    merge_member_outcome(&plan.fixes_path, &ids, &out, "repair")
 }
 
 fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFile) -> String {
@@ -671,13 +804,17 @@ fn build_verifier_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) -> S
         "You are a parley verifier. Verify — do NOT re-implement — every entry in the fixes file.\n\
          Read:\n- comments: {}\n- fixes: {}\n\n\
          For EACH fix entry:\n\
+         - FIRST check `reply_body`. If it is a host failure placeholder — e.g. contains \
+         \"finished without a structured fix entry\", \"agent error\", \"failed\", \"Skipped (no agent)\" \
+         — or is empty, or does not actually respond to the comment: set `verified: false`, \
+         `addressed: false`, and say so in `verification`. These are NOT real answers.\n\
          - If `addressed` is true: read the referenced code and confirm the change actually \
          resolves that review comment. If it truly does, set `verified: true`. If it does NOT \
          (missing, partial, wrong, or unrelated), set `verified: false`, set `addressed: false`, \
          and explain the gap in `verification` (and adjust `reply_body` to be honest).\n\
-         - If `addressed` is false: confirm `reply_body` is a consistent, reasonable response to \
-         the comment. Set `verified: true` if consistent, else `verified: false` and note why in \
-         `verification`.\n\n\
+         - If `addressed` is false: confirm `reply_body` is a consistent, reasonable, comment-specific \
+         response (a genuine won't-fix with a reason). Set `verified: true` if consistent, else \
+         `verified: false` and note why in `verification`.\n\n\
          Do NOT edit source code. Do NOT git commit, push, or gh-reply. Only read-merge-write the \
          fixes JSON: preserve every existing field, add `verified` and `verification`, and flip \
          `addressed` only when a claimed fix does not hold.\n\n{}",
@@ -712,9 +849,11 @@ Update the fixes JSON file (read-merge-write; keep other members' entries). For 
 }
 ```
 
+Write each thread's entry to the fixes file IMMEDIATELY after you finish that thread \
+(read-merge-write), before starting the next — so partial work survives if you run out of time.\n\
 Also print a final JSON block with a top-level `\"fixes\": [ … ]` array covering your assigned ids \
 (so the host can merge if the file write is missed).\n\
-If you truly will not fix a comment, set `addressed: false` and explain in reply_body.\n";
+If you truly will not fix a comment, set `addressed: false` and explain the reason in reply_body.\n";
 
 fn truncate(s: &str, max: usize) -> String {
     let t = s.replace('\n', " ");
