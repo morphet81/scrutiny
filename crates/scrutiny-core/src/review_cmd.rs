@@ -343,7 +343,12 @@ fn finish_triage_and_post(
         client_override,
         pack_hint: &pack_hint,
     };
-    run_findings_triage(findings_path, Some(cwd), Some(&mut ask))?;
+    let (report, _) = run_findings_triage(findings_path, Some(cwd), Some(&mut ask))?;
+    let selected = report.findings.iter().filter(|f| f.include == Some(true)).count();
+    if selected == 0 {
+        eprintln!("scrutiny probe: no findings selected — nothing to post.");
+        return Ok(());
+    }
     run_findings_resolve(findings_path, cwd, false)?;
     run_findings_validate(findings_path)?;
 
