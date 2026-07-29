@@ -184,17 +184,32 @@ pub fn run_findings_init(input: FindingsInitInput) -> Result<(FindingsReport, Pa
     Ok((report, out))
 }
 
+/// Enforce the fix-options invariant: a finding shows either a single "Post" (no
+/// options) or 2+ real alternatives — never a lone A) option. A single option is
+/// promoted into `proposed_fix` when that slot is empty, then options are cleared.
+fn normalize_fix_options(proposed_fix: &mut String, opts: &mut Vec<String>) {
+    if opts.len() < 2 {
+        if opts.len() == 1 && proposed_fix.trim().is_empty() {
+            *proposed_fix = opts[0].clone();
+        }
+        opts.clear();
+    }
+}
+
 fn scan_to_triage(f: &ScanFinding, number: usize) -> TriageFinding {
     let path = f.paths.first().cloned();
     let line = f.line.filter(|&l| l > 0);
+    let mut proposed_fix = f.proposed_fix.clone();
+    let mut fix_options = f.fix_options.clone();
+    normalize_fix_options(&mut proposed_fix, &mut fix_options);
     TriageFinding {
         id: format!("F{number}"),
         number: number as u32,
         severity: normalize_severity(&f.severity),
         title: f.title.clone(),
         explanation: f.explanation.clone(),
-        proposed_fix: f.proposed_fix.clone(),
-        fix_options: f.fix_options.clone(),
+        proposed_fix,
+        fix_options,
         chosen_option: None,
         include: None,
         source: if f.source.starts_with("scan.") {
@@ -246,14 +261,17 @@ fn agent_to_triage(a: &crate::agent_runner::AgentFinding, number: usize) -> Tria
     };
     let line = if a.line > 0 { Some(a.line) } else { None };
     let start_line = a.start_line.filter(|&l| l > 0).or(line);
+    let mut proposed_fix = a.proposed_fix.clone();
+    let mut fix_options = a.fix_options.clone();
+    normalize_fix_options(&mut proposed_fix, &mut fix_options);
     TriageFinding {
         id: format!("F{number}"),
         number: number as u32,
         severity: normalize_severity(&a.severity),
         title: a.title.clone(),
         explanation: a.explanation.clone(),
-        proposed_fix: a.proposed_fix.clone(),
-        fix_options: a.fix_options.clone(),
+        proposed_fix,
+        fix_options,
         chosen_option: None,
         include: None,
         source: format!("ai.{}", a.source_role),
@@ -864,7 +882,7 @@ fn print_finding_block(
         loc,
         style_reset(),
     );
-    eprintln!("  Why: {}", truncate(&f.explanation, 240));
+    eprintln!("  Why: {}", f.explanation);
     if !f.fix_options.is_empty() {
         for (i, opt) in f.fix_options.iter().enumerate() {
             eprintln!("  {}) {}", (b'A' + i as u8) as char, truncate(opt, 140));
@@ -932,6 +950,7 @@ fn apply_ask_revision(f: &mut TriageFinding, answer: &str) {
                 .filter_map(|x| x.as_str().map(|s| s.to_string()))
                 .collect();
         }
+        normalize_fix_options(&mut f.proposed_fix, &mut f.fix_options);
         if let Some(path) = v.get("path").and_then(|x| x.as_str()) {
             if !path.is_empty() {
                 f.anchor.path = Some(path.to_string());
@@ -2554,6 +2573,36 @@ mod tests {
             ensure_ai_tag(&format!("hi\n\n{AI_AGENT_TAG}")),
             format!("hi\n\n{AI_AGENT_TAG}")
         );
+    }
+
+    #[test]
+    fn normalize_fix_options_cases() {
+        // 0 options → unchanged empty, proposed_fix untouched
+        let mut pf = "keep".to_string();
+        let mut opts: Vec<String> = vec![];
+        normalize_fix_options(&mut pf, &mut opts);
+        assert_eq!(pf, "keep");
+        assert!(opts.is_empty());
+
+        // 1 option + empty proposed_fix → promoted, opts cleared
+        let mut pf = String::new();
+        let mut opts = vec!["only fix".to_string()];
+        normalize_fix_options(&mut pf, &mut opts);
+        assert_eq!(pf, "only fix");
+        assert!(opts.is_empty());
+
+        // 1 option + existing proposed_fix → opts cleared, proposed_fix untouched
+        let mut pf = "existing".to_string();
+        let mut opts = vec!["ignored".to_string()];
+        normalize_fix_options(&mut pf, &mut opts);
+        assert_eq!(pf, "existing");
+        assert!(opts.is_empty());
+
+        // 2+ options → unchanged
+        let mut pf = String::new();
+        let mut opts = vec!["a".to_string(), "b".to_string()];
+        normalize_fix_options(&mut pf, &mut opts);
+        assert_eq!(opts, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

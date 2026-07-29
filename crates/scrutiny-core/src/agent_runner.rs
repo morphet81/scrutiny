@@ -147,6 +147,14 @@ pub const FINDINGS_JSON_SCHEMA: &str = r#"{
   "required": ["findings"]
 }"#;
 
+/// Shared `fix_options` + `explanation` policy, pasted into every findings prompt so the
+/// four builders stay in sync. Keep caveman ultra.
+pub const FIX_OPTIONS_POLICY: &str = "\
+- `fix_options`: default EMPTY. Put single best fix in `proposed_fix`.\n\
+- Fill `fix_options` ONLY when 2+ real, materially-different approaches with true tradeoffs. NEVER exactly 1 option.\n\
+- If filled: first entry = AI-preferred; its text say WHY preferred. Other entries say their tradeoff.\n\
+- `explanation` (the Why): ONE short simple sentence. State problem, not story. Terse — shown in full.";
+
 pub const AGENT_WALL_SECS: u64 = 10 * 60;
 pub const PROGRESS_SECS: u64 = 15;
 
@@ -691,6 +699,7 @@ Rules:
 - If the issue is only on an unchanged context line → omit that finding or attach at file level (omit `line`).
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
+{policy}
 "#,
         plan.security,
         plan.performance,
@@ -699,6 +708,7 @@ Rules:
         role = role,
         paths_list = paths_list,
         focus = focus,
+        policy = FIX_OPTIONS_POLICY,
     )
 }
 
@@ -789,6 +799,7 @@ Output: JSON ONLY.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
 Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
+{policy}
 "#,
         plan.reviewers,
         plan.evangelists,
@@ -797,6 +808,7 @@ Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
         plan.error_handling,
         pack = pack_path.display(),
         member_briefs = member_briefs,
+        policy = FIX_OPTIONS_POLICY,
     )
 }
 
@@ -829,9 +841,11 @@ JSON ONLY (no prose outside JSON):
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
 Nothing to merge → return the input findings unchanged. Empty input → {{"findings":[]}}.
+{policy}
 "#,
         pack = pack_path.display(),
         findings = findings_json,
+        policy = FIX_OPTIONS_POLICY,
     )
 }
 
@@ -860,7 +874,8 @@ pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
          Rules:\n\
          - path+line must point to a **changed** line: added `+` (RIGHT side) or deleted `-` (LEFT side). Never a context line.\n\
          - Prefer an added (+) line. Never invent out-of-diff lines.\n\
-         - fix_options may be empty.\n"
+         {policy}\n",
+        policy = FIX_OPTIONS_POLICY,
     )
 }
 

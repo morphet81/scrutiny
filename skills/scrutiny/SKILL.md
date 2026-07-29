@@ -275,8 +275,8 @@ If the agent host cannot attach a TTY to the binary, use **one** multi-choice fo
 
 In that form, for **each** finding `F1…Fn`:
 
-- If it has `fix_options` → choices: each option **or Ignore** (optional separate **Ask**)
-- Else → choices: **Post** or **Ignore** (optional separate **Ask**)
+- If it has `fix_options` → choices: each option **or Ignore** (optional separate **Ask**). Options exist only when 2+ approaches genuinely apply; **A** is AI-preferred (its text says why).
+- Else → choices: **Post** or **Ignore** (optional separate **Ask**). This is the norm — one clear best fix carries no options.
 
 After triage answers land in findings JSON (script or agent edits), hand off:
 

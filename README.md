@@ -207,6 +207,8 @@ After triage, findings live in a structured JSON file (`include`, `chosen_option
 
 `findings-triage` (and `scrutiny probe`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. Agent revises that finding only; menu reappears. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
 
+Fix options appear **only** when multiple genuinely-viable approaches exist; a finding with one clear best fix shows just **Post**. When options are present, **A** is the AI-preferred one (its text says why). The `Why:` line is shown in full, never truncated.
+
 On a TTY, severity/title use ANSI colors (`NO_COLOR` or non-TTY disables). Each finding shows a short code snippet from `git show <head>:<path>` when a path exists.
 
 `post-comments` requires a GitHub PR. It prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or `--event`), then creates one PR review with **inline comments** (one per included finding with a diff line). Bodies end with `[AI Agent]`.
