@@ -1,114 +1,75 @@
 # Scrutiny
 
-Agent skills for code review and ticket implementation, backed by a shared Rust CLI.
+CLI + agent skills that review PRs, implement tickets, and clear review comments — with as much work as possible in deterministic Rust, not in the model.
 
-## Why scripts first
+| Command | Does |
+|---------|------|
+| **`scrutiny probe`** | Review a local branch or GitHub PR |
+| **`scrutiny forge`** | Implement a ticket (Jira / GitHub / GitLab / inline) |
+| **`scrutiny parley`** | Fix unresolved PR review threads |
 
-The goal is simple: **do as much work as possible outside the model.** Deterministic steps—diff analysis, packing, static scans, ticket fetch, line resolution, posting reviews—run as Rust commands that write small JSON artifacts. The agent only decides, confirms, and edits those files. That keeps prompts short, avoids re-exploring the repo, and spends tokens on judgment instead of plumbing.
+Skills `/scrutiny`, `/forge`, `/parley` wrap the same flows for IDE agents.
 
-## Skills
+Scripts write small JSON under `.scrutiny/`. Agents decide and edit; they do not re-explore the repo for plumbing.
 
-### `/scrutiny` (Probe)
+---
 
-Probes a local branch or a GitHub PR. Prefer **`scrutiny probe`** for script-orchestrated runs (detects Cursor/Claude/Codex CLIs, plan knobs, headless agents, triage, post). The `/scrutiny` skill remains for IDE agent sessions that chain discrete commands.
-
-### `/forge`
-
-Implements a ticket from Jira, GitHub, GitLab, or an inline description. Prefer **`scrutiny forge`** (script-orchestrated): fetch full ticket mirror under `.scrutiny/forge-<id>/`, export Figma via `fcli` when links exist, ask spawn/TDD/coverage/e2e/(playwright), optional TDD test-plan confirm loop, then single or team implement agent (writes `pr.json`, script commits + optional draft PR). Discrete `forge-fetch` / `forge-plan-write` / `forge-context` / `forge-brief` remain for IDE chaining. Post-impl review: `scrutiny probe`.
-
-### `/parley`
-
-Addresses unresolved GitHub PR review comments. Prefer **`scrutiny parley`**: GraphQL-fetch unresolved threads → ask members / verifiers / evangelists / spawn mode → isolated or team fix agents → verifier flag-pass (both modes: confirms fixes actually address comments) → optional evangelist verify (isolated) → host commit + push → script replies under each thread via `addPullRequestReviewThreadReply`. Set config root `headless = false` to run each agent in a visible terminal window (claude auto mode; tmux/zellij/macOS). Discrete `parley-fetch` / `parley-plan-write` / `parley-reply` for IDE chaining.
-
-## Install (Homebrew)
-
-Prebuilt `scrutiny` binary via the [`morphet81/homebrew-tools`](https://github.com/morphet81/homebrew-tools) tap (Apple Silicon macOS; Linux amd64/arm64):
+## Install
 
 ```bash
 brew tap morphet81/homebrew-tools
 brew install scrutiny
+# or: brew install morphet81/homebrew-tools/scrutiny
 
-# or one-shot without a prior tap:
-brew install morphet81/homebrew-tools/scrutiny
+scrutiny skills-install -g -y --skill '*'
 ```
 
-Upgrade later: `brew update && brew upgrade scrutiny`.
+Upgrade: `brew update && brew upgrade scrutiny`.
 
-Then install agent skills (binary already on PATH):
+**Need only skills** (binary already on PATH):
 
 ```bash
 scrutiny skills-install -g -y --skill '*'
 # or: npx skills add morphet81/scrutiny -g -y --skill '*'
 ```
 
-## Install skills only
+**Prerequisites:** `git`. Optional: `gh` (PR + GitHub issues), `acli` (Jira), `glab` (GitLab), `fcli` (Figma). For probe/parley/forge agents: `claude`, `agent`/`cursor-agent`, and/or `codex` on PATH. `npx` for `skills-install`.
 
-If the binary comes from elsewhere (`ensure-bin`, local build, etc.):
+First run copies [`config/default.toml`](config/default.toml) → `~/.scrutiny/config.toml`. Add `.scrutiny/` to the repo `.gitignore` (CLI warns if missing).
 
-```bash
-# via CLI (wraps npx skills add — uses local checkout when available)
-scrutiny skills-install -g -y --skill '*'
-./target/release/scrutiny skills-install --skill scrutiny --agent cursor
+---
 
-# or npx directly
-npx skills add morphet81/scrutiny -g -y --skill '*'
-npx skills add /path/to/scrutiny -g -y --skill '*' --agent cursor
-```
+## Quick start
 
-Then `/scrutiny`, `/scrutiny <PR-URL>`, `/forge <ticket-URL>`, `/forge --inline <desc>`, `/parley`, `/parley <PR-URL>`.
-
-### Prerequisites
-
-- Prefer: [Homebrew](https://brew.sh/) + [`morphet81/homebrew-tools`](https://github.com/morphet81/homebrew-tools) for the CLI
-- Or: network for GitHub Release binary / Rust toolchain for `cargo build --release`
-- `git`
-- Optional: `gh` (PR review + GitHub issues), `acli` (Jira), `glab` (GitLab), `fcli` (Figma)
-- For `scrutiny probe`: headless agent CLI on PATH — `agent`/`cursor-agent`, `claude`, and/or `codex`
-- `npx` for `skills-install`
-- `SCRUTINY_GITHUB_REPO` overrides download/install repo (default `morphet81/scrutiny`)
-- Binary fetch (when not using brew) uses GitHub Release **latest** by default (cache keyed by `bin/.scrutiny-version`; refreshes when tag changes). Set `SCRUTINY_VERSION=0.1.5` only to pin. `SCRUTINY_USE_LOCAL=1` forces local `cargo` build.
-
-## Build (developers)
+### Probe — review
 
 ```bash
-cargo build --release
-./target/release/scrutiny eval --help
-./target/release/scrutiny probe --help
-./target/release/scrutiny skills-install --help
-bash scripts/ensure-bin.sh
+scrutiny probe
+scrutiny probe --pr 42
+scrutiny probe --client claude --spawn-mode isolated
 ```
 
-## Commands
+Flow: detect agent CLI → eval / map / pack / scan → plan knobs → agents → triage → post comments to the PR.
 
-### One-shot probe (preferred)
+Artifacts: `<repo>/.scrutiny/<pr>/` (or `.scrutiny/local/`). Config: `~/.scrutiny/config.toml`.
+
+Resume triage/post from an existing AI report (skip analyze/agents):
 
 ```bash
-./target/release/scrutiny probe
-./target/release/scrutiny probe --pr 42
-./target/release/scrutiny probe --client claude --spawn-mode isolated
-./target/release/scrutiny probe --from-json '{"client":"claude","model":"sonnet","security":true,"performance":false,"error_handling":true,"reviewers":1,"evangelists":0,"spawn_mode":"isolated"}' --yes
-# resume triage/post from an existing AI review-report.json (skip eval/agents):
-./target/release/scrutiny probe --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutiny/42/scan.json]
+scrutiny probe --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutiny/42/scan.json]
 ```
 
-Flow: detect agent CLI → eval/map/pack/scan → plan-confirm → **team** lead (default) or **isolated** parallel headless agents → collate/dedupe (isolated) or lead report (team) → findings triage → `post-comments` → optional concern loop.
-
-Artifacts live under **`<repo>/.scrutiny/<pr>/`** (or `.scrutiny/local/` without a PR): `eval.json`, `map.json`, `pack.json`, `scan.json`, `plan.json`, `findings.json`, `report.json`, …. Config stays in `~/.scrutiny/config.toml`. Each CLI run warns if `.scrutiny/` is missing from `.gitignore`.
-
-`--from-report` skips analyze/agents: loads the AI report’s `findings`, inits a findings shell (from `--scan` if given, else empty), merges AI findings, then triage → post.
-
-### One-shot forge (preferred)
+### Forge — implement
 
 ```bash
-./target/release/scrutiny forge PROJ-123
-./target/release/scrutiny forge "https://…/browse/PROJ-123"
-./target/release/scrutiny forge --inline --input "Add dark mode toggle"
-./target/release/scrutiny forge --from-json '{"client":"claude","model":"sonnet","spawn_mode":"single","tdd":true,"e2e":true,"coverage_pct":100}' --yes --input KEY-1
+scrutiny forge PROJ-123
+scrutiny forge "https://…/browse/PROJ-123"
+scrutiny forge --inline --input "Add dark mode toggle"
 ```
 
-### Forge bulk mode
+Flow: fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement → verify gate (tests + pre-push checks) → commit → optional draft PR.
 
-Implement several tickets in one run — each on its own branch + worktree, run concurrently.
+**Bulk** (many tickets, each on its own branch/worktree):
 
 ```bash
 scrutiny forge bulk
@@ -117,243 +78,251 @@ scrutiny forge bulk --yes < tickets.txt
 scrutiny forge bulk --concurrency 5
 ```
 
-Interactive flow: a menu (**Paste ticket URL/key** / **Done**) collects tickets one at a time; **Done** ends collection (Done on the first prompt exits doing nothing). All tickets are validated (fetch + complexity sizing), then you pick **same settings for all** or **per-item settings** (same questions as single `forge`). Each item gets its own new branch + git worktree named `<type>-<projectkey>-<number>` (e.g. `feat-nero-8729`).
+- `--yes` — stdin keys/URLs, no prompts, auto draft PRs  
+- `--dry` — no agents / no real PRs; still creates worktrees; offers cleanup at end  
+- `--concurrency N` — overrides `forge.bulk_concurrency`
 
-Items run concurrently, capped at `forge.bulk_concurrency` (default `3`; override with `--concurrency <N>`). Non-headless (claude + tmux/zellij/iTerm2/Terminal.app): each item opens its own terminal container (tmux session / zellij tab / iTerm2 window) named after the ticket key; agent panes are named by role (PO/developer/tester/reviewer/evangelist/tdd-plan/implement) and run in that item's worktree, where you validate its TDD plan. As each item finishes, the concluding step (confirm commit subject, PR title/body, create draft PR) is handled one item at a time on the main terminal.
-
-Requires a git repository (per-item worktrees). tmux is the most reliable multiplexer; Terminal.app grouping is best-effort.
-
-Flags:
-
-- `--yes` — headless/non-interactive: reads newline-separated ticket keys/URLs from stdin, auto-answers from complexity suggestions, auto-commits, auto-creates draft PRs, no prompts.
-- `--dry` — runs the whole flow but spawns **no** agents and creates **no** real PR. Branches + worktrees are still created; non-headless panes are created (showing what would run) but never auto-closed; at the end you're offered to delete the created branches + worktrees.
-- `--concurrency <N>` — override the concurrency cap.
-
-### One-shot parley (preferred)
+### Parley — clear review comments
 
 ```bash
-./target/release/scrutiny parley
-./target/release/scrutiny parley --pr 42
-./target/release/scrutiny parley --from-json '{"client":"claude","model":"sonnet","members":2,"evangelists":1,"spawn_mode":"isolated"}' --yes
+scrutiny parley
+scrutiny parley --pr 42
 ```
 
-Flow: GraphQL unresolved `reviewThreads` → `.scrutiny/<pr>/parley-comments.json` → knobs (members ≤ comment count, verifiers, evangelists, isolated|team) → fix agents write `parley-fixes.json` → verifier flag-pass (both modes; writes `verified`/`verification`, flips bogus `addressed`) → optional evangelist verify (isolated only) → host `git commit` + `git push` → script `parley-reply` under each thread id. Agents must not commit/push/gh-reply. Config root `headless = false` opens each agent in a visible auto-mode window (claude; tmux/zellij/macOS), else headless.
+Flow: fetch unresolved threads → fix agents → verifier → optional evangelist → pre-push gate → commit + push → reply under each thread.
 
-Flow: require source CLI (`acli`/`gh`/`glab`) with install links → ticket mirror under `.scrutiny/forge-<id>/` (attachments, full fields) → if Figma URLs require `fcli` and export screenshots+XML → ask spawn (**single** default|team), playwright (skipped if no `playwright-cli`), TDD, coverage%, e2e → optional TDD test-plan agent + confirm/comment → implement agent (prompt encodes choices; writes `.scrutiny/forge-<id>/pr.json` with PR title/body + commit message; cleans non-implementation junk; does **not** commit) → script commits from `pr.json` → TTY asks to create a **draft PR** (base branch defaults to calculated base; skipped with `--yes` / non-TTY).
+Set `headless = false` to open each agent in a visible terminal (claude; tmux/zellij/macOS).
 
-Install links when missing: [acli](https://developer.atlassian.com/cloud/acli/guides/install-acli/), [fcli](https://github.com/morphet81/figma-cli).
-
-Claude: log in once (`claude` then `/login`) so OAuth works. `scrutiny probe` does **not** pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth even with a key: `SCRUTINY_CLAUDE_NO_BARE=1`.
-
-Config (`~/.scrutiny/config.toml`):
-
-```toml
-# force_client = "claude"    # skip client prompt (default_client is already claude)
-# force_spawn_mode = "isolated"  # or "team"
-```
-
-### Step-by-step probe pipeline
-
-```bash
-./target/release/scrutiny eval
-./target/release/scrutiny eval --base main --head abcdef0 --client claude --pr 42
-./target/release/scrutiny map --eval .scrutiny/42/eval.json
-./target/release/scrutiny pack --map .scrutiny/42/map.json
-./target/release/scrutiny scan --map .scrutiny/42/map.json --pack .scrutiny/42/pack.json --eval .scrutiny/42/eval.json
-# interactive: knobs in one session (or --from-json for CI)
-./target/release/scrutiny plan-confirm --eval .scrutiny/42/eval.json
-./target/release/scrutiny plan-write --eval .scrutiny/42/eval.json --map .scrutiny/42/map.json \
-  --pack .scrutiny/42/pack.json --scan .scrutiny/42/scan.json \
-  --answers .scrutiny/42/plan-answers.json
-# after spawning reviewers/evangelists:
-./target/release/scrutiny pack-partition --pack .scrutiny/42/pack.json --reviewers 2
-./target/release/scrutiny probe-session-write --plan .scrutiny/42/plan.json --pack .scrutiny/42/pack.json \
-  --from-json '[{"role":"reviewer","index":1,"paths":["a.rs"],"findings_count":2}]'
-./target/release/scrutiny findings-init --scan .scrutiny/42/scan.json --eval .scrutiny/42/eval.json \
-  --pack .scrutiny/42/pack.json --plan .scrutiny/42/plan.json --pr 42
-./target/release/scrutiny findings-triage --findings .scrutiny/42/findings.json
-./target/release/scrutiny findings-resolve --findings .scrutiny/42/findings.json
-./target/release/scrutiny findings-validate --findings .scrutiny/42/findings.json
-./target/release/scrutiny post-comments --findings .scrutiny/42/findings.json
-```
-
-### eval complexity
-
-`eval` scores XS…XL from diff size/scatter/risk/layers. **Not scored:** docs (`.md`, `docs/`, … — still listed for map). **LOC:** comment-only `+/-` lines stripped (e.g. `//`, `/* */`, `#`, `--`, `<!-- -->`). Noise globs still fully excluded.
-
-### plan-confirm / plan-write
-
-`plan-confirm` asks (TTY ↑/↓ menus + confirms): model, security, performance, error-handling, reviewers, evangelists, **spawn_mode** (`team` default | `isolated`) — defaults from eval `suggested_plan`. Prints answers JSON path. `plan-write --answers` applies caps: `max_reviewers` when pack is small (`pack_chars < 4000` → 1), evangelists only with architecture risk / tier L+, `skip_ai` when XS+docs or no agents/specialists.
-
-### Spawn modes
-
-- **isolated (default):** script runs reviewers + evangelists + analysis specialists in parallel with shared `build_isolated_prompt` templates; script collates and dedupes. Prefer this for token cost.
-- **team:** one lead headless agent gets `build_team_lead_prompt`, which **embeds the same isolated role briefs verbatim**. Lead pastes those templates when spawning members, waits for all JSON returns, keeps higher severity on conflicts, then returns one findings JSON. Higher token cost (lead re-bills member transcripts).
-
-Print a role or lead prompt for skill/debug:
-
-```bash
-./target/release/scrutiny agent-prompt --role reviewer --pack .scrutiny/42/pack.json [--plan .scrutiny/42/plan.json] [--paths a.rs,b.rs]
-./target/release/scrutiny agent-prompt --role lead --pack .scrutiny/42/pack.json --plan .scrutiny/42/plan.json
-```
-
-### Review session
-
-`pack-partition` splits pack slice paths across N reviewers (round-robin). `probe-session-write` records spawned agents and **fails** if counts do not match the plan (team mode expects one `lead`).
-
-### Findings / post-comments
-
-After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `suggestion`.
-
-`findings-triage` (and `scrutiny probe`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. The agent prints an `Answer:` block first, then revises that finding only if the answer changes it (`(updated …)` vs `(finding unchanged …)`); menu reappears. Every Q&A is persisted on the finding as `ask_log`. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
-
-Fix options appear **only** when multiple genuinely-viable approaches exist; a finding with one clear best fix shows just **Post**. When options are present, **A** is the AI-preferred one (its text says why). `Why:` and every fix option are word-wrapped to the terminal width and shown in full, never truncated; only the ↑/↓ menu labels are clamped to one line.
-
-On a TTY, severity/title use ANSI colors (`NO_COLOR` or non-TTY disables). Each finding shows a short code snippet from `git show <head>:<path>` when a path exists.
-
-`post-comments` requires a GitHub PR. It prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE` (or `--event`), then creates one PR review with **inline comments** (one per included finding with a diff line). Bodies end with `[AI Agent]`.
-
-Comment placement:
-
-- **Line** — path + line on the **PR/pack unified diff** → GitHub review comment (`path`/`line`/`side`)
-- **File** — path but no commentable line (missing line, or line not on the PR patch) → `"subject_type": "file"` (post still succeeds; demotes automatically)
-- **Global** — no path → `### Global notes` in the review body
-
-Scan seeds are **change-scoped** (added lines / change map / large added surface in the pack diff). Agents should still cite PR-diff lines; if a Post’d finding has a non-commentable line, scrutiny posts a file comment instead of failing the run. Failed GitHub review creates do **not** silently dump comments into the review body.
-
-If the authenticated user already has a **PENDING** review on that PR, the script asks:
-
-1. Add these comments to the pending review (GraphQL append — existing draft line anchors kept), then submit it  
-2. Close the pending review (choose event), then create a **new** review with the findings  
-
-Agents must not call `gh` review create/dismiss/delete — only `post-comments`.
-
-Transient GitHub failures (HTTP 500/502/503/504/429, rate limits, connection resets, TLS timeouts) are retried up to 4 times with `1s / 3s / 8s` backoff. Deterministic failures (4xx, auth, bad anchor) fail immediately.
-
-If comments still fail to append, the review is **left pending on purpose** and nothing is lost. Re-run the exact same command to resume — it posts only the missing comments:
-
-```bash
-scrutiny post-comments --findings .scrutiny/<pr>/findings.json --cwd <repo-root>
-```
-
-Comments already on the pending review are matched on `(path, line, body)` and skipped, so a resume never duplicates. No `--event` needed: the chosen event is already in `findings.json`. The failure message prints this command verbatim.
-
-Line anchors are verified with `git show <head_oid>:<path>` and PR file patches.
-
-### Forge pipeline
-
-```bash
-./target/release/scrutiny forge-fetch --input "https://github.com/o/r/issues/1"
-./target/release/scrutiny forge-fetch --inline --input "Add dark mode"
-./target/release/scrutiny forge-plan-write --ticket … \
-  --client cursor --model composer-2-fast --approach tdd \
-  --e2e false --agents 2 --testers 1 --reviewers 1 --evangelists 0
-./target/release/scrutiny forge-context --ticket …
-./target/release/scrutiny forge-brief --ticket … --session … --context …
-```
-
-Each command prints **one** temp JSON path on stdout (`forge-brief` also writes a `.md` path inside the JSON).
+---
 
 ## Config
 
-First run copies `config/default.toml` → `~/.scrutiny/config.toml`. Every key has a default
-(`#[serde(default)]`), so a partial file is valid — set only what you override.
+Partial files are fine — every key has a default. Set only overrides.
 
-### Project-local `scrutiny.toml`
+| File | Role |
+|------|------|
+| `~/.scrutiny/config.toml` | Global (created from shipped defaults) |
+| `<repo>/scrutiny.toml` | Per-project override (walks up from cwd) |
 
-Drop a `scrutiny.toml` in your project to override the global config **per item**. Scrutiny
-walks up from the working directory to the repo root and uses the first `scrutiny.toml` it
-finds. Merge is deep and per-key: any key set locally wins, everything else falls back to
-`~/.scrutiny/config.toml`. Tables merge key-by-key; scalars and arrays are replaced wholesale
-(a local array replaces the global one, it does not append).
+Merge is deep per key: local wins; tables merge key-by-key; scalars/arrays replace wholesale.
 
 ```toml
-# <repo>/scrutiny.toml — override just what this repo needs
+# scrutiny.toml — override only what this repo needs
 default_client = "codex"
 
 [models.claude]
-m = "sonnet"        # only tier `m` changes; other tiers stay global
+m = "sonnet"
 
 [git]
-base_candidates = ["develop", "main"]   # replaces the global list
+base_candidates = ["develop", "main"]
 ```
 
-### Full key reference
+### Top-level
 
-**Top-level**
-
-| Key | Default | Meaning |
-|-----|---------|---------|
+| Key | Default | Explanation |
+|-----|---------|-------------|
 | `default_client` | `"claude"` | AI client: `claude` \| `cursor` \| `codex` |
-| `headless` | `true` | Capture agent stdout. `false` → open each agent in a visible terminal window (claude only; tmux/zellij/macOS Terminal/iTerm2). Applies to probe, parley, forge. Permission mode is model-aware: models that support `--permission-mode auto` (opus/sonnet 4.6+, fable) run unattended; older ones (haiku, sonnet/opus 4.5, claude-3) fall back to manual approval in the pane (non-headless) or `--dangerously-skip-permissions` (headless), with a one-time warning |
-| `force_client` | _(unset)_ | Skip the client prompt for `scrutiny probe` |
-| `force_spawn_mode` | _(unset)_ | Skip spawn-mode prompt: `isolated` \| `team`. Unset → `isolated` |
-| `editor` | _(unset)_ | Editor for PR descriptions; falls back to `$VISUAL` → `$EDITOR` → `vi`. Supports args (`"code --wait"`) |
+| `headless` | `true` | `true` = capture agent stdout. `false` = visible terminal window (claude; tmux/zellij/Terminal/iTerm2). Applies to probe, forge, parley |
+| `force_client` | unset | Skip client prompt for `scrutiny probe` |
+| `force_spawn_mode` | unset | Skip spawn prompt: `isolated` \| `team`. Unset → prompt (default **isolated**) |
+| `editor` | unset | PR description editor; else `$VISUAL` → `$EDITOR` → `vi`. May include args (`"code --wait"`) |
 
-**`[models.<client>]`** — model per tier for `claude` / `cursor` / `codex`. Keys `xs`,`s`,`m`,`l`,`xl`. Claude uses aliases (`haiku`/`sonnet`/`opus`) or pinned Anthropic ids — not Cursor slugs.
+### `[models.<client>]`
 
-**`[review]`** — per-tier toggles `security_by_tier`, `performance_by_tier`, `error_handling_by_tier` (each `XS`/`S`/`M`/`L`/`XL` bool). Security/performance/error-handling default off for XS/S, on for M/L/XL.
+Model id per complexity tier for `claude` / `cursor` / `codex`.
 
-**`[review.signals]`** — content-signal gating: `ignore_content_signals` (`false`), plus glob/regex lists `security_path_globs`, `security_diff_patterns`, `performance_path_globs`, `performance_diff_patterns`, `performance_css_path_globs`, `performance_css_patterns`, `error_handling_diff_patterns`.
+| Key | Default (claude) | Default (cursor) | Default (codex) |
+|-----|------------------|------------------|-----------------|
+| `xs` | `haiku` | `composer-2-fast` | `gpt-5.3-codex` |
+| `s` | `haiku` | `composer-2-fast` | `gpt-5.3-codex` |
+| `m` | `sonnet` | `claude-4.6-sonnet-medium-thinking` | `gpt-5.5-medium` |
+| `l` | `opus` | `claude-sonnet-5-thinking-high` | `gpt-5.6-sol-medium` |
+| `xl` | `opus` | `claude-opus-4-8-thinking-high` | `gpt-5.6-terra-medium` |
 
-**`[agents]`** — `max_agents_total` (`4`), `max_reviewers` (`2`), `max_evangelists` (`1`); per-tier counts `[agents.reviewers_by_tier]` and `[agents.evangelists_by_tier]` (`XS`..`XL`).
+Claude: Anthropic aliases or pinned ids — not Cursor slugs.
 
-**`[git]`** — `base_candidates` (`["main","master","develop"]`), `exclude_globs` (lockfiles, `node_modules`, `dist`, generated, …).
+### `[review]`
 
-**`[pack]`** — review-pack budgets: `max_chars` (`48000`), `doc_digest_lines` (`40`), `symbol_context_lines` (`3`), `min_file_chars` (`1200`), weights `source_weight` (`4`)/`test_weight` (`2`)/`doc_weight` (`1`), xref knobs `enable_xref` (`true`), `xref_max_symbols` (`40`), `xref_max_files_scanned` (`300`), `xref_char_budget` (`6000`), `xref_body_lines` (`40`), `annex_char_budget` (`12000`).
+Per-tier specialist toggles (`XS`…`XL` bools).
 
-**`[pack.explore]`** — bounded agent exploration: `enable` (`true`), `max_extra_reads` (`6`), `max_extra_chars` (`24000`), `prefer_read_over_bash` (`true`), `allow_repo_grep` (`false`), `require_pack_path_hint` (`true`).
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `security_by_tier` | XS/S off; M/L/XL on | Spawn security specialist when true for the eval tier |
+| `performance_by_tier` | XS/S/M off; L/XL on | Spawn performance specialist |
+| `error_handling_by_tier` | XS off; S–XL on | Spawn error-handling specialist |
 
-**`[scan]` / `[scan.i18n]`** — deterministic scan: `enable` (`true`), `commands` (extra lint hooks); i18n `enable` (`true`), `reference_locale` (`"en"`), `path_globs`, `check_placeholders` (`true`), `check_empty_values` (`true`), `full_catalog` (`false`).
+### `[review.signals]`
 
-**`[forge]`** — force approach / e2e / agent counts (omit = prompt): `approach`, `e2e`, `agents`, `testers`, `reviewers`, `evangelists`, `model`; toggles `enable_figma`/`enable_lore`/`enable_po`/`enable_ticket_writeback`/`enable_branch` (all `true`); defaults `default_approach` (`"tdd"`), `default_agents` (`2`), `default_testers` (`1`), `default_reviewers` (`1`), `default_evangelists` (`0`); verify gate `verify_commands`, `verify_max_loops` (`2`), `verify_coverage` (`true`); `branch_headless` (`"auto"`); `bulk_concurrency` (`3`); `pr_description_prompt` _(unset)_ — when set, a dedicated headless agent writes the PR body from this prompt + the diff (overrides the implement agent's `pr_body`).
+Content-signal gating (path globs + diff regexes). Full lists live in [`config/default.toml`](config/default.toml).
 
-**`[forge.complexity]`** — keyword lists, story-point field names, and tier thresholds that drive automatic model selection.
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `ignore_content_signals` | `false` | If `true`, tier toggles alone decide specialists (ignore path/diff hits) |
+| `security_path_globs` | auth/api/secrets… | Paths that activate security review |
+| `security_diff_patterns` | fetch/JWT/eval… | Diff regexes that activate security review |
+| `performance_path_globs` | hooks/domain/stores… | Paths that activate performance review |
+| `performance_diff_patterns` | useEffect/map/Mutex… | Diff regexes for performance |
+| `performance_css_path_globs` | `**/*.{css,scss,sass,less}` | CSS paths for perf CSS checks |
+| `performance_css_patterns` | nth-child/keyframes… | CSS diff regexes |
+| `error_handling_diff_patterns` | try/catch/Result/unwrap… | Diff regexes for error-handling |
 
-**`[parley]`** — `default_members` (`1`), `default_evangelists` (`1`), `default_verifiers` (`1`), `push_fix_max_loops` (`2`), `repair` (`true`). The old `agent_wall_secs` / `prepush_fix_wall_secs` still parse here but are superseded by `[timeouts]`.
+### `[agents]`
 
-**`[timeouts]`** — agent wall-clock limits, in seconds. Every key is optional. See below.
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `max_agents_total` | `4` | Hard cap on concurrent review agents |
+| `max_reviewers` | `2` | Cap on reviewers (also tightened when pack is small) |
+| `max_evangelists` | `1` | Cap on evangelists |
+| `reviewers_by_tier` | XS=0 S/M=1 L/XL=2 | Suggested reviewer count per tier |
+| `evangelists_by_tier` | XS–M=0 L/XL=1 | Suggested evangelist count per tier |
 
-**`[prompts]`** — custom prompt injection (see below).
+### `[git]`
 
-### Timeouts
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `base_candidates` | `["main","master","develop"]` | Branch names tried when resolving the review/forge base |
+| `exclude_globs` | lockfiles, `node_modules`, `dist`, snaps… | Paths excluded from eval/pack |
+| `artifact_globs` | `coverage/*`, playwright reports… | Never staged by forge/parley commits — cleaned from the tree instead |
 
-`agent_wall_secs` (`600`) is the base. Any stage with no explicit value derives from it, so raising the base raises everything; setting one key raises only that stage.
+### `[pack]`
 
-| Key | Default |
-|---|---|
-| `agent_wall_secs` | `600` — base for every stage below |
-| `progress_secs` | `15` — "still running" tick interval |
-| `nonheadless_wall_secs` | base ×3 (`1800`) — agents in a visible terminal window |
-| `probe_isolated_wall_secs` | base (`600`) |
-| `probe_team_wall_secs` | base (`600`) |
-| `probe_consolidate_wall_secs` | base (`600`) |
-| `probe_ask_wall_secs` | base (`600`) — triage "Ask a question…" |
-| `forge_test_plan_wall_secs` | base (`600`) |
-| `forge_pr_description_wall_secs` | base (`600`) |
-| `forge_implement_wall_secs` | base ×2 (`1200`) |
-| `forge_fix_wall_secs` | base ×2 (`1200`) — verify-gate fix agent |
-| `forge_bulk_item_wall_secs` | base ×8 (`4800`) — one item of a bulk run |
-| `parley_agent_wall_secs` | base (`600`) — member / verifier / evangelist |
-| `parley_prepush_fix_wall_secs` | base ×2 (`1200`) |
+Review-pack size and cross-file budgets.
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `max_chars` | `48000` | Total pack character budget |
+| `doc_digest_lines` | `40` | Max lines kept from doc files |
+| `symbol_context_lines` | `3` | Context lines around changed symbols |
+| `min_file_chars` | `1200` | Per-file floor before extra symbol bodies |
+| `source_weight` | `4` | Budget weight for source files |
+| `test_weight` | `2` | Budget weight for tests |
+| `doc_weight` | `1` | Budget weight for docs |
+| `enable_xref` | `true` | Resolve cross-file referenced signatures |
+| `xref_max_symbols` | `40` | Max symbols resolved via xref |
+| `xref_max_files_scanned` | `300` | Max files scanned for xref |
+| `xref_char_budget` | `6000` | Char budget for xref snippets |
+| `xref_body_lines` | `40` | Max body lines per xref hit |
+| `annex_char_budget` | `12000` | Extra annex budget |
+
+### `[pack.explore]`
+
+Bounded agent exploration beyond the pack.
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `enable` | `true` | Allow extra reads outside the pack |
+| `max_extra_reads` | `6` | Cap on extra file reads |
+| `max_extra_chars` | `24000` | Cap on chars from extra reads |
+| `prefer_read_over_bash` | `true` | Prefer Read tool over shell |
+| `allow_repo_grep` | `false` | Allow whole-repo grep |
+| `require_pack_path_hint` | `true` | Extra reads must relate to a pack path |
+
+### `[scan]` / `[scan.i18n]`
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `scan.enable` | `true` | Run deterministic scan before AI review |
+| `scan.commands` | `[]` | Extra lint commands (repo cwd) |
+| `scan.i18n.enable` | `true` | Check locale JSON catalogs |
+| `scan.i18n.reference_locale` | `"en"` | Locale other files must cover |
+| `scan.i18n.path_globs` | `**/locales/*.json` etc. | Where locale files live |
+| `scan.i18n.check_placeholders` | `true` | Flag mismatched `{placeholders}` |
+| `scan.i18n.check_empty_values` | `true` | Flag empty translation values |
+| `scan.i18n.full_catalog` | `false` | Compare full catalogs vs change-scoped |
+
+### `[forge]`
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `approach` | unset | Force `tdd` \| `heads_down` \| `plan`; omit → prompt |
+| `e2e` | unset | Force e2e on/off; omit → prompt |
+| `agents` / `testers` / `reviewers` / `evangelists` | unset | Force team counts; omit → prompt |
+| `model` | unset | Pin model id; omit → complexity suggestion + prompt |
+| `enable_figma` | `true` | Export Figma when ticket has links (`fcli`) |
+| `enable_lore` | `true` | Include project lore in context |
+| `enable_ticket_writeback` | `true` | Allow writing back to the ticket |
+| `enable_po` | `true` | Enable PO/team planning roles |
+| `enable_branch` | `true` | Interactive branch / worktree step |
+| `default_approach` | `"tdd"` | Default when prompting |
+| `default_agents` | `2` | Default developer agents |
+| `default_testers` | `1` | Default testers |
+| `default_reviewers` | `1` | Default reviewers |
+| `default_evangelists` | `0` | Default evangelists |
+| `verify_commands` | `[]` | Explicit verify-gate commands; empty → auto-detect harness |
+| `verify_max_loops` | `2` (shipped) | Max fix loops before gate fails (`5` if key omitted from a minimal file) |
+| `verify_coverage` | `true` | Gate on coverage % when measurable |
+| `prepush_cmd` | unset | Override pre-push checks in the verify gate; empty → `git hook run pre-push` if a hook exists |
+| `branch_headless` | `"auto"` | `"auto"` follow detection \| `"never"` stay on current branch |
+| `bulk_concurrency` | `3` | Max concurrent `forge bulk` items (`--concurrency` overrides) |
+| `pr_description_prompt` | unset | If set, dedicated agent writes PR body from this prompt + diff |
+
+### `[forge.complexity]`
+
+Ticket scoring → tier → `[models.<client>]`. Lists default in `config/default.toml`.
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `story_point_fields` | `story_points`, Jira customfields… | Fields tried for story points |
+| `breadth_keywords` | refactor, migrate… | +8 pts/hit (cap 2) |
+| `integration_keywords` | api, webhook… | +6 pts/hit (cap 2) |
+| `risk_keywords` | auth, payment… | +10 pts/hit (cap 2) |
+| `trivial_keywords` | typo, minor… | −8 pts/hit (cap 2) |
+| `bump_labels` | urgent, epic… | +6 pts (max 1) |
+| `lower_labels` | trivial, small… | −6 pts (max 1) |
+| `tier_thresholds` | `[18,35,55,95]` | Inclusive upper bounds for XS/S/M/L; above → XL |
+
+Also scored (not configurable lists): AC count, description size, issue type, Figma URLs, comment volume.
+
+### `[parley]`
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `default_members` | `1` | Default fix agents (capped by comment count) |
+| `default_verifiers` | `1` | Agents that check fixes actually address threads |
+| `default_evangelists` | `1` | Optional architecture/quality pass (isolated) |
+| `repair` | `true` | Re-implement stubs / verifier rejects before replies |
+| `prepush_cmd` | unset | Override quiet pre-push gate command; else repo hook |
+| `prepush_fix_max_loops` | `5` | Max check → fix-agent → re-check cycles in the gate |
+| `push_fix_max_loops` | `2` | **Deprecated** — use `prepush_fix_max_loops` |
+| `agent_wall_secs` | unset | **Deprecated** — use `[timeouts].parley_agent_wall_secs` |
+| `prepush_fix_wall_secs` | unset | **Deprecated** — use `[timeouts].parley_prepush_fix_wall_secs` |
+
+### `[timeouts]`
+
+Seconds. `agent_wall_secs` is the base; unset stages derive from it (`0` = unset). A timeout kills the agent; stage reports `TIMEOUT`.
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `agent_wall_secs` | `600` | Base for every stage below |
+| `progress_secs` | `15` | “Still running” tick interval |
+| `nonheadless_wall_secs` | base ×3 (`1800`) | Agents in a visible terminal |
+| `probe_isolated_wall_secs` | base | Isolated probe agents |
+| `probe_team_wall_secs` | base | Team-mode probe lead |
+| `probe_consolidate_wall_secs` | base | Isolated consolidate pass |
+| `probe_ask_wall_secs` | base | Triage “Ask a question…” |
+| `forge_test_plan_wall_secs` | base | TDD test-plan agent |
+| `forge_pr_description_wall_secs` | base | PR description agent |
+| `forge_implement_wall_secs` | base ×2 (`1200`) | Implement agent |
+| `forge_fix_wall_secs` | base ×2 (`1200`) | Verify-gate fix agent |
+| `forge_bulk_item_wall_secs` | base ×8 (`4800`) | One bulk-forge item |
+| `parley_agent_wall_secs` | base | Member / verifier / evangelist |
+| `parley_prepush_fix_wall_secs` | base ×2 (`1200`) | Pre-push fix agent |
 
 ```toml
 [timeouts]
-forge_implement_wall_secs = 3600   # long tickets only
+forge_implement_wall_secs = 3600
 ```
 
-`0` means unset (falls back to the default). A timeout kills the agent and the stage reports `TIMEOUT`.
+### `[prompts]`
 
-### Custom prompts
+Inject text into spawned-agent prompts without rebuilding. Order: **`global` → `<role>` → scrutiny’s prompt**.
 
-Inject your own text into scrutiny's spawned-agent prompts without editing the binary.
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `global` | `""` | Prepended to every spawned agent |
+| `agents.<role>` | unset | Prepended for one role only |
 
-- `[prompts].global` — prepended to **every** spawned agent (probe, parley, forge).
-- `[prompts.agents].<role>` — prepended for one role only.
-
-Order: **`global` → `<role>` → scrutiny's own prompt**. Both trimmed; empty entries skipped.
-
-Role key = the agent's label prefix with `-` → `_`. Unknown keys are silently ignored.
+Role key = agent label with `-` → `_`. Unknown keys ignored. Team mode: only the lead’s prompt is injected — not sub-agents the lead spawns.
 
 | Surface | Role keys |
 |---------|-----------|
@@ -361,93 +330,122 @@ Role key = the agent's label prefix with `-` → `_`. Unknown keys are silently 
 | parley | `parley_member`, `parley_lead`, `parley_verifier`, `parley_evangelist`, `parley_push_fix` |
 | forge | `forge_test_plan`, `forge_test_plan_revise`, `forge_implement`, `forge_po_team`, `forge_verify_fix` |
 
-Caveat: in **team** mode the lead spawns teammates itself — injection reaches only the prompt
-scrutiny builds (the lead's), not sub-agents the lead spawns.
-
 ```toml
 [prompts]
-global = "Repo convention: cite file:line. Never edit generated code."
+global = "Cite file:line. Never edit generated code."
 
 [prompts.agents]
-reviewer = "Prioritise null-safety and async race conditions."
-security = "We handle PCI data — flag any logging of card fields."
-forge_implement = "Match the existing Result/anyhow error style."
+reviewer = "Prioritise null-safety and async races."
+forge_implement = "Match existing Result/anyhow style."
 ```
 
-### Forge model selection
+---
 
-`scrutiny forge` estimates ticket complexity **before prompting for the model**. Signals (all deterministic, no AI call):
+## Details
 
-| Signal | Source | Notes |
-|--------|--------|-------|
-| AC count | Checkboxes / numbered list under AC heading / BDD Scenarios | Bucket → points |
-| Description size | Word count | Bucket → points |
-| Breadth keywords | title + description (refactor, migrate, overhaul…) | +8 pts/hit, capped at 2 |
-| Integration keywords | api, database, webhook, migration… | +6 pts/hit, capped at 2 |
-| Risk keywords | auth, security, payment, pii… | +10 pts/hit, capped at 2 |
-| Trivial keywords | typo, wording, bump, minor… | −8 pts/hit, capped at 2 |
-| Story points | Jira custom field (`story_point_fields`) | Dominant: 1-2→S, 3-5→M, 6-8→L, 9+→XL |
-| Issue type | Jira `issuetype.name` | Epic +15, Story +8, Bug −3, Subtask −8 |
-| Labels | config `bump_labels` / `lower_labels` | ±6 pts, max 1 hit each |
-| Figma URLs | ticket | +5 pts (UI work) |
-| Comments | ticket | 0/2/5/8 pts |
+### Spawn modes (probe / parley)
 
-Score 0–100 → tier XS/S/M/L/XL → `[models.<client>]` lookup → default selection in the model prompt (user can still change it). Override with `[forge] model = "sonnet"` to pin globally.
-
-Example force (no prompts):
-
-```toml
-[forge]
-approach = "tdd"
-e2e = false
-agents = 2
-testers = 1
-reviewers = 1
-evangelists = 0
-model = "sonnet"      # pin model, skip complexity prompt
-enable_figma = false
-enable_lore = false
-# pr_description_prompt = "Summarize for reviewers: what changed, why, risk, test notes."
-
-[forge.complexity]
-# Extend risk keywords for your domain
-risk_keywords = ["auth", "security", "payment", "pii", "credential", "oauth", "token", "billing"]
-# Your Jira story-point custom field
-story_point_fields = ["customfield_10016"]
-```
-
-## Token-saving habits
-
-Same idea across both skills: artifact paths in, not raw CLI dumps; pack/brief instead of full-file fishing; config force knobs to skip prompts; turn off Figma/lore when unused; set reviewers/evangelists to `0` when you want static-only.
-
-Review specifics:
-- Prefer **isolated** spawn (default) over team.
-- Locale/i18n files are **not** AI-reviewed — `scan.i18n` flags missing keys across languages.
-- Security/performance defaults follow **content signals** (network/auth vs hooks/domain), not tier alone.
-- Agents use graduated exploration (pack → allowlisted fetch → capped extra Reads). Avoid whole-repo `rg`.
-- Tune `~/.scrutiny/config.toml`: `[review.signals]`, `[pack.explore]`, `[agents].max_agents_total`.
-
-## Releases
-
-**Not on crates.io** — both crates set `publish = false`; `release.toml` keeps `cargo release` from publishing.
-
-Bump + tag (no registry):
+| Mode | Behavior |
+|------|----------|
+| **isolated** (default) | Script runs reviewers/evangelists/specialists in parallel; script collates + dedupes. Lower token cost |
+| **team** | One lead agent embeds role briefs, spawns members, returns one findings JSON. Higher token cost |
 
 ```bash
-cargo release patch --execute   # or minor / major
+scrutiny agent-prompt --role reviewer --pack .scrutiny/42/pack.json
+scrutiny agent-prompt --role lead --pack .scrutiny/42/pack.json --plan .scrutiny/42/plan.json
 ```
 
-Tag `v*` runs `.github/workflows/release.yml` and uploads platform binaries; `ensure-bin.sh` downloads the host asset when present.
+### Probe step pipeline
 
-Released targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`. Intel Mac (`x86_64-apple-darwin`) is not shipped — `ensure-bin` builds with cargo instead.
+For IDE chaining / debugging (one-shot `probe` already runs this):
 
-## Layout
+```bash
+scrutiny eval [--base main --head <sha> --pr 42]
+scrutiny map --eval .scrutiny/42/eval.json
+scrutiny pack --map .scrutiny/42/map.json
+scrutiny scan --map … --pack … --eval …
+scrutiny plan-confirm --eval …
+scrutiny plan-write --eval … --map … --pack … --scan … --answers …
+scrutiny findings-init … && scrutiny findings-triage … && scrutiny post-comments …
+```
+
+`eval` scores XS…XL from diff size/scatter/risk. Docs are listed but not scored. Comment-only LOC is stripped.
+
+`plan-confirm` asks model, security, performance, error-handling, reviewers, evangelists, spawn_mode. `plan-write` applies caps (small pack → ≤1 reviewer; evangelists only with architecture risk / tier L+; `skip_ai` for XS+docs).
+
+### Findings & post-comments
+
+Triage (TTY): ↑/↓ — Post / Ignore / Ask… (or fix option A/B…). Ask is its own menu item; Q&A stored on `ask_log`. Non-TTY: `P` / `I` / option letter / `ask <q>`.
+
+Severities: `critical` \| `warning` \| `suggestion`. Bodies end with `[AI Agent]`.
+
+| Placement | When |
+|-----------|------|
+| Line | Path + line on PR/pack diff |
+| File | Path but line not commentable |
+| Global | No path → `### Global notes` in review body |
+
+Pending review on the PR → choose append-then-submit or close-and-recreate. Transient GitHub failures retry (4×, backoff). Resume failed posts with the same `post-comments` command — already-posted comments are skipped.
+
+### Forge / parley discrete commands
+
+```bash
+scrutiny forge-fetch --input "…"
+scrutiny forge-plan-write --ticket … --client … --model … --approach tdd …
+scrutiny forge-context --ticket …
+scrutiny forge-brief --ticket … --session … --context …
+
+scrutiny parley-fetch …
+scrutiny parley-plan-write …
+scrutiny parley-reply …
+```
+
+Each prints one JSON path on stdout.
+
+### Pre-push gate
+
+Forge verify and parley both run the repo’s pre-push checks quietly (log file, not a pane flood). Override with `forge.prepush_cmd` / `parley.prepush_cmd`. No hook and no override → gate is a no-op green.
+
+### Claude auth
+
+Log in once (`claude` → `/login`). Probe does not pass `--bare` unless `ANTHROPIC_API_KEY` is set or `SCRUTINY_CLAUDE_BARE=1`. Force OAuth with a key present: `SCRUTINY_CLAUDE_NO_BARE=1`.
+
+### Token-saving habits
+
+- Prefer **isolated** spawn  
+- Force knobs in config to skip prompts  
+- Turn off Figma/lore when unused; set reviewers/evangelists to `0` for static-only  
+- Tune `[review.signals]`, `[pack.explore]`, `[agents].max_agents_total`  
+- Locale files are not AI-reviewed — `scan.i18n` covers them  
+
+### Build (developers)
+
+```bash
+cargo build --release
+./target/release/scrutiny probe --help
+bash scripts/ensure-bin.sh
+```
+
+Binary fetch (non-brew): GitHub Release **latest** by default. Pin with `SCRUTINY_VERSION=…`. Force local build: `SCRUTINY_USE_LOCAL=1`. Override repo: `SCRUTINY_GITHUB_REPO` (default `morphet81/scrutiny`).
+
+### Releases
+
+Not on crates.io (`publish = false`). Tag with:
+
+```bash
+cargo release patch --execute
+```
+
+Tag `v*` builds platform binaries. Targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`. Intel Mac builds via cargo in `ensure-bin`.
+
+### Layout
 
 ```
-skills/scrutiny/SKILL.md   # /scrutiny
-skills/forge/SKILL.md      # /forge
-scripts/ensure-bin.sh      # shared (also copied under each skill)
+skills/scrutiny/SKILL.md
+skills/forge/SKILL.md
+skills/parley/SKILL.md
 config/default.toml
 crates/scrutiny-cli/
 crates/scrutiny-core/
+scripts/ensure-bin.sh
 ```
