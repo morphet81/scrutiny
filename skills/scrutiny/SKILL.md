@@ -269,7 +269,7 @@ Each issue: **number**, **title**, **path:line**, **explanation**, **proposed fi
 
 ### 8. Interactive triage → edit findings JSON → hand off to script
 
-**Prefer the script.** Run `$SCRUTINY_BIN findings-triage` (or full `scrutiny probe`): TTY uses **↑/↓ menus** — Post / Ignore / Ask a question… (or fix option). Ask is a **separate** menu row, then a follow-up question — never "type P or free text" on one prompt (that misreads `P` as a question).
+**Prefer the script.** Run `$SCRUTINY_BIN findings-triage` (or full `scrutiny probe`): TTY uses **↑/↓ menus** — Post / Ignore / Ask a question… (or fix option). Ask is a **separate** menu row, then a follow-up question — never "type P or free text" on one prompt (that misreads `P` as a question). Ask always shows an `Answer:` block before the menu returns, and says whether the finding changed; the Q&A is kept in the finding's `ask_log`. Agent hosts doing their own Ask must show the answer too — never re-render the finding with no reply.
 
 If the agent host cannot attach a TTY to the binary, use **one** multi-choice form (Post/Ignore/options per finding; no free-text action field). Never split by severity. Never a second decision menu after posting. **Do not** ask Request changes / Comment / Approve — that is `post-comments`'s job.
 
@@ -300,6 +300,8 @@ RESULT="$("$SCRUTINY_BIN" post-comments --findings "$FINDINGS" --cwd <repo-root>
 Optional non-interactive: `post-comments --event COMMENT|REQUEST_CHANGES|APPROVE`.
 
 **`post-comments` owns GitHub review API.** Script prompts for `COMMENT` / `REQUEST_CHANGES` / `APPROVE`. If your user already has a **PENDING** review, script asks: (1) GraphQL-append findings onto that pending review then submit, or (2) submit pending as-is then create a separate findings review. Agent must **never** run `gh api` to create / dismiss / delete / submit reviews. If script fails, show stderr to user — do not improvise.
+
+Transient GitHub failures (5xx / 429 / rate limit / connection reset) are retried with backoff inside the script. If comments still fail, the pending review is **kept on purpose** and stderr prints the resume command verbatim. Recovery = re-run that exact same `post-comments` command (no `--event`, no re-triage) — already-posted comments are skipped, only the missing ones post. Agent re-runs the script; never `gh`, never hand-cleanup of the pending review.
 
 Show result path / review `html_url` from the script output. Agent must **not** re-ask the review action in chat.
 

@@ -148,6 +148,65 @@ fn find_double(chars: &[char], start: usize, marker: char) -> Option<usize> {
     None
 }
 
+/// Usable stderr width. Falls back to 100 when the size is unknown (piped,
+/// CI), and stays inside 60..=200 so very narrow or very wide terminals still
+/// produce readable blocks.
+pub fn term_cols() -> usize {
+    let cols = console::Term::stderr()
+        .size_checked()
+        .map(|(_, c)| c as usize)
+        .unwrap_or(100);
+    cols.clamp(60, 200)
+}
+
+/// Word-wrap `text` to `cols`, prefixing the first line with `first_prefix` and
+/// every continuation line with `cont_prefix`. Existing newlines are hard
+/// breaks. Words longer than the available width are left intact (never split)
+/// so paths and identifiers stay copy-pasteable.
+pub fn wrap_indent(text: &str, first_prefix: &str, cont_prefix: &str, cols: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut first_line = true;
+
+    for para in text.split('\n') {
+        let mut cur = String::new();
+        let mut cur_prefix = if first_line {
+            first_prefix
+        } else {
+            cont_prefix
+        };
+        let mut has_word = false;
+
+        for word in para.split_whitespace() {
+            let width = cols.saturating_sub(cur_prefix.chars().count()).max(1);
+            let next_len = if has_word {
+                cur.chars().count() + 1 + word.chars().count()
+            } else {
+                word.chars().count()
+            };
+            if has_word && next_len > width {
+                out.push(format!("{cur_prefix}{cur}"));
+                cur_prefix = cont_prefix;
+                cur.clear();
+                cur.push_str(word);
+            } else {
+                if has_word {
+                    cur.push(' ');
+                }
+                cur.push_str(word);
+                has_word = true;
+            }
+        }
+        if has_word {
+            out.push(format!("{cur_prefix}{cur}"));
+        } else {
+            out.push(cur_prefix.trim_end().to_string());
+        }
+        first_line = false;
+    }
+
+    out.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +250,58 @@ mod tests {
     fn table_line_passes_through() {
         let out = plain("| a | b |");
         assert!(out.contains("| a | b |"));
+    }
+
+    #[test]
+    fn term_cols_stays_in_range() {
+        let c = term_cols();
+        assert!((60..=200).contains(&c), "got {c}");
+    }
+
+    #[test]
+    fn wrap_indent_hangs_continuation_and_respects_width() {
+        let out = wrap_indent("aaa bbb ccc ddd eee", "  A) ", "     ", 14);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() > 1);
+        assert!(lines[0].starts_with("  A) "));
+        for l in &lines[1..] {
+            assert!(l.starts_with("     "), "bad continuation: {l:?}");
+        }
+        for l in &lines {
+            assert!(l.chars().count() <= 14, "too wide: {l:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_indent_keeps_full_text() {
+        let text = "Widen ReservationsController.fetchReservations to ReservationsListParams. \
+                    Preferred: merge become reachable and match hook type.";
+        let out = wrap_indent(text, "  A) ", "     ", 40);
+        let flat: String = out
+            .lines()
+            .map(|l| l.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("A) ", "");
+        assert_eq!(flat.trim(), text);
+    }
+
+    #[test]
+    fn wrap_indent_never_splits_long_word() {
+        let out = wrap_indent(
+            "src/data/hooks/use-reservations-with-a-very-long-name.ts",
+            "  ",
+            "  ",
+            20,
+        );
+        assert_eq!(out.lines().count(), 1);
+        assert!(out.contains("use-reservations-with-a-very-long-name.ts"));
+    }
+
+    #[test]
+    fn wrap_indent_keeps_hard_breaks() {
+        let out = wrap_indent("one\n\ntwo", "  ", "  ", 40);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, vec!["  one", "", "  two"]);
     }
 }

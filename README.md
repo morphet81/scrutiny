@@ -205,9 +205,9 @@ Print a role or lead prompt for skill/debug:
 
 After triage, findings live in a structured JSON file (`include`, `chosen_option`, `comment_body`, `anchor`, `review.event`). Severities: `critical` | `warning` | `suggestion`.
 
-`findings-triage` (and `scrutiny probe`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. Agent revises that finding only; menu reappears. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
+`findings-triage` (and `scrutiny probe`) shows each finding critical-first. On a TTY: **↑/↓ menu** — Post / Ignore / Ask a question… (or fix option A/B…). Ask is a separate menu item, then a follow-up question prompt — never free-text on the same line as P/I. The agent prints an `Answer:` block first, then revises that finding only if the answer changes it (`(updated …)` vs `(finding unchanged …)`); menu reappears. Every Q&A is persisted on the finding as `ask_log`. Non-TTY: `P` / `I` / option letter, or `ask <question>`.
 
-Fix options appear **only** when multiple genuinely-viable approaches exist; a finding with one clear best fix shows just **Post**. When options are present, **A** is the AI-preferred one (its text says why). The `Why:` line is shown in full, never truncated.
+Fix options appear **only** when multiple genuinely-viable approaches exist; a finding with one clear best fix shows just **Post**. When options are present, **A** is the AI-preferred one (its text says why). `Why:` and every fix option are word-wrapped to the terminal width and shown in full, never truncated; only the ↑/↓ menu labels are clamped to one line.
 
 On a TTY, severity/title use ANSI colors (`NO_COLOR` or non-TTY disables). Each finding shows a short code snippet from `git show <head>:<path>` when a path exists.
 
@@ -227,6 +227,16 @@ If the authenticated user already has a **PENDING** review on that PR, the scrip
 2. Close the pending review (choose event), then create a **new** review with the findings  
 
 Agents must not call `gh` review create/dismiss/delete — only `post-comments`.
+
+Transient GitHub failures (HTTP 500/502/503/504/429, rate limits, connection resets, TLS timeouts) are retried up to 4 times with `1s / 3s / 8s` backoff. Deterministic failures (4xx, auth, bad anchor) fail immediately.
+
+If comments still fail to append, the review is **left pending on purpose** and nothing is lost. Re-run the exact same command to resume — it posts only the missing comments:
+
+```bash
+scrutiny post-comments --findings .scrutiny/<pr>/findings.json --cwd <repo-root>
+```
+
+Comments already on the pending review are matched on `(path, line, body)` and skipped, so a resume never duplicates. No `--event` needed: the chosen event is already in `findings.json`. The failure message prints this command verbatim.
 
 Line anchors are verified with `git show <head_oid>:<path>` and PR file patches.
 

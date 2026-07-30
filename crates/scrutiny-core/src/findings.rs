@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::eval::EvalReport;
+use crate::gh::{gh_output_retry, is_transient};
+use crate::mdterm::{term_cols, wrap_indent};
 use crate::pack::PackReport;
 use crate::paths::{temp_artifact_path, write_json_pretty};
 use crate::scan::{normalize_severity, Finding as ScanFinding, ScanReport};
@@ -72,6 +74,15 @@ pub struct TriageFinding {
     /// Optional substring to locate line when number is wrong.
     #[serde(default)]
     pub needle: Option<String>,
+    /// Triage-time Q&A history, oldest first.
+    #[serde(default)]
+    pub ask_log: Vec<AskExchange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskExchange {
+    pub question: String,
+    pub answer: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +242,7 @@ fn scan_to_triage(f: &ScanFinding, number: usize) -> TriageFinding {
         status: "pending".into(),
         fail_reason: None,
         needle: None,
+        ask_log: Vec::new(),
     }
 }
 
@@ -289,6 +301,7 @@ fn agent_to_triage(a: &crate::agent_runner::AgentFinding, number: usize) -> Tria
         status: "pending".into(),
         fail_reason: None,
         needle: None,
+        ask_log: Vec::new(),
     }
 }
 
@@ -676,8 +689,17 @@ pub fn run_findings_triage(
                         eprintln!("  ask empty: {}", out.stderr);
                         continue;
                     }
-                    apply_ask_revision(f, &answer);
-                    eprintln!("  (updated — decide again for {})", f.id);
+                    let (answer_text, changed) = apply_ask_revision(f, &question, &answer);
+                    eprintln!();
+                    eprintln!(
+                        "{}",
+                        wrap_indent(&answer_text, "  Answer: ", "          ", term_cols())
+                    );
+                    if changed {
+                        eprintln!("  (updated — decide again for {})", f.id);
+                    } else {
+                        eprintln!("  (finding unchanged — decide again for {})", f.id);
+                    }
                     // loop re-shows this finding only
                 }
             }
@@ -709,11 +731,14 @@ fn prompt_finding_decision_menu(f: &TriageFinding) -> Result<TriagePick> {
         kinds.push("post");
         option_idxs.push(0);
     } else {
+        // Select redraws by counting lines it wrote, so items must stay on one
+        // line. Full option text is already printed above the menu.
+        let label_max = term_cols().saturating_sub(8);
         for (i, opt) in f.fix_options.iter().enumerate() {
             labels.push(format!(
                 "{}) {}",
                 (b'A' + i as u8) as char,
-                truncate(opt, 100)
+                truncate(&opt.replace('\n', " "), label_max)
             ));
             kinds.push("option");
             option_idxs.push(i);
@@ -882,13 +907,24 @@ fn print_finding_block(
         loc,
         style_reset(),
     );
-    eprintln!("  Why: {}", f.explanation);
+    let cols = term_cols();
+    eprintln!(
+        "{}",
+        wrap_indent(&f.explanation, "  Why: ", "       ", cols)
+    );
     if !f.fix_options.is_empty() {
         for (i, opt) in f.fix_options.iter().enumerate() {
-            eprintln!("  {}) {}", (b'A' + i as u8) as char, truncate(opt, 140));
+            let letter = (b'A' + i as u8) as char;
+            eprintln!(
+                "{}",
+                wrap_indent(opt, &format!("  {letter}) "), "     ", cols)
+            );
         }
     } else {
-        eprintln!("  Fix: {}", truncate(&f.proposed_fix, 180));
+        eprintln!(
+            "{}",
+            wrap_indent(&f.proposed_fix, "  Fix: ", "       ", cols)
+        );
     }
     let snippet = snippet_for_finding(cwd, head_oid, f, snapshot);
     if !snippet.is_empty() {
@@ -925,10 +961,45 @@ fn extract_ask_text(stdout: &str) -> String {
     stdout.trim().to_string()
 }
 
-fn apply_ask_revision(f: &mut TriageFinding, answer: &str) {
-    // Prefer JSON blob with revised fields
-    let json_slice = extract_json_object(answer).unwrap_or(answer);
+/// Apply an ask agent's reply. Returns the answer text to show the reviewer and
+/// whether the finding itself actually changed. An unchanged finding keeps its
+/// prior decision state.
+fn apply_ask_revision(f: &mut TriageFinding, question: &str, reply: &str) -> (String, bool) {
+    let (answer, changed) = revise_from_reply(f, reply);
+    f.ask_log.push(AskExchange {
+        question: question.trim().to_string(),
+        answer: answer.clone(),
+    });
+    if changed {
+        f.chosen_option = None;
+        f.include = None;
+        f.comment_body = None;
+        f.status = "pending".into();
+    }
+    (answer, changed)
+}
+
+fn revise_from_reply(f: &mut TriageFinding, reply: &str) -> (String, bool) {
+    // Prefer JSON blob with an answer + optional revised fields
+    let json_slice = extract_json_object(reply).unwrap_or(reply);
     if let Ok(v) = serde_json::from_str::<Value>(json_slice) {
+        let answer = v
+            .get("answer")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| reply.trim())
+            .to_string();
+
+        let before = (
+            f.title.clone(),
+            f.explanation.clone(),
+            f.proposed_fix.clone(),
+            f.fix_options.clone(),
+            f.anchor.path.clone(),
+            f.anchor.line,
+        );
+
         if let Some(t) = v.get("title").and_then(|x| x.as_str()) {
             if !t.is_empty() {
                 f.title = t.to_string();
@@ -962,17 +1033,22 @@ fn apply_ask_revision(f: &mut TriageFinding, answer: &str) {
                 f.anchor.line = Some(line as u32);
             }
         }
-        f.chosen_option = None;
-        f.include = None;
-        f.comment_body = None;
-        f.status = "pending".into();
-        return;
+
+        let changed = before
+            != (
+                f.title.clone(),
+                f.explanation.clone(),
+                f.proposed_fix.clone(),
+                f.fix_options.clone(),
+                f.anchor.path.clone(),
+                f.anchor.line,
+            );
+        return (answer, changed);
     }
-    // Plain text → append to explanation
-    f.explanation = format!("{}\n\nClarification:\n{}", f.explanation, answer.trim());
-    f.include = None;
-    f.comment_body = None;
-    f.status = "pending".into();
+    // Plain text (clients without schema support) → keep it on the explanation
+    let answer = reply.trim().to_string();
+    f.explanation = format!("{}\n\nClarification:\n{answer}", f.explanation);
+    (answer, true)
 }
 
 fn extract_json_object(s: &str) -> Option<&str> {
@@ -1387,8 +1463,23 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
 
     ensure_gh()?;
 
-    let (api_comments, body_fallbacks, failed) =
-        build_comment_payloads(&mut report, input.strict)?;
+    let CommentPayloads {
+        api_comments,
+        comment_ids,
+        body_fallbacks,
+        failed,
+    } = build_comment_payloads(&mut report, input.strict)?;
+
+    let resume_cmd = format!(
+        "scrutiny post-comments --findings {} --cwd {}",
+        input.findings_path.display(),
+        input.cwd.display()
+    );
+    let append_ctx = AppendCtx {
+        api_comments: &api_comments,
+        comment_ids: &comment_ids,
+        resume_cmd: &resume_cmd,
+    };
 
     let mut review_body = report
         .review
@@ -1471,7 +1562,7 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                     pending,
                     &event,
                     &review_body,
-                    &api_comments,
+                    &append_ctx,
                 )?;
                 resp = r;
                 posted = p;
@@ -1505,7 +1596,7 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                     &report,
                     &event,
                     &review_body,
-                    &api_comments,
+                    &append_ctx,
                 )?;
                 resp = r;
                 posted = p;
@@ -1527,14 +1618,17 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
             &report,
             &event,
             &review_body,
-            &api_comments,
+            &append_ctx,
         )?;
         resp = r;
         posted = p;
     }
 
     for f in report.findings.iter_mut() {
-        if f.include == Some(true) && f.status == "pending" {
+        // build_comment_payloads already moved these off "pending".
+        if f.include == Some(true)
+            && matches!(f.status.as_str(), "pending" | "ready" | "ready_file")
+        {
             f.status = "posted".into();
         }
     }
@@ -1549,11 +1643,18 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
     )
 }
 
-fn build_comment_payloads(
-    report: &mut FindingsReport,
-    strict: bool,
-) -> Result<(Vec<Value>, Vec<String>, Vec<String>)> {
+/// Payloads to post, plus the finding id behind each one (same order as
+/// `api_comments`) so a partial failure can name what did not land.
+struct CommentPayloads {
+    api_comments: Vec<Value>,
+    comment_ids: Vec<String>,
+    body_fallbacks: Vec<String>,
+    failed: Vec<String>,
+}
+
+fn build_comment_payloads(report: &mut FindingsReport, strict: bool) -> Result<CommentPayloads> {
     let mut api_comments: Vec<Value> = Vec::new();
+    let mut comment_ids: Vec<String> = Vec::new();
     let mut body_fallbacks: Vec<String> = Vec::new();
     let failed: Vec<String> = Vec::new();
 
@@ -1592,6 +1693,7 @@ fn build_comment_payloads(
                 }
             }
             api_comments.push(c);
+            comment_ids.push(f.id.clone());
             f.status = "ready".into();
             f.fail_reason = None;
             continue;
@@ -1615,6 +1717,7 @@ fn build_comment_payloads(
                 "body": body,
                 "subject_type": "file",
             }));
+            comment_ids.push(f.id.clone());
             f.status = "ready_file".into();
             f.fail_reason = None;
             continue;
@@ -1628,7 +1731,12 @@ fn build_comment_payloads(
             bail!("strict: critical {} has no path for file/line comment", f.id);
         }
     }
-    Ok((api_comments, body_fallbacks, failed))
+    Ok(CommentPayloads {
+        api_comments,
+        comment_ids,
+        body_fallbacks,
+        failed,
+    })
 }
 
 fn create_new_review(
@@ -1639,7 +1747,7 @@ fn create_new_review(
     report: &FindingsReport,
     event: &str,
     review_body: &str,
-    api_comments: &[Value],
+    ctx: &AppendCtx<'_>,
 ) -> Result<(Value, u32)> {
     // Create a PENDING review with only the summary body and no inline comments.
     // All findings are added as independent threads via GraphQL so each appears
@@ -1665,7 +1773,7 @@ fn create_new_review(
         .map(|s| s.to_string())
         .context("new pending review missing node_id")?;
     let pending = PendingReview { id: review_id, node_id };
-    finish_pending_with_comments(cwd, owner, name, pr, &pending, event, review_body, api_comments)
+    finish_pending_with_comments(cwd, owner, name, pr, &pending, event, review_body, ctx)
 }
 
 /// POST create-review. `event = None` leaves the review PENDING.
@@ -1692,12 +1800,12 @@ fn post_pull_request_review(
             payload["event"] = json!(ev);
         }
         write_json_pretty(&payload_path, &payload)?;
-        let output = Command::new("gh")
-            .args(["api", "--method", "POST", &endpoint, "--input"])
-            .arg(&payload_path)
-            .current_dir(cwd)
-            .output()
-            .context("run gh api POST review")?;
+        let output = gh_output_retry(
+            cwd,
+            &["api", "--method", "POST", &endpoint],
+            Some(&payload_path),
+        )
+        .context("run gh api POST review")?;
         if output.status.success() {
             let resp: Value =
                 serde_json::from_slice(&output.stdout).context("parse review resp")?;
@@ -1818,8 +1926,35 @@ fn find_pending_review(
     Ok(None)
 }
 
+/// Everything the append step needs beyond the GitHub coordinates: which
+/// finding each payload came from, and the command that resumes a partial run.
+struct AppendCtx<'a> {
+    api_comments: &'a [Value],
+    comment_ids: &'a [String],
+    resume_cmd: &'a str,
+}
+
+/// Identity of an already-appended draft thread: skip re-posting these so a
+/// re-run after a partial failure never duplicates.
+fn draft_key(c: &Value) -> (String, u64, String) {
+    (
+        c.get("path")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string(),
+        c.get("line").and_then(|l| l.as_u64()).unwrap_or(0),
+        c.get("body")
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+    )
+}
+
 /// Append findings onto an existing PENDING review via GraphQL, then submit it.
-/// Existing draft comments stay on GitHub (no delete/recreate).
+/// Existing draft comments stay on GitHub (no delete/recreate) and are skipped
+/// rather than duplicated. On a partial failure the review is left PENDING so
+/// re-running posts only what is missing.
 fn finish_pending_with_comments(
     cwd: &Path,
     owner: &str,
@@ -1828,23 +1963,68 @@ fn finish_pending_with_comments(
     pending: &PendingReview,
     event: &str,
     review_body: &str,
-    api_comments: &[Value],
+    ctx: &AppendCtx<'_>,
 ) -> Result<(Value, u32)> {
+    let existing: std::collections::HashSet<(String, u64, String)> =
+        list_pending_review_comments(cwd, owner, name, pr, pending.id)
+            .unwrap_or_default()
+            .iter()
+            .map(draft_key)
+            .collect();
+
+    let total = ctx.api_comments.len();
+    let mut skipped = 0u32;
+    let mut appended = 0u32;
+    let mut failures: Vec<(String, String)> = Vec::new();
+
     eprintln!(
-        "scrutiny post-comments: appending {} comment(s) to pending #{} via GraphQL…",
-        api_comments.len(),
+        "scrutiny post-comments: appending {total} comment(s) to pending #{} via GraphQL…",
         pending.id
     );
-    for (i, c) in api_comments.iter().enumerate() {
-        add_pending_review_thread(cwd, &pending.node_id, c).with_context(|| {
-            format!(
-                "failed appending comment {}/{} to pending #{}",
-                i + 1,
-                api_comments.len(),
-                pending.id
-            )
-        })?;
+
+    for (i, c) in ctx.api_comments.iter().enumerate() {
+        let fid = ctx
+            .comment_ids
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("#{}", i + 1));
+        if existing.contains(&draft_key(c)) {
+            skipped += 1;
+            continue;
+        }
+        match add_pending_review_thread(cwd, &pending.node_id, c) {
+            Ok(()) => appended += 1,
+            Err(e) => {
+                eprintln!(
+                    "scrutiny post-comments: {fid} ({}/{total}) failed: {e:#}",
+                    i + 1
+                );
+                failures.push((fid, format!("{e:#}")));
+            }
+        }
     }
+
+    if skipped > 0 {
+        eprintln!(
+            "scrutiny post-comments: {skipped} comment(s) already on pending #{} — skipped",
+            pending.id
+        );
+    }
+
+    if !failures.is_empty() {
+        let ids: Vec<&str> = failures.iter().map(|(id, _)| id.as_str()).collect();
+        bail!(
+            "{}/{total} comment(s) did not post ({}).\n\
+             Pending review #{} kept — the {} already on it are safe.\n\
+             Resume (posts only the missing ones):\n  {}",
+            failures.len(),
+            ids.join(", "),
+            pending.id,
+            appended + skipped,
+            ctx.resume_cmd
+        );
+    }
+
     eprintln!(
         "scrutiny post-comments: submitting pending #{} as {event}…",
         pending.id
@@ -1858,7 +2038,7 @@ fn finish_pending_with_comments(
         event,
         Some(review_body),
     )?;
-    let posted = api_comments.len() as u32;
+    let posted = appended + skipped;
     eprintln!(
         "scrutiny post-comments: append ok — {posted} comment(s) submitted as {event}"
     );
@@ -1935,7 +2115,12 @@ fn add_pending_review_thread(
 
     match try_add(&input) {
         Ok(()) => Ok(()),
-        Err(first_err) if input.get("startLine").is_some() => {
+        // Only a rejected anchor is worth re-shaping. A transient failure has
+        // already exhausted its own backoff — stripping the range here would
+        // just mask the real cause.
+        Err(first_err)
+            if input.get("startLine").is_some() && !is_transient(&format!("{first_err:#}")) =>
+        {
             eprintln!("scrutiny post-comments: GraphQL retry without startLine/startSide…");
             let mut stripped = input.clone();
             if let Some(obj) = stripped.as_object_mut() {
@@ -2015,12 +2200,12 @@ fn submit_review_event(
     }
     let payload_path = temp_artifact_path("scrutiny", "pending", "event");
     write_json_pretty(&payload_path, &payload)?;
-    let output = Command::new("gh")
-        .args(["api", "--method", "POST", &endpoint, "--input"])
-        .arg(&payload_path)
-        .current_dir(cwd)
-        .output()
-        .context("submit review event")?;
+    let output = gh_output_retry(
+        cwd,
+        &["api", "--method", "POST", &endpoint],
+        Some(&payload_path),
+    )
+    .context("submit review event")?;
     if !output.status.success() {
         bail!(
             "failed to submit review event: {} {}",
@@ -2038,11 +2223,7 @@ fn gh_graphql(cwd: &Path, query: &str, variables: &Value) -> Result<Value> {
     });
     let payload_path = temp_artifact_path("scrutiny", "graphql", "payload");
     write_json_pretty(&payload_path, &payload)?;
-    let output = Command::new("gh")
-        .args(["api", "graphql", "--input"])
-        .arg(&payload_path)
-        .current_dir(cwd)
-        .output()
+    let output = gh_output_retry(cwd, &["api", "graphql"], Some(&payload_path))
         .context("run gh api graphql")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2068,11 +2249,7 @@ fn gh_graphql(cwd: &Path, query: &str, variables: &Value) -> Result<Value> {
 }
 
 fn gh_json(cwd: &Path, args: &[&str]) -> Result<Value> {
-    let output = Command::new("gh")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("gh {}", args.join(" ")))?;
+    let output = gh_output_retry(cwd, args, None)?;
     if !output.status.success() {
         bail!(
             "gh {} failed: {}",
@@ -2650,5 +2827,118 @@ mod tests {
         assert_eq!(find_needle_in_deleted_lines(patch, "removed_fn"), Some(2));
         assert_eq!(find_needle_in_deleted_lines(patch, "added_fn"), None); // on added line
         assert_eq!(find_needle_in_deleted_lines(patch, "missing"), None);
+    }
+
+    fn sample_finding() -> TriageFinding {
+        TriageFinding {
+            id: "F2".into(),
+            number: 2,
+            severity: "warning".into(),
+            title: "caller include merge is dead code".into(),
+            explanation: "Controller types params as GetReservationsParams.".into(),
+            proposed_fix: String::new(),
+            fix_options: vec!["A widen".into(), "B delete".into()],
+            chosen_option: None,
+            include: Some(true),
+            source: "ai".into(),
+            paths: vec!["src/data/hooks/use-reservations.ts".into()],
+            anchor: Anchor {
+                path: Some("src/data/hooks/use-reservations.ts".into()),
+                line: Some(109),
+                ..Default::default()
+            },
+            comment_body: Some("body".into()),
+            status: "ready".into(),
+            fail_reason: None,
+            needle: None,
+            ask_log: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ask_answer_only_leaves_finding_and_decision_intact() {
+        let mut f = sample_finding();
+        let (answer, changed) = apply_ask_revision(
+            &mut f,
+            "orders always in same payload — not necessary?",
+            r#"{"answer":"Right — merge is unreachable, finding stands as dead code only."}"#,
+        );
+        assert!(answer.starts_with("Right —"));
+        assert!(!changed);
+        assert_eq!(f.title, "caller include merge is dead code");
+        assert_eq!(f.include, Some(true));
+        assert_eq!(f.status, "ready");
+        assert_eq!(f.ask_log.len(), 1);
+        assert_eq!(f.ask_log[0].answer, answer);
+    }
+
+    #[test]
+    fn ask_revision_resets_decision_when_fields_change() {
+        let mut f = sample_finding();
+        let (answer, changed) = apply_ask_revision(
+            &mut f,
+            "q",
+            r#"{"answer":"You are right.","explanation":"Merge is reachable via list params.","line":110}"#,
+        );
+        assert_eq!(answer, "You are right.");
+        assert!(changed);
+        assert_eq!(f.explanation, "Merge is reachable via list params.");
+        assert_eq!(f.anchor.line, Some(110));
+        assert_eq!(f.include, None);
+        assert_eq!(f.status, "pending");
+        assert!(f.comment_body.is_none());
+    }
+
+    #[test]
+    fn ask_echoed_same_values_is_not_a_change() {
+        let mut f = sample_finding();
+        let (_, changed) = apply_ask_revision(
+            &mut f,
+            "q",
+            r#"{"answer":"Stands.","title":"caller include merge is dead code","line":109}"#,
+        );
+        assert!(!changed);
+        assert_eq!(f.status, "ready");
+    }
+
+    #[test]
+    fn ask_plain_text_reply_lands_on_explanation() {
+        let mut f = sample_finding();
+        let (answer, changed) = apply_ask_revision(&mut f, "q", "  no json here  ");
+        assert_eq!(answer, "no json here");
+        assert!(changed);
+        assert!(f.explanation.contains("Clarification:\nno json here"));
+        assert_eq!(f.status, "pending");
+    }
+
+    #[test]
+    fn draft_key_matches_equivalent_payloads() {
+        // REST-shaped payload vs the draft echoed back by the reviews API
+        let payload = json!({
+            "path": "a.ts", "side": "RIGHT", "line": 10, "body": "x  ",
+            "start_line": 8, "start_side": "RIGHT"
+        });
+        let echoed = json!({"path": "a.ts", "line": 10, "body": "x", "side": "RIGHT"});
+        assert_eq!(draft_key(&payload), draft_key(&echoed));
+
+        // File-level comment: no line on either side → 0
+        let file_payload = json!({"path": "a.ts", "body": "x", "subject_type": "file"});
+        let file_echoed = json!({"path": "a.ts", "body": "x"});
+        assert_eq!(draft_key(&file_payload), draft_key(&file_echoed));
+
+        // Different body / line / path must not collide
+        assert_ne!(
+            draft_key(&payload),
+            draft_key(&json!({"path":"a.ts","line":11,"body":"x"}))
+        );
+        assert_ne!(
+            draft_key(&payload),
+            draft_key(&json!({"path":"b.ts","line":10,"body":"x"}))
+        );
+        assert_ne!(
+            draft_key(&payload),
+            draft_key(&json!({"path":"a.ts","line":10,"body":"y"}))
+        );
+        assert_ne!(draft_key(&file_payload), draft_key(&payload));
     }
 }

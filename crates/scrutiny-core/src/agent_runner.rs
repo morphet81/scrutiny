@@ -147,6 +147,23 @@ pub const FINDINGS_JSON_SCHEMA: &str = r#"{
   "required": ["findings"]
 }"#;
 
+/// Ask-a-question follow-up: a direct `answer` for the reviewer plus optional
+/// revised finding fields. Distinct from `FINDINGS_JSON_SCHEMA` — an ask reply
+/// is one finding, not a `findings` array.
+pub const ASK_REVISE_JSON_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "answer": { "type": "string" },
+    "title": { "type": "string" },
+    "explanation": { "type": "string" },
+    "proposed_fix": { "type": "string" },
+    "fix_options": { "type": "array", "items": { "type": "string" } },
+    "path": { "type": "string" },
+    "line": { "type": "integer" }
+  },
+  "required": ["answer"]
+}"#;
+
 /// Shared `fix_options` + `explanation` policy, pasted into every findings prompt so the
 /// four builders stay in sync. Keep caveman ultra.
 pub const FIX_OPTIONS_POLICY: &str = "\
@@ -262,11 +279,17 @@ pub fn run_headless(
                 cmd.arg("--dangerously-skip-permissions");
             }
             match kind {
-                HeadlessKind::Isolated | HeadlessKind::Consolidate | HeadlessKind::Ask => {
+                HeadlessKind::Isolated | HeadlessKind::Consolidate => {
                     cmd.arg("--allowedTools")
                         .arg("Read")
                         .arg("--json-schema")
                         .arg(FINDINGS_JSON_SCHEMA);
+                }
+                HeadlessKind::Ask => {
+                    cmd.arg("--allowedTools")
+                        .arg("Read")
+                        .arg("--json-schema")
+                        .arg(ASK_REVISE_JSON_SCHEMA);
                 }
                 HeadlessKind::TeamLead => {
                     cmd.arg("--json-schema").arg(FINDINGS_JSON_SCHEMA);
@@ -849,29 +872,25 @@ Nothing to merge → return the input findings unchanged. Empty input → {{"fin
     )
 }
 
-pub fn build_ask_prompt(context: &str, question: &str) -> String {
-    format!(
-        "Clarify code-review finding.\n\n\
-         STYLE (mandatory): load + follow **caveman skill** if present (skill `name: caveman`, `/caveman ultra`). \
-         Intensity ultra. Terse. No fluff. Substance stay. Never announce style.\n\n\
-         Context:\n{context}\n\n\
-         Question:\n{question}\n"
-    )
-}
-
-/// Triage-time revise: return updated finding fields as JSON.
+/// Triage-time ask: answer the reviewer, and revise the finding only if the
+/// answer actually changes it.
 pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
     format!(
-        "Revise code-review finding after reviewer question.\n\n\
+        "Answer reviewer question about a code-review finding, then revise the finding only if needed.\n\n\
          STYLE (mandatory): load + follow **caveman skill** if present (`/caveman ultra`). \
          Intensity ultra. Terse. Never announce style.\n\n\
          Context (includes file diff and code window — answer from it; Read only if strictly necessary):\n\
          {context}\n\n\
          Question:\n{question}\n\n\
          Output: JSON ONLY (no prose outside JSON):\n\
-         {{\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
+         {{\"answer\":\"...\",\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
 \"path\":\"rel/path\",\"line\":1}}\n\
          Rules:\n\
+         - `answer` is REQUIRED: direct reply to the question, 1-3 short sentences. Answer it, do not restate the finding.\n\
+         - Say plainly when the reviewer is right and the finding is wrong or moot — that is a valid answer.\n\
+         - All other fields are OPTIONAL. OMIT every field the answer does not change. \
+           Unchanged finding = `answer` only.\n\
+         - Include a field only when its new value differs from the current one shown in Context.\n\
          - path+line must point to a **changed** line: added `+` (RIGHT side) or deleted `-` (LEFT side). Never a context line.\n\
          - Prefer an added (+) line. Never invent out-of-diff lines.\n\
          {policy}\n",
