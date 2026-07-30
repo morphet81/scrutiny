@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{self, BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -811,10 +811,7 @@ fn run_tdd_plan_loop(
             0 => break,
             2 => continue, // user edited on disk → re-read + re-render, no agent
             _ => {
-                let comment: String = Input::with_theme(&theme)
-                    .with_prompt("Your comments")
-                    .interact_text()
-                    .context("test plan comment")?;
+                let comment = read_multiline_comment().context("test plan comment")?;
                 run_test_plan_agent(
                     client, model, cwd, ticket_path, session_path, brief_path, context_path,
                     session, &plan_path, Some(&comment), "forge-test-plan-revise", target,
@@ -824,6 +821,29 @@ fn run_tdd_plan_loop(
     }
 
     Ok(plan_path)
+}
+
+/// Join comment lines into one string; trim ends only.
+fn join_comment_lines(lines: &[String]) -> String {
+    lines.join("\n").trim().to_string()
+}
+
+/// Read revise comments: Enter = newline; blank line or EOF ends.
+fn read_multiline_comment() -> Result<String> {
+    eprintln!("Your comments (blank line to finish):");
+    let mut lines = Vec::new();
+    for line in io::stdin().lock().lines() {
+        let line = line.context("read comment line")?;
+        if line.trim().is_empty() {
+            break;
+        }
+        lines.push(line);
+    }
+    let comment = join_comment_lines(&lines);
+    if comment.is_empty() {
+        bail!("empty test plan comment");
+    }
+    Ok(comment)
 }
 
 /// Run the test-plan agent (initial or revision) and ensure `plan_path` exists,
@@ -1569,6 +1589,16 @@ mod tests {
             tdd_plan_path: plan.map(str::to_string),
             figma_dir: None,
         }
+    }
+
+    #[test]
+    fn join_comment_lines_preserves_breaks() {
+        assert_eq!(
+            join_comment_lines(&["line one".into(), "line two".into()]),
+            "line one\nline two"
+        );
+        assert_eq!(join_comment_lines(&[]), "");
+        assert_eq!(join_comment_lines(&["  alone  ".into()]), "alone");
     }
 
     #[test]
