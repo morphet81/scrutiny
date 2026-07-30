@@ -311,5 +311,6 @@ Show result path / review `html_url` from the script output. Agent must **not** 
 
 - Pipeline: `ensure-bin` → `eval` → `map` → `pack` → `scan` → `plan-confirm` → `plan-write` → (optional AI: partition + parallel spawn + wait + `probe-session-write`) → `findings-init` → **one** triage prompt → `findings-resolve` → `post-comments` (pending + event prompts)
 - Edit `~/.scrutiny/config.toml` for models / pack / scan / agent counts
+- Agent `TIMEOUT` means the wall clock ran out, not a failure to converge. Raise it in `[timeouts]`: `agent_wall_secs` (base, `600`) lifts every stage; per-stage keys (`forge_implement_wall_secs`, `probe_ask_wall_secs`, `parley_agent_wall_secs`, …) lift one. Never retry a timed-out stage without raising the wall first
 - Claude `[models.claude]` uses aliases or pinned Anthropic ids only — not Cursor slugs
 - Install: `npx skills add <owner>/scrutiny -g -y --skill '*'` (see README)

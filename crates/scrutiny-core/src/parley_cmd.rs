@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::agent_runner::{
-    run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind, AGENT_WALL_SECS,
+    run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
@@ -151,7 +151,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     if !input.skip_agents {
         // Non-headless: open each agent in a visible window (claude + tmux/zellij/macOS).
         let term = resolve_terminal(cfg.headless, &detected.client, "parley");
-        let agent_wall = cfg.parley.agent_wall_secs;
+        let agent_wall = crate::timeouts::get().parley_agent;
 
         if plan.spawn_mode == "team" {
             eprintln!("scrutiny parley: team lead…");
@@ -219,7 +219,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             model: &plan.model,
             prepush_cmd: cfg.parley.prepush_cmd.clone(),
             prepush_fix_max_loops: cfg.parley.prepush_fix_max_loops,
-            prepush_fix_wall_secs: cfg.parley.prepush_fix_wall_secs,
+            prepush_fix_wall_secs: crate::timeouts::get().parley_prepush_fix,
             base: &base_pre_agents,
             artifact_globs: &cfg.git.artifact_globs,
         })?;
@@ -269,8 +269,6 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
 }
 
 /// Wall clock for a non-headless agent window (user may be watching — be generous).
-const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
-
 /// Read the fixes file and ensure every expected thread id has an entry,
 /// stubbing any the agent left behind. Used to collect non-headless results.
 fn collect_disk_fixes(fixes_path: &str, expected: &[String], note: &str) -> Result<()> {
@@ -312,12 +310,12 @@ fn run_isolated_parley(
                 build_member_prompt(&plan.comments_path, &plan.fixes_path, &slice, index, false);
             sentinels.push(run_nonheadless(client, &plan.model, cwd, &prompt, &label, ctx)?);
         }
-        let missing = wait_for_sentinels(&sentinels, Duration::from_secs(NONHEADLESS_WALL_SECS));
+        let missing = wait_for_sentinels(&sentinels, crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny parley: {} member window(s) did not signal done within {}s — collecting partial fixes",
                 missing.len(),
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         let expected: Vec<String> = comments.comments.iter().map(|c| c.id.clone()).collect();
@@ -488,11 +486,11 @@ fn run_team_parley(
     if let Some(ctx) = term {
         let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, "parley-lead", ctx)?;
         let missing =
-            wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+            wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny parley: team lead window did not signal done within {}s — collecting partial fixes",
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         let expected: Vec<String> = comments.comments.iter().map(|c| c.id.clone()).collect();
@@ -605,12 +603,12 @@ fn run_verify_agents(
             let label = format!("{label_prefix}#{}", i + 1);
             sentinels.push(run_nonheadless(client, &plan.model, cwd, prompt, &label, ctx)?);
         }
-        let missing = wait_for_sentinels(&sentinels, Duration::from_secs(NONHEADLESS_WALL_SECS));
+        let missing = wait_for_sentinels(&sentinels, crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny parley: {} {label_prefix} window(s) did not signal done within {}s",
                 missing.len(),
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         return Ok(());
@@ -733,11 +731,11 @@ fn run_parley_repair(
 
     if let Some(ctx) = term {
         let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, label, ctx)?;
-        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny parley: repair window did not signal done within {}s",
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         return Ok(());

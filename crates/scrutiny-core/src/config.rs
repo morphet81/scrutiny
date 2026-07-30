@@ -40,7 +40,54 @@ pub struct Config {
     #[serde(default)]
     pub parley: ParleyConfig,
     #[serde(default)]
+    pub timeouts: TimeoutsConfig,
+    #[serde(default)]
     pub prompts: PromptsConfig,
+}
+
+/// Agent wall-clock limits. `agent_wall_secs` is the base every unset stage
+/// derives from; each `*_wall_secs` overrides its stage alone.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimeoutsConfig {
+    /// Base wall for one agent. Unset → 600. Every stage below with no explicit
+    /// value derives from this (implement/fix ×2, non-headless ×3, bulk item ×8).
+    #[serde(default)]
+    pub agent_wall_secs: Option<u64>,
+    /// How often "still running" ticks print. Unset → 15.
+    #[serde(default)]
+    pub progress_secs: Option<u64>,
+    /// Agents launched in a visible terminal window (they wait on a sentinel file).
+    #[serde(default)]
+    pub nonheadless_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub probe_isolated_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub probe_team_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub probe_consolidate_wall_secs: Option<u64>,
+    /// Triage "Ask a question…" agent.
+    #[serde(default)]
+    pub probe_ask_wall_secs: Option<u64>,
+    /// TDD test-plan agent.
+    #[serde(default)]
+    pub forge_test_plan_wall_secs: Option<u64>,
+    /// PR-description agent.
+    #[serde(default)]
+    pub forge_pr_description_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub forge_implement_wall_secs: Option<u64>,
+    /// Verify-gate fix agent.
+    #[serde(default)]
+    pub forge_fix_wall_secs: Option<u64>,
+    /// One item of a `forge-bulk` run.
+    #[serde(default)]
+    pub forge_bulk_item_wall_secs: Option<u64>,
+    /// Unset → falls back to `[parley] agent_wall_secs`.
+    #[serde(default)]
+    pub parley_agent_wall_secs: Option<u64>,
+    /// Unset → falls back to `[parley] prepush_fix_wall_secs`.
+    #[serde(default)]
+    pub parley_prepush_fix_wall_secs: Option<u64>,
 }
 
 /// User-injected prompt text prepended to spawned-agent prompts.
@@ -112,12 +159,14 @@ pub struct ParleyConfig {
     /// Max scrutiny-runs-checks → fix-agent → re-check cycles in the pre-push gate.
     #[serde(default = "default_prepush_fix_loops")]
     pub prepush_fix_max_loops: u32,
-    /// Wall-clock seconds for each pre-push fix agent in the gate.
-    #[serde(default = "default_prepush_fix_wall_secs")]
-    pub prepush_fix_wall_secs: u64,
+    /// Wall-clock seconds for each pre-push fix agent in the gate. Superseded by
+    /// `[timeouts] parley_prepush_fix_wall_secs`; kept for back-compat.
+    #[serde(default)]
+    pub prepush_fix_wall_secs: Option<u64>,
     /// Wall-clock seconds for each member / verifier / evangelist agent.
-    #[serde(default = "default_agent_wall_secs")]
-    pub agent_wall_secs: u64,
+    /// Superseded by `[timeouts] parley_agent_wall_secs`; kept for back-compat.
+    #[serde(default)]
+    pub agent_wall_secs: Option<u64>,
     /// Run a repair pass that re-implements threads left as stubs or rejected by
     /// a verifier, so failures never post as PR replies.
     #[serde(default = "default_parley_repair")]
@@ -139,12 +188,6 @@ fn default_parley_push_fix_loops() -> u32 {
 fn default_prepush_fix_loops() -> u32 {
     5
 }
-fn default_prepush_fix_wall_secs() -> u64 {
-    1200
-}
-fn default_agent_wall_secs() -> u64 {
-    600
-}
 fn default_parley_repair() -> bool {
     true
 }
@@ -158,8 +201,8 @@ impl Default for ParleyConfig {
             push_fix_max_loops: default_parley_push_fix_loops(),
             prepush_cmd: None,
             prepush_fix_max_loops: default_prepush_fix_loops(),
-            prepush_fix_wall_secs: default_prepush_fix_wall_secs(),
-            agent_wall_secs: default_agent_wall_secs(),
+            prepush_fix_wall_secs: None,
+            agent_wall_secs: None,
             repair: default_parley_repair(),
         }
     }
@@ -1149,9 +1192,21 @@ pub fn load_config(path: &Path) -> Result<Config> {
         merge_toml(&mut value, lvalue);
     }
 
-    let cfg: Config = value.try_into().context("parse config.toml")?;
+    let mut cfg: Config = value.try_into().context("parse config.toml")?;
     store_prompt_overrides(&cfg.prompts);
+    seed_parley_timeouts(&mut cfg);
+    crate::timeouts::install(crate::timeouts::Timeouts::resolve(&cfg.timeouts));
     Ok(cfg)
+}
+
+/// Legacy `[parley]` walls feed `[timeouts]` when the newer keys are absent.
+fn seed_parley_timeouts(cfg: &mut Config) {
+    if cfg.timeouts.parley_agent_wall_secs.is_none() {
+        cfg.timeouts.parley_agent_wall_secs = cfg.parley.agent_wall_secs;
+    }
+    if cfg.timeouts.parley_prepush_fix_wall_secs.is_none() {
+        cfg.timeouts.parley_prepush_fix_wall_secs = cfg.parley.prepush_fix_wall_secs;
+    }
 }
 
 pub fn find_shipped_default(start: &Path) -> PathBuf {
@@ -1243,26 +1298,51 @@ mod tests {
 
     #[test]
     fn parley_timeout_defaults_and_override() {
-        // Defaults match the documented values.
+        // Unset in `[parley]` → resolved from `[timeouts]`.
         let d = ParleyConfig::default();
-        assert_eq!(d.prepush_fix_wall_secs, 1200);
-        assert_eq!(d.agent_wall_secs, 600);
+        assert_eq!(d.prepush_fix_wall_secs, None);
+        assert_eq!(d.agent_wall_secs, None);
 
-        // Shipped default.toml round-trips the defaults.
+        // Shipped default.toml round-trips the documented values.
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(&path, DEFAULT_TOML).unwrap();
         let cfg = load_config(&path).unwrap();
-        assert_eq!(cfg.parley.prepush_fix_wall_secs, 1200);
+        assert_eq!(cfg.timeouts.parley_prepush_fix_wall_secs, Some(1200));
+        assert_eq!(cfg.timeouts.parley_agent_wall_secs, Some(600));
         assert!(!cfg.git.artifact_globs.is_empty());
 
-        // Missing field falls back to the serde default.
-        let partial: ParleyConfig = toml::from_str("default_members = 2").unwrap();
-        assert_eq!(partial.prepush_fix_wall_secs, 1200);
-        // A user override is honored.
-        let overridden: ParleyConfig =
-            toml::from_str("prepush_fix_wall_secs = 300").unwrap();
-        assert_eq!(overridden.prepush_fix_wall_secs, 300);
+        // A legacy `[parley]` override is honored.
+        let overridden: ParleyConfig = toml::from_str("prepush_fix_wall_secs = 300").unwrap();
+        assert_eq!(overridden.prepush_fix_wall_secs, Some(300));
+    }
+
+    #[test]
+    fn timeouts_section_overrides_legacy_parley_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Swap default.toml's `[timeouts]` block for overrides, and put a legacy
+        // wall back into the `[parley]` table that precedes it.
+        let head = DEFAULT_TOML.split("[timeouts]").next().unwrap();
+        let tail = &DEFAULT_TOML[DEFAULT_TOML.find("[git]").unwrap()..];
+        fs::write(
+            &path,
+            format!(
+                "{head}prepush_fix_wall_secs = 1200\n\
+                 [timeouts]\nagent_wall_secs = 900\n\
+                 forge_implement_wall_secs = 5400\nparley_agent_wall_secs = 120\n\n{tail}"
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(&path).unwrap();
+        assert_eq!(cfg.timeouts.agent_wall_secs, Some(900));
+        assert_eq!(cfg.timeouts.parley_agent_wall_secs, Some(120));
+
+        let t = crate::timeouts::Timeouts::resolve(&cfg.timeouts);
+        assert_eq!(t.forge_implement, 5400, "explicit stage override wins");
+        assert_eq!(t.forge_fix, 1800, "unset stage derives from the new base");
+        assert_eq!(t.parley_agent, 120, "[timeouts] beats [parley]");
+        assert_eq!(t.parley_prepush_fix, 1200, "legacy [parley] key still seeds");
     }
 
     #[test]

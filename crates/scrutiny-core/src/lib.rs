@@ -30,6 +30,7 @@ pub mod skills_install;
 pub mod spinner;
 pub mod taxonomy;
 pub mod terminal;
+pub mod timeouts;
 pub mod treesitter;
 
 pub use config::{

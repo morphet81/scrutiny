@@ -678,7 +678,7 @@ pub fn run_findings_triage(
                         &prompt,
                         crate::agent_runner::HeadlessKind::Ask,
                         &format!("ask-{}", f.id),
-                        std::time::Duration::from_secs(crate::agent_runner::AGENT_WALL_SECS),
+                        crate::timeouts::probe_ask(),
                     )?;
                     if out.code != 0 && !out.timed_out {
                         eprintln!("  ask agent failed: {}", out.stderr);

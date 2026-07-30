@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::agent_runner::{
     run_dry_placeholder_in, run_headless, run_nonheadless, run_nonheadless_in, wait_for_sentinels,
-    HeadlessKind, HeadlessOutcome, AGENT_WALL_SECS,
+    HeadlessKind, HeadlessOutcome,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::brief::run_forge_brief;
@@ -44,8 +44,6 @@ Test case titles (it/test strings in the plan and in code):\n\
   otherwise use bare-verb affirmative style above.\n";
 
 /// Wall clock for a non-headless agent window (user may be watching — be generous).
-const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
-
 /// Where a forge agent runs: headless (captured), a shared visible window
 /// (`term`), or a per-item surface (`surface`, bulk mode). `dry` spawns no agent.
 #[derive(Clone, Copy)]
@@ -78,22 +76,22 @@ fn run_forge_agent(
     }
     if let Some(surface) = target.surface {
         let sentinel = run_nonheadless_in(client, model, cwd, prompt, role, surface, true)?;
-        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny forge: {role} pane did not signal done within {}s — using disk state",
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         return Ok(None);
     }
     if let Some(ctx) = target.term {
         let sentinel = run_nonheadless(client, model, cwd, prompt, label, ctx)?;
-        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny forge: {label} window did not signal done within {}s — using disk state",
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         return Ok(None);
@@ -535,7 +533,7 @@ fn generate_custom_pr_body(
         &prompt,
         HeadlessKind::Text,
         "forge-pr-description",
-        Duration::from_secs(AGENT_WALL_SECS),
+        crate::timeouts::forge_pr_description(),
     )?;
     let body = extract_markdownish(&out.stdout);
     let body = body.trim();
@@ -865,7 +863,7 @@ fn run_test_plan_agent(
         &prompt,
         label,
         target,
-        Duration::from_secs(AGENT_WALL_SECS),
+        crate::timeouts::forge_test_plan(),
     )?;
     match out {
         // Headless: salvage markdown from stdout if the agent didn't write the file.
@@ -988,7 +986,7 @@ fn run_implement_agent(
         &prompt,
         label,
         target,
-        Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
+        crate::timeouts::forge_implement(),
     )?;
     if let Some(o) = out {
         if o.code != 0 && !o.timed_out {
@@ -1249,7 +1247,7 @@ fn run_verify_gate(
             &prompt,
             "forge-verify-fix",
             target,
-            Duration::from_secs(AGENT_WALL_SECS.saturating_mul(2)),
+            crate::timeouts::forge_fix(),
         )?;
         if let Some(o) = out {
             if o.code != 0 && !o.timed_out {

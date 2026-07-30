@@ -310,9 +310,39 @@ base_candidates = ["develop", "main"]   # replaces the global list
 
 **`[forge.complexity]`** — keyword lists, story-point field names, and tier thresholds that drive automatic model selection.
 
-**`[parley]`** — `default_members` (`1`), `default_evangelists` (`1`), `default_verifiers` (`1`), `push_fix_max_loops` (`2`).
+**`[parley]`** — `default_members` (`1`), `default_evangelists` (`1`), `default_verifiers` (`1`), `push_fix_max_loops` (`2`), `repair` (`true`). The old `agent_wall_secs` / `prepush_fix_wall_secs` still parse here but are superseded by `[timeouts]`.
+
+**`[timeouts]`** — agent wall-clock limits, in seconds. Every key is optional. See below.
 
 **`[prompts]`** — custom prompt injection (see below).
+
+### Timeouts
+
+`agent_wall_secs` (`600`) is the base. Any stage with no explicit value derives from it, so raising the base raises everything; setting one key raises only that stage.
+
+| Key | Default |
+|---|---|
+| `agent_wall_secs` | `600` — base for every stage below |
+| `progress_secs` | `15` — "still running" tick interval |
+| `nonheadless_wall_secs` | base ×3 (`1800`) — agents in a visible terminal window |
+| `probe_isolated_wall_secs` | base (`600`) |
+| `probe_team_wall_secs` | base (`600`) |
+| `probe_consolidate_wall_secs` | base (`600`) |
+| `probe_ask_wall_secs` | base (`600`) — triage "Ask a question…" |
+| `forge_test_plan_wall_secs` | base (`600`) |
+| `forge_pr_description_wall_secs` | base (`600`) |
+| `forge_implement_wall_secs` | base ×2 (`1200`) |
+| `forge_fix_wall_secs` | base ×2 (`1200`) — verify-gate fix agent |
+| `forge_bulk_item_wall_secs` | base ×8 (`4800`) — one item of a bulk run |
+| `parley_agent_wall_secs` | base (`600`) — member / verifier / evangelist |
+| `parley_prepush_fix_wall_secs` | base ×2 (`1200`) |
+
+```toml
+[timeouts]
+forge_implement_wall_secs = 3600   # long tickets only
+```
+
+`0` means unset (falls back to the default). A timeout kills the agent and the stage reports `TIMEOUT`.
 
 ### Custom prompts
 

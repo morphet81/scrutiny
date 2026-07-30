@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-use crate::agent_runner::{wait_for_sentinels_cancellable, AGENT_WALL_SECS};
+use crate::agent_runner::wait_for_sentinels_cancellable;
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::scaffold;
@@ -28,8 +28,6 @@ use crate::terminal::{
 };
 
 /// Whole-item wall clock (body drives its own per-agent sub-waits).
-const BULK_ITEM_WALL_SECS: u64 = AGENT_WALL_SECS * 8;
-
 #[derive(Debug, Clone)]
 pub struct ForgeBulkInput {
     pub cwd: PathBuf,
@@ -465,13 +463,14 @@ fn run_item_agents(
         launch_agent_in_surface(surface, "driver", &script, /* close_on_exit */ !dry)?;
         let missing = wait_for_sentinels_cancellable(
             std::slice::from_ref(&item.done_sentinel),
-            Duration::from_secs(BULK_ITEM_WALL_SECS),
+            crate::timeouts::forge_bulk_item(),
             cancel,
         );
         if !missing.is_empty() && !cancel.load(Ordering::Relaxed) {
             eprintln!(
                 "scrutiny forge bulk: item {} did not signal done within {}s — using disk state",
-                item.id, BULK_ITEM_WALL_SECS
+                item.id,
+                crate::timeouts::get().forge_bulk_item
             );
         }
     }

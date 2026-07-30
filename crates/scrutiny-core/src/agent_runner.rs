@@ -18,8 +18,6 @@ use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
 use crate::terminal::{launch_agent_in_surface, launch_agent_window, ItemSurface, TerminalContext};
 
-const NONHEADLESS_WALL_SECS: u64 = AGENT_WALL_SECS * 3;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessKind {
     /// Read-focused specialist (no team spawn).
@@ -172,8 +170,15 @@ pub const FIX_OPTIONS_POLICY: &str = "\
 - If filled: first entry = AI-preferred; its text say WHY preferred. Other entries say their tradeoff.\n\
 - `explanation` (the Why): ONE short simple sentence. State problem, not story. Terse — shown in full.";
 
-pub const AGENT_WALL_SECS: u64 = 10 * 60;
-pub const PROGRESS_SECS: u64 = 15;
+/// Base agent wall, config-resolved. `[timeouts] agent_wall_secs` overrides it.
+pub fn agent_wall_secs() -> u64 {
+    crate::timeouts::get().agent
+}
+
+/// "still running" tick interval, config-resolved via `[timeouts] progress_secs`.
+pub fn progress_secs() -> u64 {
+    crate::timeouts::get().progress
+}
 
 pub struct HeadlessOutcome {
     pub stdout: String,
@@ -357,7 +362,7 @@ pub fn run_headless(
                     timed_out = true;
                     break 124; // conventional timeout exit
                 }
-                if last_tick.elapsed() >= Duration::from_secs(PROGRESS_SECS) {
+                if last_tick.elapsed() >= Duration::from_secs(progress_secs()) {
                     eprintln!(
                         "scrutiny: still running {label} ({}s)",
                         started.elapsed().as_secs()
@@ -545,7 +550,7 @@ pub fn wait_for_sentinels_cancellable(
         if start.elapsed() >= wall {
             return missing;
         }
-        if last_tick.elapsed() >= Duration::from_secs(PROGRESS_SECS) {
+        if last_tick.elapsed() >= Duration::from_secs(progress_secs()) {
             eprintln!(
                 "scrutiny: waiting on {} agent window(s) ({}s)",
                 missing.len(),
@@ -970,7 +975,7 @@ fn consolidate_findings(
         &prompt,
         HeadlessKind::Consolidate,
         "consolidator",
-        Duration::from_secs(AGENT_WALL_SECS),
+        crate::timeouts::probe_consolidate(),
     ) {
         Ok(out) => {
             if let Some(err) = claude_error_message(&out.stdout) {
@@ -1034,7 +1039,7 @@ pub fn run_isolated_review(
 
     // Non-headless: each agent writes findings JSON to a per-agent file.
     if let Some(ctx) = term {
-        let wall = Duration::from_secs(NONHEADLESS_WALL_SECS);
+        let wall = crate::timeouts::nonheadless();
         // (sentinel_path, findings_path, role, index, paths)
         let mut entries: Vec<(PathBuf, PathBuf, String, u32, Vec<String>)> = Vec::new();
         for (role, index, paths) in &jobs {
@@ -1051,7 +1056,7 @@ pub fn run_isolated_review(
             eprintln!(
                 "scrutiny: {} isolated agent window(s) did not signal done within {}s — collecting partial findings",
                 missing.len(),
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         let mut agents: Vec<AgentRunResult> = Vec::new();
@@ -1074,7 +1079,7 @@ pub fn run_isolated_review(
         return collate_review_report(agents, "isolated", client, &plan.model, pack_path, cwd);
     }
 
-    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let wall = crate::timeouts::probe_isolated();
     let pending: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(
             jobs.iter()
@@ -1171,7 +1176,7 @@ pub fn run_isolated_review(
             .checked_add(grace)
             .unwrap_or(grace)
             .max(Duration::from_secs(1));
-        match rx.recv_timeout(Duration::from_secs(PROGRESS_SECS).min(wait)) {
+        match rx.recv_timeout(Duration::from_secs(progress_secs()).min(wait)) {
             Ok(r) => {
                 let n = r.findings.len();
                 eprintln!(
@@ -1181,7 +1186,7 @@ pub fn run_isolated_review(
                 agents.push(r);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_progress.elapsed() >= Duration::from_secs(PROGRESS_SECS) {
+                if last_progress.elapsed() >= Duration::from_secs(progress_secs()) {
                     let still = pending
                         .lock()
                         .map(|p| p.join(", "))
@@ -1261,11 +1266,11 @@ pub fn run_team_review(
         let findings_path = artifact_path_unique("review-lead-findings");
         let prompt = prompt_base + &nonheadless_findings_suffix(&findings_path);
         let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, "lead#1", ctx)?;
-        let missing = wait_for_sentinels(&[sentinel], Duration::from_secs(NONHEADLESS_WALL_SECS));
+        let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny: team lead window did not signal done within {}s — collecting partial findings",
-                NONHEADLESS_WALL_SECS
+                crate::timeouts::get().nonheadless
             );
         }
         let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
@@ -1297,7 +1302,7 @@ pub fn run_team_review(
         return Ok((report, out_path));
     }
 
-    let wall = Duration::from_secs(AGENT_WALL_SECS);
+    let wall = crate::timeouts::probe_team();
     let out = run_headless(
         client,
         &plan.model,
