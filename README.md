@@ -7,6 +7,7 @@ CLI + agent skills that review PRs, implement tickets, and clear review comments
 | **`scrutiny probe`** | Review a local branch or GitHub PR |
 | **`scrutiny forge`** | Implement a ticket (Jira / GitHub / GitLab / inline) |
 | **`scrutiny parley`** | Fix unresolved PR review threads |
+| **`scrutiny bench`** | Token-usage compare: cli vs skill vs skill+caveman |
 
 Skills `/scrutiny`, `/forge`, `/parley` wrap the same flows for IDE agents.
 
@@ -92,6 +93,21 @@ scrutiny parley --pr 42
 Flow: fetch unresolved threads → fix agents → verifier → optional evangelist → pre-push gate → commit + push → reply under each thread.
 
 Set `headless = false` to open each agent in a visible terminal (claude; tmux/zellij/macOS).
+
+### Bench — token compare
+
+Compare **cli** (`scrutiny probe` / `scrutiny forge`) vs **skill** (same agents + skill markdown preamble, no caveman) vs **skill-caveman** (preamble + caveman). Claude Code only — real `usage` from `--output-format json`.
+
+```bash
+scrutiny bench --workload both
+scrutiny bench --workload probe --arms cli,skill-caveman --model sonnet
+scrutiny bench --workload forge --fixtures true \
+  --forge-from-json "$(cat bench/fixtures/forge-knobs.json)"
+```
+
+Default `--fixtures true` builds a disposable mini repo per arm under `.scrutiny/bench/<id>/`. Report: `bench-report.json` + table on stderr; path on stdout.
+
+Env knobs used internally: `SCRUTINY_NO_CAVEMAN`, `SCRUTINY_BENCH_SKILL_PREAMBLE` (do not set by hand unless debugging).
 
 ---
 

@@ -1,0 +1,10 @@
+{
+  "client": "claude",
+  "model": "sonnet",
+  "security": false,
+  "performance": false,
+  "error_handling": false,
+  "reviewers": 1,
+  "evangelists": 0,
+  "spawn_mode": "isolated"
+}

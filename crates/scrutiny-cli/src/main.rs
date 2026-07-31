@@ -1,16 +1,16 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::{
-    load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_eval,
-    run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate, run_forge,
-    run_forge_brief, run_forge_bulk, run_forge_bulk_item, run_forge_context, run_forge_fetch,
-    run_forge_plan_write, run_map, run_pack, run_parley, run_parley_fetch, run_parley_plan_write,
-    run_parley_reply, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
-    run_review_session_write, run_scan, run_skills_install, AgentPromptInput, EvalInput,
-    FindingsInitInput, ForgeBulkInput, ForgeCmdInput,
-    ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput,
-    ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
-    PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
+    load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_bench,
+    run_eval, run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate,
+    run_forge, run_forge_brief, run_forge_bulk, run_forge_bulk_item, run_forge_context,
+    run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_parley, run_parley_fetch,
+    run_parley_plan_write, run_parley_reply, run_plan_confirm, run_plan_write, run_post_comments,
+    run_pr, run_review, run_review_session_write, run_scan, run_skills_install, AgentPromptInput,
+    BenchArm, BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeBulkInput,
+    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput,
+    ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput,
+    PostCommentsInput, PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
 use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ Main commands:
   probe   Orchestrate full probe: analyze → plan → headless agents → triage → post
   forge   Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
+  bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
 
 {usage-heading} {usage}
 
@@ -164,6 +165,39 @@ enum Commands {
         /// Optional scan JSON when using --from-report (else empty findings shell)
         #[arg(long)]
         scan: Option<PathBuf>,
+    },
+    /// Token-usage compare: cli vs skill vs skill+caveman (Claude Code)
+    Bench {
+        /// probe | forge | both
+        #[arg(long, default_value = "both")]
+        workload: String,
+        /// Comma-separated: cli,skill,skill-caveman
+        #[arg(long, default_value = "cli,skill,skill-caveman")]
+        arms: String,
+        /// Working directory when not using --fixtures (default: cwd)
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Output directory (default: .scrutiny/bench/<timestamp>)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Claude model alias (default: sonnet)
+        #[arg(long)]
+        model: Option<String>,
+        /// Probe PlanAnswers JSON
+        #[arg(long)]
+        from_json: Option<String>,
+        /// Forge knobs JSON
+        #[arg(long)]
+        forge_from_json: Option<String>,
+        /// Inline forge task text (with --fixtures default task used if omitted)
+        #[arg(long)]
+        forge_input: Option<String>,
+        /// PR URL/number for probe (non-fixture runs)
+        #[arg(long)]
+        pr: Option<String>,
+        /// Build disposable mini repos under --out (default: true)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        fixtures: bool,
     },
     /// Install scrutiny skills via `npx skills add` (global or project)
     SkillsInstall {
@@ -624,6 +658,54 @@ fn run() -> Result<()> {
                 scan_path: scan,
             })?;
             println!("{}", findings.display());
+        }
+        Commands::Bench {
+            workload,
+            arms,
+            cwd,
+            out,
+            model,
+            from_json,
+            forge_from_json,
+            forge_input,
+            pr,
+            fixtures,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let out = out.unwrap_or_else(|| {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                cwd.join(".scrutiny").join("bench").join(format!("{secs}"))
+            });
+            let workload = BenchWorkload::parse(&workload)?;
+            let arms: Result<Vec<BenchArm>, _> = arms
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(BenchArm::parse)
+                .collect();
+            let arms = arms?;
+            if arms.is_empty() {
+                anyhow::bail!("--arms must list at least one of cli,skill,skill-caveman");
+            }
+            if !fixtures {
+                ensure_git_repo(&cwd)?;
+            }
+            let path = run_bench(BenchCmdInput {
+                cwd,
+                workload,
+                arms,
+                from_json,
+                forge_from_json,
+                forge_input,
+                model,
+                out,
+                pr,
+                use_fixtures: fixtures,
+            })?;
+            println!("{}", path.display());
         }
         Commands::SkillsInstall {
             global,

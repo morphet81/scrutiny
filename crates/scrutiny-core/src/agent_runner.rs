@@ -92,6 +92,55 @@ pub struct AgentFinding {
     pub source_role: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
+    pub fn add_assign(&mut self, other: &TokenUsage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+    }
+}
+
+/// One headless Claude/Cursor call's usage, for bench aggregation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub usage: TokenUsage,
+    #[serde(default)]
+    pub wall_ms: u64,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub exit_code: i32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunResult {
     pub role: String,
@@ -100,6 +149,14 @@ pub struct AgentRunResult {
     pub findings: Vec<AgentFinding>,
     pub ok: bool,
     pub stderr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +172,9 @@ pub struct ReviewReport {
     pub agents: Vec<AgentRunResult>,
     #[serde(default)]
     pub deduped_from: u32,
+    /// Sum of per-agent usage when present (bench / instrumentation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_total: Option<TokenUsage>,
 }
 
 fn default_report_version() -> u32 {
@@ -185,6 +245,138 @@ pub struct HeadlessOutcome {
     pub stderr: String,
     pub code: i32,
     pub timed_out: bool,
+    pub usage: Option<TokenUsage>,
+    pub request_id: Option<String>,
+    pub session_id: Option<String>,
+    pub wall_ms: u64,
+}
+
+/// When true, skip prepending [`CAVEMAN_STYLE`] (bench skill arm without caveman).
+pub fn caveman_disabled() -> bool {
+    matches!(
+        std::env::var("SCRUTINY_NO_CAVEMAN").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
+/// Optional preamble (full skill markdown) injected after caveman / before overrides.
+pub fn bench_skill_preamble() -> Option<String> {
+    let path = std::env::var_os("SCRUTINY_BENCH_SKILL_PREAMBLE")?;
+    let text = fs::read_to_string(&path).ok()?;
+    let t = text.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+static USAGE_CAPTURE: std::sync::Mutex<Option<Vec<UsageRecord>>> = std::sync::Mutex::new(None);
+
+/// Begin collecting [`UsageRecord`]s from every [`run_headless`] until [`take_usage_capture`].
+pub fn start_usage_capture() {
+    *USAGE_CAPTURE.lock().expect("usage capture lock") = Some(Vec::new());
+}
+
+/// Stop capture and return recorded calls (empty if capture was never started).
+pub fn take_usage_capture() -> Vec<UsageRecord> {
+    USAGE_CAPTURE
+        .lock()
+        .expect("usage capture lock")
+        .take()
+        .unwrap_or_default()
+}
+
+fn push_usage_record(rec: UsageRecord) {
+    if let Ok(mut guard) = USAGE_CAPTURE.lock() {
+        if let Some(buf) = guard.as_mut() {
+            buf.push(rec);
+        }
+    }
+}
+
+/// Parse Claude `--output-format json` envelope usage (+ ids).
+pub fn parse_claude_usage(stdout: &str) -> (Option<TokenUsage>, Option<String>, Option<String>) {
+    let v: Value = match serde_json::from_str(stdout.trim()) {
+        Ok(v) => v,
+        Err(_) => {
+            // stream-json / trailing noise: try last JSON object line
+            let Some(line) = stdout
+                .lines()
+                .rev()
+                .find(|l| l.trim().starts_with('{') && l.contains("usage"))
+            else {
+                return (None, None, None);
+            };
+            match serde_json::from_str(line.trim()) {
+                Ok(v) => v,
+                Err(_) => return (None, None, None),
+            }
+        }
+    };
+    let request_id = v
+        .get("request_id")
+        .or_else(|| v.get("requestId"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            v.get("uuid")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        });
+    let session_id = v
+        .get("session_id")
+        .or_else(|| v.get("sessionId"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let usage = v.get("usage").and_then(|u| {
+        Some(TokenUsage {
+            input_tokens: u.get("input_tokens")?.as_u64().unwrap_or(0),
+            output_tokens: u.get("output_tokens")?.as_u64().unwrap_or(0),
+            cache_creation_input_tokens: u
+                .get("cache_creation_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            cache_read_input_tokens: u
+                .get("cache_read_input_tokens")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+        })
+    });
+    (usage, request_id, session_id)
+}
+
+/// Collapse duplicate records that share a request id (keep max output).
+pub fn dedupe_usage_records(records: &[UsageRecord]) -> Vec<UsageRecord> {
+    use std::collections::HashMap;
+    let mut by_id: HashMap<String, UsageRecord> = HashMap::new();
+    let mut no_id: Vec<UsageRecord> = Vec::new();
+    for r in records {
+        match &r.request_id {
+            Some(id) if !id.is_empty() => {
+                by_id
+                    .entry(id.clone())
+                    .and_modify(|prev| {
+                        if r.usage.output_tokens > prev.usage.output_tokens {
+                            *prev = r.clone();
+                        }
+                    })
+                    .or_insert_with(|| r.clone());
+            }
+            _ => no_id.push(r.clone()),
+        }
+    }
+    let mut out: Vec<_> = by_id.into_values().collect();
+    out.extend(no_id);
+    out
+}
+
+pub fn sum_usage_records(records: &[UsageRecord]) -> TokenUsage {
+    let mut total = TokenUsage::default();
+    for r in dedupe_usage_records(records) {
+        total.add_assign(&r.usage);
+    }
+    total
 }
 
 /// Agent-type key derived from a spawn label: prefix before `#`, `-` → `_`.
@@ -203,16 +395,23 @@ pub const CAVEMAN_STYLE: &str = "STYLE (mandatory): load + follow **caveman skil
      (skill `name: caveman`, `/caveman ultra`). Intensity ultra. Terse. No fluff. \
      Substance stay. Never announce style.";
 
-/// Prepend the caveman style directive, then the user's configured prompt
-/// overrides (global + per-agent), to a prompt. Order: caveman → global → agent
-/// → scrutiny's prompt. Caveman is always injected; overrides only when set.
+/// Prepend style / skill preamble / configured overrides to a prompt.
+/// Order: caveman (unless `SCRUTINY_NO_CAVEMAN`) → bench skill preamble →
+/// global/agent overrides → scrutiny's prompt.
 fn inject_overrides(label: &str, prompt: &str) -> String {
-    let prefix = crate::config::resolve_prompt_prefix(&agent_type_from_label(label));
-    if prefix.is_empty() {
-        format!("{CAVEMAN_STYLE}\n\n{prompt}")
-    } else {
-        format!("{CAVEMAN_STYLE}\n\n{prefix}\n\n{prompt}")
+    let mut parts: Vec<String> = Vec::new();
+    if !caveman_disabled() {
+        parts.push(CAVEMAN_STYLE.to_string());
     }
+    if let Some(skill) = bench_skill_preamble() {
+        parts.push(format!("# Skill context (mandatory)\n\n{skill}"));
+    }
+    let prefix = crate::config::resolve_prompt_prefix(&agent_type_from_label(label));
+    if !prefix.is_empty() {
+        parts.push(prefix);
+    }
+    parts.push(prompt.to_string());
+    parts.join("\n\n")
 }
 
 pub fn run_headless(
@@ -402,11 +601,29 @@ pub fn run_headless(
         eprintln!("scrutiny: done {label} (exit {code})");
     }
 
+    let wall_ms = started.elapsed().as_millis() as u64;
+    let (usage, request_id, session_id) = parse_claude_usage(&stdout);
+    if let Some(ref u) = usage {
+        push_usage_record(UsageRecord {
+            label: label.to_string(),
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            usage: u.clone(),
+            wall_ms,
+            timed_out,
+            exit_code: code,
+        });
+    }
+
     Ok(HeadlessOutcome {
         stdout,
         stderr,
         code,
         timed_out,
+        usage,
+        request_id,
+        session_id,
+        wall_ms,
     })
 }
 
@@ -933,6 +1150,17 @@ fn collate_review_report(
     let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
     let deduped = dedupe_findings(&mut all);
     let findings = consolidate_findings(client, model, pack_path, cwd, deduped);
+    let usage_total = {
+        let mut t = TokenUsage::default();
+        let mut any = false;
+        for a in &agents {
+            if let Some(u) = &a.usage {
+                t.add_assign(u);
+                any = true;
+            }
+        }
+        any.then_some(t)
+    };
     let report = ReviewReport {
         version: 1,
         spawn_mode: spawn_mode.to_string(),
@@ -940,6 +1168,7 @@ fn collate_review_report(
         findings,
         agents,
         deduped_from: raw_count,
+        usage_total,
     };
     let out = temp_artifact_path(&client.client, "review", "report");
     write_json_pretty(&out, &report)?;
@@ -1074,7 +1303,18 @@ pub fn run_isolated_review(
                     "scrutiny: agent {role}#{index} non-headless: no findings or read error"
                 );
             }
-            agents.push(AgentRunResult { role, index, paths, findings, ok, stderr });
+            agents.push(AgentRunResult {
+                role,
+                index,
+                paths,
+                findings,
+                ok,
+                stderr,
+                usage: None,
+                request_id: None,
+                session_id: None,
+                wall_ms: None,
+            });
         }
         return collate_review_report(agents, "isolated", client, &plan.model, pack_path, cwd);
     }
@@ -1147,6 +1387,10 @@ pub fn run_isolated_review(
                         findings,
                         ok,
                         stderr,
+                        usage: out.usage,
+                        request_id: out.request_id,
+                        session_id: out.session_id,
+                        wall_ms: Some(out.wall_ms),
                     }
                 }
                 Err(e) => AgentRunResult {
@@ -1156,6 +1400,10 @@ pub fn run_isolated_review(
                     findings: Vec::new(),
                     ok: false,
                     stderr: format!("{e:#}"),
+                    usage: None,
+                    request_id: None,
+                    session_id: None,
+                    wall_ms: None,
                 },
             };
             if let Ok(mut p) = pending.lock() {
@@ -1288,6 +1536,10 @@ pub fn run_team_review(
             findings: findings.clone(),
             ok,
             stderr,
+            usage: None,
+            request_id: None,
+            session_id: None,
+            wall_ms: None,
         };
         let report = ReviewReport {
             version: 1,
@@ -1296,6 +1548,7 @@ pub fn run_team_review(
             findings,
             agents: vec![agent],
             deduped_from: 0,
+            usage_total: None,
         };
         let out_path = temp_artifact_path(&plan.client, "review", "report");
         write_json_pretty(&out_path, &report)?;
@@ -1330,7 +1583,12 @@ pub fn run_team_review(
         findings: findings.clone(),
         ok: out.code == 0 || !findings.is_empty(),
         stderr: out.stderr,
+        usage: out.usage.clone(),
+        request_id: out.request_id.clone(),
+        session_id: out.session_id.clone(),
+        wall_ms: Some(out.wall_ms),
     };
+    let usage_total = out.usage.clone();
     let report = ReviewReport {
         version: 1,
         spawn_mode: "team".into(),
@@ -1338,6 +1596,7 @@ pub fn run_team_review(
         findings,
         agents: vec![agent],
         deduped_from: 0,
+        usage_total,
     };
     let out_path = temp_artifact_path(&plan.client, "review", "report");
     write_json_pretty(&out_path, &report)?;
@@ -1474,9 +1733,38 @@ mod tests {
     fn caveman_always_injected() {
         // Every spawned prompt carries the caveman directive, even with no
         // configured overrides.
+        std::env::remove_var("SCRUTINY_NO_CAVEMAN");
+        std::env::remove_var("SCRUTINY_BENCH_SKILL_PREAMBLE");
         let out = inject_overrides("parley-member#1", "Fix the thing.");
         assert!(out.starts_with(CAVEMAN_STYLE));
         assert!(out.ends_with("Fix the thing."));
+    }
+
+    #[test]
+    fn caveman_skipped_when_env_set() {
+        std::env::set_var("SCRUTINY_NO_CAVEMAN", "1");
+        std::env::remove_var("SCRUTINY_BENCH_SKILL_PREAMBLE");
+        let out = inject_overrides("reviewer#1", "Review me.");
+        std::env::remove_var("SCRUTINY_NO_CAVEMAN");
+        assert!(!out.contains(CAVEMAN_STYLE));
+        assert_eq!(out, "Review me.");
+    }
+
+    #[test]
+    fn parse_claude_usage_envelope() {
+        let raw = r#"{
+          "type":"result","session_id":"s1","request_id":"r1",
+          "usage":{"input_tokens":10,"output_tokens":5,
+            "cache_creation_input_tokens":1,"cache_read_input_tokens":100}
+        }"#;
+        let (u, rid, sid) = parse_claude_usage(raw);
+        let u = u.expect("usage");
+        assert_eq!(u.input_tokens, 10);
+        assert_eq!(u.output_tokens, 5);
+        assert_eq!(u.cache_creation_input_tokens, 1);
+        assert_eq!(u.cache_read_input_tokens, 100);
+        assert_eq!(rid.as_deref(), Some("r1"));
+        assert_eq!(sid.as_deref(), Some("s1"));
     }
 
     #[test]

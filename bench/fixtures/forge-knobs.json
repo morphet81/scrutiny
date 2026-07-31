@@ -1,0 +1,13 @@
+{
+  "client": "claude",
+  "model": "sonnet",
+  "spawn_mode": "single",
+  "use_playwright": false,
+  "tdd": false,
+  "coverage_pct": 0,
+  "e2e": false,
+  "agents": 1,
+  "testers": 0,
+  "reviewers": 0,
+  "evangelists": 0
+}
