@@ -216,10 +216,13 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             session_root: plan_path.parent().unwrap_or(&cwd),
             skip_prompts: input.non_interactive,
             client: &detected,
-            model: &plan.model,
+            plan_model: cfg.resolve_agent_model(&detected.client, "parley_prepush_plan", &plan.model),
+            fix_model: cfg.resolve_agent_model(&detected.client, "parley_push_fix", &plan.model),
             prepush_cmd: cfg.parley.prepush_cmd.clone(),
             prepush_fix_max_loops: cfg.parley.prepush_fix_max_loops,
+            prepush_fix_max_chunks: cfg.parley.prepush_fix_max_chunks,
             prepush_fix_wall_secs: crate::timeouts::get().parley_prepush_fix,
+            prepush_plan_wall_secs: crate::timeouts::get().parley_prepush_plan,
             base: &base_pre_agents,
             artifact_globs: &cfg.git.artifact_globs,
         })?;
@@ -868,10 +871,15 @@ struct ParleyShipInput<'a> {
     session_root: &'a Path,
     skip_prompts: bool,
     client: &'a crate::runtime::DetectedClient,
-    model: &'a str,
+    /// Model for the pre-push plan agent (usually xs / cheap).
+    plan_model: String,
+    /// Model for each pre-push fix chunk agent (session model unless overridden).
+    fix_model: String,
     prepush_cmd: Option<String>,
     prepush_fix_max_loops: u32,
+    prepush_fix_max_chunks: u32,
     prepush_fix_wall_secs: u64,
+    prepush_plan_wall_secs: u64,
     /// Working-tree snapshot taken before agents ran; commits stage only paths
     /// that changed since (excluding artifacts), leaving pre-existing WIP alone.
     base: &'a WorktreeSnapshot,
@@ -1034,16 +1042,19 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     // Scrutiny owns the checks: run the pre-push hook quietly before pushing,
-    // fixing via agent up to N times. On green, push with --no-verify so the
-    // hook does not re-run (no redundant multi-minute rerun, no terminal flood).
+    // fixing via plan+chunk agents up to N times. On green, push with --no-verify
+    // so the hook does not re-run (no redundant multi-minute rerun, no terminal flood).
     run_parley_prepush_gate(
         cwd,
         session_root,
         input.client,
-        input.model,
+        &input.plan_model,
+        &input.fix_model,
         input.prepush_cmd.as_deref(),
         input.prepush_fix_max_loops,
+        input.prepush_fix_max_chunks,
         input.prepush_fix_wall_secs,
+        input.prepush_plan_wall_secs,
         input.artifact_globs,
     )?;
 
@@ -1095,18 +1106,21 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
     );
 }
 
-/// Quietly run the repo's pre-push checks; on failure spawn a fix agent that
-/// works only from the logged findings, commit its changes, and re-run — up to
+/// Quietly run the repo's pre-push checks; on failure, plan agent splits the
+/// log into chunks, one fix agent per chunk, host commits, re-check — up to
 /// `max_loops` cycles. Ok when green (or when the repo has no pre-push hook).
 #[allow(clippy::too_many_arguments)]
 fn run_parley_prepush_gate(
     cwd: &Path,
     session_root: &Path,
     client: &crate::runtime::DetectedClient,
-    model: &str,
+    plan_model: &str,
+    fix_model: &str,
     prepush_cmd: Option<&str>,
     max_loops: u32,
+    max_chunks: u32,
     fix_wall_secs: u64,
+    plan_wall_secs: u64,
     artifact_globs: &[String],
 ) -> Result<()> {
     let Some(cmd) = prepush::resolve_prepush_command(cwd, prepush_cmd) else {
@@ -1135,34 +1149,173 @@ fn run_parley_prepush_gate(
                 res.log_path.display()
             );
         }
-        eprintln!(
-            "scrutiny parley: pre-push failed — spawning fix agent (attempt {attempt}/{max})…"
-        );
-        let prompt = prepush::build_prepush_fix_prompt(&res.log_path);
+
         // Snapshot after the failing check ran (its artifacts already present) so
-        // the fix commit captures only the agent's edits, not gate byproducts.
+        // the fix commit captures only the agents' edits, not gate byproducts.
         let snap_before_fix = snapshot_worktree(cwd).unwrap_or_default();
-        let out = run_headless(
+
+        let chunks = plan_prepush_chunks(
             client,
-            model,
+            plan_model,
             cwd,
-            &prompt,
-            HeadlessKind::Parley,
-            "parley-push-fix",
-            Duration::from_secs(fix_wall_secs),
+            session_root,
+            attempt,
+            &res.log_path,
+            max_chunks,
+            plan_wall_secs,
         )?;
-        if out.code != 0 && !out.timed_out {
-            eprintln!("scrutiny parley: fix agent exit {} — re-checking", out.code);
-        }
+
+        let parallel = prepush::chunks_files_disjoint(&chunks);
+        eprintln!(
+            "scrutiny parley: pre-push failed — spawning {} fix agent(s) \
+             (plan={plan_model}, {} mode, attempt {attempt}/{max})…",
+            chunks.len(),
+            if parallel { "parallel" } else { "sequential" }
+        );
+
+        run_prepush_fix_agents(
+            client,
+            fix_model,
+            cwd,
+            &res.log_path,
+            &chunks,
+            parallel,
+            fix_wall_secs,
+        )?;
+
         let (to_stage, skipped) = paths_changed_since(cwd, &snap_before_fix, artifact_globs)?;
         log_skipped_artifacts(&skipped);
         if to_stage.is_empty() {
-            eprintln!("scrutiny parley: fix agent made no committable change — re-checking");
+            eprintln!("scrutiny parley: fix agents made no committable change — re-checking");
         } else {
             host_commit(cwd, session_root, "fix: repair pre-push failures", &to_stage)?;
         }
     }
     unreachable!("loop returns green or bails on final attempt")
+}
+
+/// Run the plan agent (or fallback) and persist chunks JSON under the session.
+#[allow(clippy::too_many_arguments)]
+fn plan_prepush_chunks(
+    client: &crate::runtime::DetectedClient,
+    plan_model: &str,
+    cwd: &Path,
+    session_root: &Path,
+    attempt: u32,
+    log_path: &Path,
+    max_chunks: u32,
+    plan_wall_secs: u64,
+) -> Result<Vec<prepush::PrepushChunk>> {
+    let plan_prompt = prepush::build_prepush_plan_prompt(log_path, max_chunks);
+    let plan_out = run_headless(
+        client,
+        plan_model,
+        cwd,
+        &plan_prompt,
+        HeadlessKind::Text,
+        "parley-prepush-plan",
+        Duration::from_secs(plan_wall_secs),
+    )?;
+    if plan_out.code != 0 && !plan_out.timed_out {
+        eprintln!(
+            "scrutiny parley: plan agent exit {} — falling back if needed",
+            plan_out.code
+        );
+    }
+
+    let chunks = match prepush::parse_prepush_chunks(&plan_out.stdout, max_chunks) {
+        Some(c) => c,
+        None => {
+            eprintln!("scrutiny parley: plan agent produced no chunks — using full-log fallback");
+            let log_body = fs::read_to_string(log_path).unwrap_or_default();
+            vec![prepush::fallback_chunk(&log_body)]
+        }
+    };
+
+    let chunks_path = session_root.join(format!("prepush-chunks-{attempt}.json"));
+    prepush::write_chunks_file(&chunks_path, &chunks)?;
+    eprintln!(
+        "scrutiny parley: {} chunk(s) → {}",
+        chunks.len(),
+        chunks_path.display()
+    );
+    Ok(chunks)
+}
+
+/// Spawn one fix agent per chunk — parallel when file sets are disjoint.
+fn run_prepush_fix_agents(
+    client: &crate::runtime::DetectedClient,
+    fix_model: &str,
+    cwd: &Path,
+    log_path: &Path,
+    chunks: &[prepush::PrepushChunk],
+    parallel: bool,
+    fix_wall_secs: u64,
+) -> Result<()> {
+    let wall = Duration::from_secs(fix_wall_secs);
+    if !parallel || chunks.len() <= 1 {
+        for (i, chunk) in chunks.iter().enumerate() {
+            let label = format!("parley-push-fix#{}", i + 1);
+            let prompt = prepush::build_prepush_chunk_fix_prompt(log_path, chunk);
+            let out = run_headless(
+                client,
+                fix_model,
+                cwd,
+                &prompt,
+                HeadlessKind::Parley,
+                &label,
+                wall,
+            )?;
+            if out.code != 0 && !out.timed_out {
+                eprintln!("scrutiny parley: {label} exit {} — continuing", out.code);
+            }
+        }
+        return Ok(());
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let job_count = chunks.len();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let tx = tx.clone();
+        let client = client.clone();
+        let model = fix_model.to_string();
+        let cwd = cwd.to_path_buf();
+        let log_path = log_path.to_path_buf();
+        let chunk = chunk.clone();
+        let label = format!("parley-push-fix#{}", i + 1);
+        thread::spawn(move || {
+            let prompt = prepush::build_prepush_chunk_fix_prompt(&log_path, &chunk);
+            let result = run_headless(
+                &client,
+                &model,
+                &cwd,
+                &prompt,
+                HeadlessKind::Parley,
+                &label,
+                wall,
+            );
+            let _ = tx.send((label, result));
+        });
+    }
+    drop(tx);
+
+    let mut done = 0;
+    while done < job_count {
+        match rx.recv() {
+            Ok((label, Ok(out))) => {
+                if out.code != 0 && !out.timed_out {
+                    eprintln!("scrutiny parley: {label} exit {} — continuing", out.code);
+                }
+                done += 1;
+            }
+            Ok((label, Err(e))) => {
+                eprintln!("scrutiny parley: {label} failed: {e:#}");
+                done += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// Run `git <args>` quietly, writing combined stdout+stderr to `log_path` only

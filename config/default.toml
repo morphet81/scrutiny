@@ -213,6 +213,8 @@ default_evangelists = 1
 # Verifiers check that fixes actually address comments (runs before evangelist).
 default_verifiers = 1
 push_fix_max_loops = 2
+# Max fix chunks the pre-push plan agent may emit (one agent per chunk).
+prepush_fix_max_chunks = 8
 # Re-implement threads left as stubs or rejected by a verifier so failures
 # never post as PR replies. Runs after verifiers, before evangelists.
 repair = true
@@ -247,6 +249,15 @@ progress_secs = 15
 # parley — these supersede the legacy [parley] keys of the same name.
 parley_agent_wall_secs = 600
 parley_prepush_fix_wall_secs = 1200
+# Pre-push plan agent (splits the log into fix chunks; read-only).
+parley_prepush_plan_wall_secs = 120
+
+# Per-role model overrides. Key = agent label prefix with "-" → "_".
+# Value = tier xs|s|m|l|xl (resolved via [models.<client>]) OR a raw model id.
+# Unset → session model. Special: parley_prepush_plan defaults to xs when unset.
+[agent_models]
+parley_prepush_plan = "xs"
+# parley_push_fix = "m"
 
 [git]
 base_candidates = ["main", "master", "develop"]
@@ -298,6 +309,7 @@ artifact_globs = [
 # parley_lead = ""
 # parley_verifier = ""
 # parley_evangelist = ""
+# parley_prepush_plan = ""   # splits pre-push log into fix chunks
 # parley_push_fix = ""
 # --- forge (ticket implementation) ---
 # forge_test_plan = ""

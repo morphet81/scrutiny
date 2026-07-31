@@ -79,9 +79,11 @@ polls a per-agent done sentinel. Non-claude clients or unsupported surfaces
 
 ## Push failure recovery
 
-Host tees `git push` to `.scrutiny/<pr>/push-attempt-N.log`. On hook/test failure,
-spawns `parley-push-fix` (up to `[parley].push_fix_max_loops`, default 2), host
-commits `fix: repair pre-push failures`, retries push. Auth/remote errors skip agent.
+Host runs the repo pre-push checks quietly. On failure: cheap `parley-prepush-plan`
+agent splits the log into scoped chunks (model from `[agent_models].parley_prepush_plan`,
+default `xs`), then one `parley-push-fix#N` per chunk (parallel when file sets
+disjoint). Host commits `fix: repair pre-push failures`, re-checks (up to
+`[parley].prepush_fix_max_loops`). Auth/remote push errors skip agents.
 
 ## Discrete steps (IDE chaining)
 

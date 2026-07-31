@@ -7,6 +7,17 @@ use std::sync::{OnceLock, RwLock};
 
 use crate::score::Tier;
 
+fn tier_from_key(raw: &str) -> Option<Tier> {
+    match raw.to_ascii_lowercase().as_str() {
+        "xs" => Some(Tier::Xs),
+        "s" => Some(Tier::S),
+        "m" => Some(Tier::M),
+        "l" => Some(Tier::L),
+        "xl" => Some(Tier::Xl),
+        _ => None,
+    }
+}
+
 const CONFIG_DIR_NAME: &str = ".scrutiny";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const LOCAL_CONFIG_FILE_NAME: &str = "scrutiny.toml";
@@ -43,6 +54,12 @@ pub struct Config {
     pub timeouts: TimeoutsConfig,
     #[serde(default)]
     pub prompts: PromptsConfig,
+    /// Per-role model overrides. Key = agent label prefix with `-` → `_`
+    /// (same as `[prompts.agents]`). Value = tier `xs|s|m|l|xl` resolved via
+    /// `[models.<client>]`, or a raw model id. Unset → session model; special
+    /// default: `parley_prepush_plan` → client `xs` when unset.
+    #[serde(default)]
+    pub agent_models: BTreeMap<String, String>,
 }
 
 /// Agent wall-clock limits. `agent_wall_secs` is the base every unset stage
@@ -88,6 +105,10 @@ pub struct TimeoutsConfig {
     /// Unset → falls back to `[parley] prepush_fix_wall_secs`.
     #[serde(default)]
     pub parley_prepush_fix_wall_secs: Option<u64>,
+    /// Wall for the pre-push plan agent that splits the log into fix chunks.
+    /// Unset → 120.
+    #[serde(default)]
+    pub parley_prepush_plan_wall_secs: Option<u64>,
 }
 
 /// User-injected prompt text prepended to spawned-agent prompts.
@@ -159,6 +180,9 @@ pub struct ParleyConfig {
     /// Max scrutiny-runs-checks → fix-agent → re-check cycles in the pre-push gate.
     #[serde(default = "default_prepush_fix_loops")]
     pub prepush_fix_max_loops: u32,
+    /// Cap on fix chunks the pre-push plan agent may emit (default 8).
+    #[serde(default = "default_prepush_fix_max_chunks")]
+    pub prepush_fix_max_chunks: u32,
     /// Wall-clock seconds for each pre-push fix agent in the gate. Superseded by
     /// `[timeouts] parley_prepush_fix_wall_secs`; kept for back-compat.
     #[serde(default)]
@@ -188,6 +212,9 @@ fn default_parley_push_fix_loops() -> u32 {
 fn default_prepush_fix_loops() -> u32 {
     5
 }
+fn default_prepush_fix_max_chunks() -> u32 {
+    8
+}
 fn default_parley_repair() -> bool {
     true
 }
@@ -201,6 +228,7 @@ impl Default for ParleyConfig {
             push_fix_max_loops: default_parley_push_fix_loops(),
             prepush_cmd: None,
             prepush_fix_max_loops: default_prepush_fix_loops(),
+            prepush_fix_max_chunks: default_prepush_fix_max_chunks(),
             prepush_fix_wall_secs: None,
             agent_wall_secs: None,
             repair: default_parley_repair(),
@@ -882,6 +910,31 @@ impl Config {
             })
     }
 
+    /// Resolve the model for an agent role.
+    ///
+    /// - Explicit `[agent_models.<role>]` wins (tier name or raw model id).
+    /// - `parley_prepush_plan` with no entry defaults to tier `xs`.
+    /// - Otherwise → `session_model`.
+    pub fn resolve_agent_model(&self, client: &str, role: &str, session_model: &str) -> String {
+        let entry = self
+            .agent_models
+            .get(role)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        let raw = match entry {
+            Some(v) => v,
+            None if role == "parley_prepush_plan" => "xs",
+            None => return session_model.to_string(),
+        };
+        if let Some(tier) = tier_from_key(raw) {
+            return self
+                .model_for(client, tier)
+                .unwrap_or(session_model)
+                .to_string();
+        }
+        raw.to_string()
+    }
+
     /// Unique model ids configured for a client (xs→xl order, deduped).
     pub fn available_models(&self, client: &str) -> Vec<String> {
         let Some(m) = self
@@ -1265,6 +1318,46 @@ mod tests {
         assert_eq!(forge.tier, Tier::M);
         assert!(cfg.prompts.global.is_empty());
         assert!(cfg.prompts.agents.is_empty());
+        assert_eq!(
+            cfg.agent_models.get("parley_prepush_plan").map(|s| s.as_str()),
+            Some("xs")
+        );
+        assert_eq!(cfg.parley.prepush_fix_max_chunks, 8);
+        assert_eq!(cfg.timeouts.parley_prepush_plan_wall_secs, Some(120));
+    }
+
+    #[test]
+    fn resolve_agent_model_tier_raw_and_defaults() {
+        let cfg: Config = toml::from_str(DEFAULT_TOML).expect("parse default");
+        // Unset role → session model.
+        assert_eq!(
+            cfg.resolve_agent_model("claude", "parley_member", "sonnet"),
+            "sonnet"
+        );
+        // Explicit tier in [agent_models] → client model.
+        assert_eq!(
+            cfg.resolve_agent_model("claude", "parley_prepush_plan", "sonnet"),
+            "haiku"
+        );
+        // Cursor xs mapping.
+        assert_eq!(
+            cfg.resolve_agent_model("cursor", "parley_prepush_plan", "big"),
+            "composer-2-fast"
+        );
+        // Explicit raw model id.
+        let mut cfg2 = cfg.clone();
+        cfg2.agent_models
+            .insert("parley_push_fix".into(), "my-custom-model".into());
+        assert_eq!(
+            cfg2.resolve_agent_model("claude", "parley_push_fix", "sonnet"),
+            "my-custom-model"
+        );
+        // Plan role with no entry still defaults to xs.
+        cfg2.agent_models.remove("parley_prepush_plan");
+        assert_eq!(
+            cfg2.resolve_agent_model("claude", "parley_prepush_plan", "sonnet"),
+            "haiku"
+        );
     }
 
     #[test]

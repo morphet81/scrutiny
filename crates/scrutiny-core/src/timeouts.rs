@@ -36,6 +36,7 @@ pub struct Timeouts {
     pub forge_bulk_item: u64,
     pub parley_agent: u64,
     pub parley_prepush_fix: u64,
+    pub parley_prepush_plan: u64,
 }
 
 impl Timeouts {
@@ -59,6 +60,8 @@ impl Timeouts {
             forge_bulk_item: nonzero(cfg.forge_bulk_item_wall_secs, mul(BULK_ITEM_X)),
             parley_agent: nonzero(cfg.parley_agent_wall_secs, base),
             parley_prepush_fix: nonzero(cfg.parley_prepush_fix_wall_secs, mul(IMPLEMENT_X)),
+            // Plan agent is short/read-only — fixed 120s default, not base-derived.
+            parley_prepush_plan: nonzero(cfg.parley_prepush_plan_wall_secs, 120),
         }
     }
 }
@@ -113,6 +116,7 @@ wall_accessors! {
     forge_bulk_item => forge_bulk_item,
     parley_agent => parley_agent,
     parley_prepush_fix => parley_prepush_fix,
+    parley_prepush_plan => parley_prepush_plan,
 }
 
 #[cfg(test)]
@@ -136,6 +140,7 @@ mod tests {
         assert_eq!(t.forge_bulk_item, 4800);
         assert_eq!(t.parley_agent, 600);
         assert_eq!(t.parley_prepush_fix, 1200);
+        assert_eq!(t.parley_prepush_plan, 120);
     }
 
     #[test]

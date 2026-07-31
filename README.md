@@ -298,10 +298,21 @@ Also scored (not configurable lists): AC count, description size, issue type, Fi
 | `default_evangelists` | `1` | Optional architecture/quality pass (isolated) |
 | `repair` | `true` | Re-implement stubs / verifier rejects before replies |
 | `prepush_cmd` | unset | Override quiet pre-push gate command; else repo hook |
-| `prepush_fix_max_loops` | `5` | Max check → fix-agent → re-check cycles in the gate |
+| `prepush_fix_max_loops` | `5` | Max check → plan+fix → re-check cycles in the gate |
+| `prepush_fix_max_chunks` | `8` | Cap on fix chunks the plan agent may emit |
 | `push_fix_max_loops` | `2` | **Deprecated** — use `prepush_fix_max_loops` |
 | `agent_wall_secs` | unset | **Deprecated** — use `[timeouts].parley_agent_wall_secs` |
 | `prepush_fix_wall_secs` | unset | **Deprecated** — use `[timeouts].parley_prepush_fix_wall_secs` |
+
+### `[agent_models]`
+
+Per-role model override. Key = agent label with `-` → `_` (same as `[prompts.agents]`). Value = tier `xs` \| `s` \| `m` \| `l` \| `xl` (resolved via `[models.<client>]`) **or** a raw model id. Unset → session model. Special: `parley_prepush_plan` defaults to client `xs` when unset.
+
+```toml
+[agent_models]
+parley_prepush_plan = "xs"
+# parley_push_fix = "m"
+```
 
 ### `[timeouts]`
 
@@ -322,7 +333,8 @@ Seconds. `agent_wall_secs` is the base; unset stages derive from it (`0` = unset
 | `forge_fix_wall_secs` | base ×2 (`1200`) | Verify-gate fix agent |
 | `forge_bulk_item_wall_secs` | base ×8 (`4800`) | One bulk-forge item |
 | `parley_agent_wall_secs` | base | Member / verifier / evangelist |
-| `parley_prepush_fix_wall_secs` | base ×2 (`1200`) | Pre-push fix agent |
+| `parley_prepush_plan_wall_secs` | `120` | Pre-push plan agent (split log → chunks) |
+| `parley_prepush_fix_wall_secs` | base ×2 (`1200`) | Pre-push fix agent (per chunk) |
 
 ```toml
 [timeouts]
@@ -343,7 +355,7 @@ Role key = agent label with `-` → `_`. Unknown keys ignored. Team mode: only t
 | Surface | Role keys |
 |---------|-----------|
 | probe | `reviewer`, `evangelist`, `security`, `performance`, `error_handling`, `lead` |
-| parley | `parley_member`, `parley_lead`, `parley_verifier`, `parley_evangelist`, `parley_push_fix` |
+| parley | `parley_member`, `parley_lead`, `parley_verifier`, `parley_evangelist`, `parley_prepush_plan`, `parley_push_fix` |
 | forge | `forge_test_plan`, `forge_test_plan_revise`, `forge_implement`, `forge_po_team`, `forge_verify_fix` |
 
 ```toml
@@ -421,6 +433,8 @@ Each prints one JSON path on stdout.
 ### Pre-push gate
 
 Forge verify and parley both run the repo’s pre-push checks quietly (log file, not a pane flood). Override with `forge.prepush_cmd` / `parley.prepush_cmd`. No hook and no override → gate is a no-op green.
+
+Parley on failure: cheap plan agent (`[agent_models].parley_prepush_plan`, default `xs`) splits the log into chunks → one fix agent per chunk (parallel when file sets disjoint) → host commit → re-check.
 
 ### Claude auth
 
