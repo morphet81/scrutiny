@@ -4,10 +4,12 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -529,10 +531,22 @@ pub fn run_headless(
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
+    let got_stdout = Arc::new(AtomicBool::new(false));
+    let got_stdout_flag = got_stdout.clone();
     let stdout_h = thread::spawn(move || {
         let mut buf = String::new();
         if let Some(mut r) = stdout_pipe {
-            let _ = std::io::Read::read_to_string(&mut r, &mut buf);
+            let mut chunk = [0u8; 8192];
+            loop {
+                match r.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        got_stdout_flag.store(true, Ordering::Relaxed);
+                        buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    }
+                    Err(_) => break,
+                }
+            }
         }
         buf
     });
@@ -546,11 +560,30 @@ pub fn run_headless(
 
     let started = std::time::Instant::now();
     let mut timed_out = false;
+    let mut no_output_kill = false;
     let mut last_tick = started;
+    let first_output_secs = crate::timeouts::get().headless_first_output;
     let code = loop {
         match child.try_wait().context("wait agent child")? {
             Some(status) => break status.code().unwrap_or(1),
             None => {
+                if should_kill_for_no_stdout(
+                    got_stdout.load(Ordering::Relaxed),
+                    started.elapsed(),
+                    first_output_secs,
+                    wall,
+                ) {
+                    eprintln!(
+                        "scrutiny: timeout {label} after {}s — no stdout from model `{model}` \
+                         (headless likely hung / unsupported); killing",
+                        first_output_secs
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    no_output_kill = true;
+                    break 124;
+                }
                 if started.elapsed() >= wall {
                     eprintln!(
                         "scrutiny: timeout {label} after {}s — killing",
@@ -587,10 +620,17 @@ pub fn run_headless(
         if !stderr.is_empty() {
             stderr.push('\n');
         }
-        stderr.push_str(&format!(
-            "timed out after {}s — killed; parsing partial stdout if any",
-            wall.as_secs()
-        ));
+        if no_output_kill {
+            stderr.push_str(&format!(
+                "no stdout within {first_output_secs}s from model `{model}` — killed; \
+                 set [agent_models] overrides or use a headless-safe model"
+            ));
+        } else {
+            stderr.push_str(&format!(
+                "timed out after {}s — killed; parsing partial stdout if any",
+                wall.as_secs()
+            ));
+        }
     }
 
     if timed_out {
@@ -780,17 +820,56 @@ pub fn wait_for_sentinels_cancellable(
 }
 
 /// Extract human-readable error from Claude `--output-format json` envelope.
-fn claude_error_message(stdout: &str) -> Option<String> {
+/// Whether to kill a headless child that has produced no stdout yet.
+/// `first_output_secs == 0` disables. Cap at `wall` so wall timeout still wins.
+pub fn should_kill_for_no_stdout(
+    got_stdout: bool,
+    elapsed: Duration,
+    first_output_secs: u64,
+    wall: Duration,
+) -> bool {
+    if got_stdout || first_output_secs == 0 {
+        return false;
+    }
+    let limit = Duration::from_secs(first_output_secs).min(wall);
+    elapsed >= limit
+}
+
+pub(crate) fn claude_error_message(stdout: &str) -> Option<String> {
     let v: Value = serde_json::from_str(stdout.trim()).ok()?;
     let is_error = v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false);
     if !is_error {
         return None;
     }
-    let result = v
-        .get("result")
-        .and_then(|x| x.as_str())
-        .unwrap_or("claude reported is_error");
-    Some(format!("claude: {result}"))
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(result) = v.get("result").and_then(|x| x.as_str()) {
+        if !result.is_empty() && result != "claude reported is_error" {
+            parts.push(result.to_string());
+        }
+    }
+    if let Some(reason) = v.get("terminal_reason").and_then(|x| x.as_str()) {
+        if !reason.is_empty() {
+            parts.push(format!("terminal_reason={reason}"));
+        }
+    }
+    if let Some(subtype) = v.get("subtype").and_then(|x| x.as_str()) {
+        if !subtype.is_empty() && subtype != "success" {
+            parts.push(format!("subtype={subtype}"));
+        }
+    }
+    if let Some(errs) = v.get("errors").and_then(|x| x.as_array()) {
+        for e in errs {
+            if let Some(s) = e.as_str() {
+                if !s.is_empty() {
+                    parts.push(s.to_string());
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        parts.push("claude reported is_error".into());
+    }
+    Some(format!("claude: {}", parts.join("; ")))
 }
 
 pub fn parse_findings_json(raw: &str, role: &str) -> Result<Vec<AgentFinding>> {
@@ -1788,6 +1867,35 @@ mod tests {
         let raw = r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
         let msg = claude_error_message(raw).unwrap();
         assert!(msg.contains("Not logged in"));
+    }
+
+    #[test]
+    fn claude_error_aborted_streaming() {
+        let raw = r#"{
+            "type":"result","is_error":true,"duration_api_ms":0,
+            "terminal_reason":"aborted_streaming","subtype":"error_during_execution",
+            "errors":["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"]
+        }"#;
+        let msg = claude_error_message(raw).unwrap();
+        assert!(msg.contains("aborted_streaming"), "{msg}");
+        assert!(msg.contains("ede_diagnostic"), "{msg}");
+        assert!(msg.contains("error_during_execution"), "{msg}");
+    }
+
+    #[test]
+    fn no_stdout_early_kill_decision() {
+        let wall = Duration::from_secs(600);
+        assert!(!should_kill_for_no_stdout(false, Duration::from_secs(30), 90, wall));
+        assert!(should_kill_for_no_stdout(false, Duration::from_secs(90), 90, wall));
+        assert!(!should_kill_for_no_stdout(true, Duration::from_secs(200), 90, wall));
+        assert!(!should_kill_for_no_stdout(false, Duration::from_secs(200), 0, wall));
+        // Cap at wall when first-output > wall.
+        assert!(should_kill_for_no_stdout(
+            false,
+            Duration::from_secs(10),
+            90,
+            Duration::from_secs(10)
+        ));
     }
 
     #[test]

@@ -12,7 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::agent_runner::{
-    run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind,
+    claude_error_message, run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind,
+    HeadlessOutcome,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
@@ -155,10 +156,10 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
 
         if plan.spawn_mode == "team" {
             eprintln!("scrutiny parley: team lead…");
-            run_team_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_team_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
         } else {
             eprintln!("scrutiny parley: isolated members…");
-            run_isolated_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_isolated_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
 
         // Verifier pass — both spawn modes, after fixes, before evangelist.
@@ -167,13 +168,13 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} verifier(s) check fixes…",
                 plan.verifiers
             );
-            run_verifier_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_verifier_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
 
         // Repair pass — re-implement threads left as stubs or rejected by the
         // verifier so failures never get posted as PR replies.
         if cfg.parley.repair {
-            run_parley_repair(&detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_parley_repair(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
 
         // Evangelist verify pass — isolated only
@@ -182,7 +183,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} evangelist(s) verify…",
                 plan.evangelists
             );
-            run_evangelist_parley(&detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_evangelist_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
         }
     }
 
@@ -292,6 +293,7 @@ fn collect_disk_fixes(fixes_path: &str, expected: &[String], note: &str) -> Resu
 }
 
 fn run_isolated_parley(
+    cfg: &Config,
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
@@ -303,6 +305,14 @@ fn run_isolated_parley(
         bail!("parley isolated: no buckets");
     }
 
+    let model = cfg.resolve_agent_model(&client.client, "parley_member", &plan.model);
+    if model != plan.model {
+        eprintln!(
+            "scrutiny parley: member model override `{model}` (session was `{}`)",
+            plan.model
+        );
+    }
+
     if let Some(ctx) = term {
         let mut sentinels = Vec::new();
         for (i, bucket) in plan.buckets.iter().enumerate() {
@@ -311,7 +321,7 @@ fn run_isolated_parley(
             let slice = comments_for_ids(comments, bucket);
             let prompt =
                 build_member_prompt(&plan.comments_path, &plan.fixes_path, &slice, index, false);
-            sentinels.push(run_nonheadless(client, &plan.model, cwd, &prompt, &label, ctx)?);
+            sentinels.push(run_nonheadless(client, &model, cwd, &prompt, &label, ctx)?);
         }
         let missing = wait_for_sentinels(&sentinels, crate::timeouts::nonheadless());
         if !missing.is_empty() {
@@ -339,7 +349,7 @@ fn run_isolated_parley(
     for (i, bucket) in plan.buckets.iter().enumerate() {
         let tx = tx.clone();
         let client = client.clone();
-        let model = plan.model.clone();
+        let model = model.clone();
         let cwd = cwd.to_path_buf();
         let comments_path = plan.comments_path.clone();
         let fixes_path = plan.fixes_path.clone();
@@ -363,8 +373,7 @@ fn run_isolated_parley(
     }
     drop(tx);
 
-    let mut collected: Vec<(u32, Vec<String>, Result<crate::agent_runner::HeadlessOutcome>)> =
-        Vec::new();
+    let mut collected: Vec<(u32, Vec<String>, Result<HeadlessOutcome>)> = Vec::new();
     for _ in 0..job_count {
         collected.push(rx.recv().context("parley member channel")?);
     }
@@ -373,10 +382,24 @@ fn run_isolated_parley(
     // Merge each member's output; collect ids that still lack a real (non-stub)
     // entry — a timeout/empty pass leaves nothing usable.
     let mut still_missing: Vec<String> = Vec::new();
-    for (index, ids, out) in collected {
-        merge_member_outcome(&plan.fixes_path, &ids, &out, &format!("member#{index}"))?;
+    let mut dead_member: Option<String> = None;
+    for (index, ids, out) in &collected {
+        merge_member_outcome(&plan.fixes_path, ids, out, &format!("member#{index}"))?;
         let file = load_fixes(Path::new(&plan.fixes_path))?;
-        still_missing.extend(missing_real_ids(&file, &ids));
+        let missing = missing_real_ids(&file, ids);
+        if !missing.is_empty() {
+            if let Some(detail) = dead_headless_detail(out) {
+                dead_member = Some(format!("member#{index}: {detail}"));
+            }
+            still_missing.extend(missing);
+        }
+    }
+
+    // Dead model (timeout / Claude is_error, no real fixes) — do not burn wall on retries.
+    if let Some(detail) = dead_member {
+        if !still_missing.is_empty() {
+            bail_dead_parley_agent(&model, &detail)?;
+        }
     }
 
     // Retry unaddressed threads once, one comment per pass — a single member
@@ -394,7 +417,7 @@ fn run_isolated_parley(
             let label = format!("parley-retry#{id}");
             let out = run_headless(
                 client,
-                &plan.model,
+                &model,
                 cwd,
                 &prompt,
                 HeadlessKind::Parley,
@@ -402,6 +425,12 @@ fn run_isolated_parley(
                 wall,
             );
             merge_member_outcome(&plan.fixes_path, one, &out, &format!("retry {id}"))?;
+            let file = load_fixes(Path::new(&plan.fixes_path))?;
+            if !missing_real_ids(&file, one).is_empty() {
+                if let Some(detail) = dead_headless_detail(&out) {
+                    bail_dead_parley_agent(&model, &format!("retry {id}: {detail}"))?;
+                }
+            }
         }
     }
 
@@ -421,6 +450,33 @@ fn run_isolated_parley(
     }
     save_fixes(Path::new(&plan.fixes_path), &file)?;
     Ok(())
+}
+
+/// Headless outcome that produced no real fixes and looks dead (timeout / Claude error).
+fn dead_headless_detail(out: &Result<HeadlessOutcome>) -> Option<String> {
+    match out {
+        Ok(o) => {
+            if o.timed_out {
+                return Some(format!(
+                    "timed out after {}ms{}",
+                    o.wall_ms,
+                    claude_error_message(&o.stdout)
+                        .map(|e| format!(" ({e})"))
+                        .unwrap_or_default()
+                ));
+            }
+            claude_error_message(&o.stdout)
+        }
+        Err(e) => Some(format!("spawn/run failed: {e:#}")),
+    }
+}
+
+fn bail_dead_parley_agent(model: &str, detail: &str) -> Result<()> {
+    bail!(
+        "parley agent dead (model `{model}`): {detail}. \
+         Headless produced no usable output. Set [agent_models] parley_* to a \
+         headless-safe model (e.g. \"l\" → claude-sonnet-4-6)."
+    )
 }
 
 /// Merge one member's headless outcome into the fixes file (parsed stdout JSON,
@@ -476,6 +532,7 @@ fn missing_real_ids(file: &crate::parley::fixes::ParleyFixesFile, ids: &[String]
 }
 
 fn run_team_parley(
+    cfg: &Config,
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
@@ -484,10 +541,11 @@ fn run_team_parley(
     wall_secs: u64,
 ) -> Result<()> {
     let wall = Duration::from_secs(wall_secs);
+    let model = cfg.resolve_agent_model(&client.client, "parley_lead", &plan.model);
     let prompt = build_team_lead_parley_prompt(plan, comments);
 
     if let Some(ctx) = term {
-        let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, "parley-lead", ctx)?;
+        let sentinel = run_nonheadless(client, &model, cwd, &prompt, "parley-lead", ctx)?;
         let missing =
             wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
@@ -506,7 +564,7 @@ fn run_team_parley(
 
     let out = run_headless(
         client,
-        &plan.model,
+        &model,
         cwd,
         &prompt,
         HeadlessKind::Parley,
@@ -522,6 +580,25 @@ fn run_team_parley(
         file = load_fixes(Path::new(&plan.fixes_path))?;
     }
     let expected: Vec<String> = comments.comments.iter().map(|c| c.id.clone()).collect();
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|id| !file.fixes.iter().any(|f| &f.comment_id == *id && !f.stub))
+        .cloned()
+        .collect();
+    if !missing.is_empty() && (out.timed_out || claude_error_message(&out.stdout).is_some()) {
+        let detail = if out.timed_out {
+            format!(
+                "timed out after {}ms{}",
+                out.wall_ms,
+                claude_error_message(&out.stdout)
+                    .map(|e| format!(" ({e})"))
+                    .unwrap_or_default()
+            )
+        } else {
+            claude_error_message(&out.stdout).unwrap_or_else(|| "no fixes".into())
+        };
+        bail_dead_parley_agent(&model, &format!("lead: {detail}"))?;
+    }
     for id in &expected {
         if !file.fixes.iter().any(|f| &f.comment_id == id) {
             file.fixes.push(FixEntry {
@@ -545,6 +622,7 @@ fn run_team_parley(
 }
 
 fn run_verifier_parley(
+    cfg: &Config,
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
@@ -553,6 +631,7 @@ fn run_verifier_parley(
     wall_secs: u64,
 ) -> Result<()> {
     let prompt = build_verifier_prompt(plan, comments);
+    let model = cfg.resolve_agent_model(&client.client, "parley_verifier", &plan.model);
     run_verify_agents(
         client,
         plan,
@@ -561,11 +640,13 @@ fn run_verifier_parley(
         plan.verifiers,
         "parley-verifier",
         &prompt,
+        &model,
         wall_secs,
     )
 }
 
 fn run_evangelist_parley(
+    cfg: &Config,
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
@@ -574,6 +655,7 @@ fn run_evangelist_parley(
     wall_secs: u64,
 ) -> Result<()> {
     let prompt = build_evangelist_prompt(plan, comments);
+    let model = cfg.resolve_agent_model(&client.client, "parley_evangelist", &plan.model);
     run_verify_agents(
         client,
         plan,
@@ -582,6 +664,7 @@ fn run_evangelist_parley(
         plan.evangelists,
         "parley-evangelist",
         &prompt,
+        &model,
         wall_secs,
     )
 }
@@ -598,13 +681,14 @@ fn run_verify_agents(
     count: u32,
     label_prefix: &str,
     prompt: &str,
+    model: &str,
     wall_secs: u64,
 ) -> Result<()> {
     if let Some(ctx) = term {
         let mut sentinels = Vec::new();
         for i in 0..count {
             let label = format!("{label_prefix}#{}", i + 1);
-            sentinels.push(run_nonheadless(client, &plan.model, cwd, prompt, &label, ctx)?);
+            sentinels.push(run_nonheadless(client, model, cwd, prompt, &label, ctx)?);
         }
         let missing = wait_for_sentinels(&sentinels, crate::timeouts::nonheadless());
         if !missing.is_empty() {
@@ -620,7 +704,7 @@ fn run_verify_agents(
     let wall = Duration::from_secs(wall_secs);
     for i in 0..count {
         let label = format!("{label_prefix}#{}", i + 1);
-        let out = run_headless(client, &plan.model, cwd, prompt, HeadlessKind::Parley, &label, wall)?;
+        let out = run_headless(client, model, cwd, prompt, HeadlessKind::Parley, &label, wall)?;
         let mut file = load_fixes(Path::new(&plan.fixes_path))?;
         let entries = parse_fixes_from_agent_stdout(&out.stdout);
         if !entries.is_empty() {
@@ -712,6 +796,7 @@ fn build_repair_prompt(comments_path: &str, fixes_path: &str, slice: &[ParleyCom
 /// Repair pass: re-implement threads still flagged as stubs or rejected by a
 /// verifier. No-op when nothing needs repair.
 fn run_parley_repair(
+    cfg: &Config,
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
@@ -728,12 +813,13 @@ fn run_parley_repair(
         "scrutiny parley: {} thread(s) need repair (stub / verifier-rejected) — repair pass…",
         ids.len()
     );
+    let model = cfg.resolve_agent_model(&client.client, "parley_repair", &plan.model);
     let slice = comments_for_ids(comments, &ids);
     let prompt = build_repair_prompt(&plan.comments_path, &plan.fixes_path, &slice);
     let label = "parley-repair";
 
     if let Some(ctx) = term {
-        let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, label, ctx)?;
+        let sentinel = run_nonheadless(client, &model, cwd, &prompt, label, ctx)?;
         let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
@@ -746,14 +832,21 @@ fn run_parley_repair(
 
     let out = run_headless(
         client,
-        &plan.model,
+        &model,
         cwd,
         &prompt,
         HeadlessKind::Parley,
         label,
         Duration::from_secs(wall_secs),
     );
-    merge_member_outcome(&plan.fixes_path, &ids, &out, "repair")
+    merge_member_outcome(&plan.fixes_path, &ids, &out, "repair")?;
+    let file = load_fixes(Path::new(&plan.fixes_path))?;
+    if !missing_real_ids(&file, &ids).is_empty() {
+        if let Some(detail) = dead_headless_detail(&out) {
+            bail_dead_parley_agent(&model, &format!("repair: {detail}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFile) -> String {

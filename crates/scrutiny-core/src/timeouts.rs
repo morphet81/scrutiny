@@ -12,6 +12,7 @@ use crate::config::TimeoutsConfig;
 
 pub const DEFAULT_AGENT_WALL_SECS: u64 = 10 * 60;
 pub const DEFAULT_PROGRESS_SECS: u64 = 15;
+pub const DEFAULT_HEADLESS_FIRST_OUTPUT_SECS: u64 = 90;
 
 /// Multipliers applied to `agent_wall_secs` when a stage has no explicit
 /// override. These are the historical hardcoded ratios.
@@ -37,6 +38,8 @@ pub struct Timeouts {
     pub parley_agent: u64,
     pub parley_prepush_fix: u64,
     pub parley_prepush_plan: u64,
+    /// 0 = disabled (wait full wall even with empty stdout).
+    pub headless_first_output: u64,
 }
 
 impl Timeouts {
@@ -62,6 +65,12 @@ impl Timeouts {
             parley_prepush_fix: nonzero(cfg.parley_prepush_fix_wall_secs, mul(IMPLEMENT_X)),
             // Plan agent is short/read-only — fixed 120s default, not base-derived.
             parley_prepush_plan: nonzero(cfg.parley_prepush_plan_wall_secs, 120),
+            // Explicit 0 disables early kill; unset → default 90.
+            headless_first_output: match cfg.headless_first_output_secs {
+                Some(0) => 0,
+                Some(n) => n,
+                None => DEFAULT_HEADLESS_FIRST_OUTPUT_SECS,
+            },
         }
     }
 }
@@ -117,6 +126,7 @@ wall_accessors! {
     parley_agent => parley_agent,
     parley_prepush_fix => parley_prepush_fix,
     parley_prepush_plan => parley_prepush_plan,
+    headless_first_output => headless_first_output,
 }
 
 #[cfg(test)]
@@ -141,6 +151,16 @@ mod tests {
         assert_eq!(t.parley_agent, 600);
         assert_eq!(t.parley_prepush_fix, 1200);
         assert_eq!(t.parley_prepush_plan, 120);
+        assert_eq!(t.headless_first_output, DEFAULT_HEADLESS_FIRST_OUTPUT_SECS);
+    }
+
+    #[test]
+    fn headless_first_output_zero_disables() {
+        let t = Timeouts::resolve(&TimeoutsConfig {
+            headless_first_output_secs: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(t.headless_first_output, 0);
     }
 
     #[test]
