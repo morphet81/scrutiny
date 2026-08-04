@@ -17,6 +17,9 @@ use crate::forge::brief::run_forge_brief;
 use crate::forge::context::run_forge_context;
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::figma::export_figma_designs;
+use crate::forge::loc::{
+    decide_loc_gate, parse_loc_estimate, ForgeLocRules, LocGateDecision,
+};
 use crate::forge::plan::{run_forge_plan_write, ForgePlanWriteInput, ForgeSessionPlan};
 use crate::forge::scaffold;
 use crate::forge::tools::playwright_cli_available;
@@ -441,6 +444,22 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         write_json_pretty(&session_path, &session)?;
     }
 
+    if let Some(max_loc) = cfg.forge.max_loc {
+        run_loc_estimate_gate(
+            detected,
+            &session,
+            cfg,
+            &cwd,
+            &session_root,
+            &ticket_path,
+            &session_path,
+            &brief_path,
+            &context_path,
+            max_loc,
+            target,
+        )?;
+    }
+
     eprintln!("scrutiny forge: implement ({})…", session.spawn_mode);
     run_implement_agent(
         detected,
@@ -826,6 +845,167 @@ fn run_tdd_plan_loop(
 /// Join comment lines into one string; trim ends only.
 fn join_comment_lines(lines: &[String]) -> String {
     lines.join("\n").trim().to_string()
+}
+
+/// When `[forge] max_loc` is set: spawn m-tier estimate agent, then gate.
+#[allow(clippy::too_many_arguments)]
+fn run_loc_estimate_gate(
+    client: &crate::runtime::DetectedClient,
+    session: &ForgeSessionPlan,
+    cfg: &Config,
+    cwd: &Path,
+    session_root: &Path,
+    ticket_path: &Path,
+    session_path: &Path,
+    brief_path: &Path,
+    context_path: &Path,
+    max_loc: u32,
+    target: AgentTarget,
+) -> Result<()> {
+    let rules = ForgeLocRules::from_forge(&cfg.forge);
+    let estimate_path = session_root.join("loc-estimate.json");
+    let model = cfg.resolve_agent_model(&client.client, "forge_loc_estimate", &session.model);
+    let prompt = build_loc_estimate_prompt(
+        ticket_path,
+        session_path,
+        brief_path,
+        context_path,
+        session,
+        &estimate_path,
+        max_loc,
+        &rules,
+    );
+
+    eprintln!("scrutiny forge: LOC estimate (max {max_loc}, model {model})…");
+    let out = run_forge_agent(
+        client,
+        &model,
+        cwd,
+        &prompt,
+        "forge-loc-estimate",
+        target,
+        crate::timeouts::forge_loc_estimate(),
+    )?;
+
+    if !estimate_path.exists() {
+        if let Some(o) = out.as_ref() {
+            if o.code != 0 && !o.timed_out {
+                bail!(
+                    "loc-estimate agent failed: {}",
+                    o.stderr.chars().take(400).collect::<String>()
+                );
+            }
+            let text = o.stdout.trim();
+            if !text.is_empty() {
+                if let Ok(est) = parse_loc_estimate(text) {
+                    write_json_pretty(&estimate_path, &est)?;
+                }
+            }
+        }
+    }
+    if !estimate_path.exists() {
+        bail!(
+            "loc-estimate agent did not write {}",
+            estimate_path.display()
+        );
+    }
+
+    let raw = fs::read_to_string(&estimate_path).context("read loc-estimate.json")?;
+    let est = parse_loc_estimate(&raw)?;
+    eprintln!(
+        "scrutiny forge: LOC estimate {} / max {} (confidence {}% / {})",
+        est.estimated_loc,
+        max_loc,
+        est.confidence_pct(),
+        est.display_label()
+    );
+    if !est.rationale.trim().is_empty() {
+        eprintln!("scrutiny forge:   {}", est.rationale.trim());
+    }
+
+    let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let interactive = tty && target.surface.is_none();
+    match decide_loc_gate(est.estimated_loc, max_loc, interactive) {
+        LocGateDecision::Proceed => Ok(()),
+        LocGateDecision::Abort => bail!(
+            "LOC estimate {} exceeds max_loc {} (confidence {}%) — aborting",
+            est.estimated_loc,
+            max_loc,
+            est.confidence_pct()
+        ),
+        LocGateDecision::Ask => {
+            let proceed = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!(
+                    "LOC estimate {} exceeds max_loc {} (confidence {}%) — proceed anyway?",
+                    est.estimated_loc,
+                    max_loc,
+                    est.confidence_pct()
+                ))
+                .default(false)
+                .interact()
+                .context("loc budget confirm")?;
+            if proceed {
+                eprintln!("scrutiny forge: over LOC budget — continuing per user");
+                Ok(())
+            } else {
+                bail!(
+                    "LOC estimate {} exceeds max_loc {} — stopped by user",
+                    est.estimated_loc,
+                    max_loc
+                );
+            }
+        }
+    }
+}
+
+fn build_loc_estimate_prompt(
+    ticket_path: &Path,
+    session_path: &Path,
+    brief_path: &Path,
+    context_path: &Path,
+    session: &ForgeSessionPlan,
+    estimate_path: &Path,
+    max_loc: u32,
+    rules: &ForgeLocRules,
+) -> String {
+    let mut p = String::new();
+    p.push_str(
+        "You are a LOC estimator. Do NOT implement code. Do NOT edit source files.\n\
+         Estimate how large the eventual PR will be versus the current branch / merge-base.\n",
+    );
+    p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
+    p.push_str(crate::prepush::NO_ARTIFACTS);
+    p.push_str("Read these paths only:\n");
+    p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
+    p.push_str(&format!("- session: {}\n", session_path.display()));
+    p.push_str(&format!("- brief: {}\n", brief_path.display()));
+    p.push_str(&format!("- context: {}\n", context_path.display()));
+    if let Some(tdd) = &session.tdd_plan_path {
+        p.push_str(&format!("- tdd plan: {tdd}\n"));
+    }
+    if let Some(f) = &session.figma_dir {
+        p.push_str(&format!("- figma assets: {f}\n"));
+    }
+    p.push_str(&format!("\nBudget max_loc = {max_loc}\n"));
+    p.push_str("Counting rules:\n");
+    p.push_str(&rules.prompt_bullets());
+    p.push_str("\n\n");
+    p.push_str(&format!(
+        "Write ONLY this JSON file (pretty-printed):\n{}\n\n\
+         Schema:\n\
+         {{\n\
+           \"estimated_loc\": <u32 additions+deletions under the rules>,\n\
+           \"confidence\": <0.0-1.0>,\n\
+           \"confidence_label\": \"low\"|\"medium\"|\"high\",\n\
+           \"rationale\": \"short why\",\n\
+           \"breakdown\": {{\"source\": <u32>, \"test\": <u32>, \"other\": <u32>}}\n\
+         }}\n\
+         Confidence reflects ticket clarity, known related paths, and ambiguity.\n\
+         breakdown.test may be 0 when tests are excluded from the total.\n\
+         No markdown fences around the file contents.\n",
+        estimate_path.display()
+    ));
+    p
 }
 
 /// Read revise comments: Enter = newline; blank line or EOF ends.

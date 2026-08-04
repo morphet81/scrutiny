@@ -22,7 +22,7 @@ That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,
 mirrors ticket under `.scrutiny/forge-<id>/`, exports Figma via `fcli` when links
 exist, asks spawn (default **single**)|team, playwright (skip if missing), TDD,
 coverage, e2e → **scaffolding** (guess+confirm prefix, optional branch/worktree)
-→ optional test-plan confirm → implement agent → verify gate → ship step.
+→ optional test-plan confirm → optional LOC estimate gate (`max_loc`) → implement agent → verify gate → ship step.
 
 **Scaffolding (host-owned, before implement):** host guesses a conventional
 prefix from ticket type/labels/title → confirm via Select (guess first). If
@@ -83,6 +83,11 @@ SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 ```
 
 Config: `~/.scrutiny/config.toml` → `[forge]` (see shipped `config/default.toml`).
+
+When `[forge] max_loc` is set, forge spawns an **m**-tier (or `[agent_models].forge_loc_estimate`)
+read-only agent after brief/TDD plan and before implement. Agent estimates PR add+del LOC
+under `loc_exclude_*` rules, writes `loc-estimate.json` with confidence, and if over budget
+prompts proceed/stop (non-interactive aborts).
 
 **Hard token rules**
 

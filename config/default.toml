@@ -197,6 +197,16 @@ branch_headless = "auto"
 # to keep the default deterministic body.
 # pr_description_prompt = "Summarize for reviewers in structured Markdown (## sections, paragraphs, bullet lists, bold): what changed, why, risk, test notes."
 
+# Optional. When set, forge runs an m-tier agent before implement to estimate
+# whether the PR add+del LOC may exceed this budget; over budget → confirm or abort.
+# max_loc = 400
+# Exclude test / doc paths and comment-only lines from LOC counting (defaults true).
+# loc_exclude_test = true
+# loc_exclude_doc = true
+# loc_exclude_comments = true
+# Binary / opaque extensions skipped when estimating LOC (no leading dots).
+# loc_exclude_extensions = ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "wav", "wasm", "dll", "so", "dylib", "exe", "bin", "class", "jar", "war", "pyc", "pyo", "o", "a", "obj", "db", "sqlite", "sqlite3"]
+
 [forge.complexity]
 # Jira field names that hold story-point estimates (tried in order).
 story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]
@@ -247,6 +257,7 @@ progress_secs = 15
 
 # forge
 # forge_test_plan_wall_secs = 600
+# forge_loc_estimate_wall_secs = 600
 # forge_pr_description_wall_secs = 600
 # forge_implement_wall_secs = 1200
 # Verify-gate fix agent.
@@ -264,9 +275,11 @@ headless_first_output_secs = 90
 
 # Per-role model overrides. Key = agent label prefix with "-" → "_".
 # Value = tier xs|s|m|l|xl (resolved via [models.<client>]) OR a raw model id.
-# Unset → session model. Special: parley_prepush_plan defaults to xs when unset.
+# Unset → session model. Special: parley_prepush_plan defaults to xs when unset;
+# forge_loc_estimate defaults to m when unset.
 [agent_models]
 parley_prepush_plan = "xs"
+# forge_loc_estimate = "m"
 # parley_push_fix = "m"
 
 [git]
@@ -324,6 +337,7 @@ artifact_globs = [
 # --- forge (ticket implementation) ---
 # forge_test_plan = ""
 # forge_test_plan_revise = ""
+# forge_loc_estimate = ""
 # forge_implement = ""       # single-agent implement
 # forge_po_team = ""         # team-mode PO/lead implement
 # forge_verify_fix = ""

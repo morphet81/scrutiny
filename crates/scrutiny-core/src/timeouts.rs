@@ -31,6 +31,7 @@ pub struct Timeouts {
     pub probe_consolidate: u64,
     pub probe_ask: u64,
     pub forge_test_plan: u64,
+    pub forge_loc_estimate: u64,
     pub forge_pr_description: u64,
     pub forge_implement: u64,
     pub forge_fix: u64,
@@ -57,6 +58,7 @@ impl Timeouts {
             probe_consolidate: nonzero(cfg.probe_consolidate_wall_secs, base),
             probe_ask: nonzero(cfg.probe_ask_wall_secs, base),
             forge_test_plan: nonzero(cfg.forge_test_plan_wall_secs, base),
+            forge_loc_estimate: nonzero(cfg.forge_loc_estimate_wall_secs, base),
             forge_pr_description: nonzero(cfg.forge_pr_description_wall_secs, base),
             forge_implement: nonzero(cfg.forge_implement_wall_secs, mul(IMPLEMENT_X)),
             forge_fix: nonzero(cfg.forge_fix_wall_secs, mul(FIX_X)),
@@ -119,6 +121,7 @@ wall_accessors! {
     probe_consolidate => probe_consolidate,
     probe_ask => probe_ask,
     forge_test_plan => forge_test_plan,
+    forge_loc_estimate => forge_loc_estimate,
     forge_pr_description => forge_pr_description,
     forge_implement => forge_implement,
     forge_fix => forge_fix,
@@ -144,6 +147,7 @@ mod tests {
         assert_eq!(t.probe_consolidate, 600);
         assert_eq!(t.probe_ask, 600);
         assert_eq!(t.forge_test_plan, 600);
+        assert_eq!(t.forge_loc_estimate, 600);
         assert_eq!(t.forge_pr_description, 600);
         assert_eq!(t.forge_implement, 1200);
         assert_eq!(t.forge_fix, 1200);

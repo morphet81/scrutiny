@@ -88,6 +88,9 @@ pub struct TimeoutsConfig {
     /// TDD test-plan agent.
     #[serde(default)]
     pub forge_test_plan_wall_secs: Option<u64>,
+    /// Pre-implement LOC estimate agent (when `[forge] max_loc` is set).
+    #[serde(default)]
+    pub forge_loc_estimate_wall_secs: Option<u64>,
     /// PR-description agent.
     #[serde(default)]
     pub forge_pr_description_wall_secs: Option<u64>,
@@ -301,6 +304,22 @@ pub struct ForgeConfig {
     /// from this prompt + the diff, overriding the implement agent's pr_body.
     #[serde(default)]
     pub pr_description_prompt: Option<String>,
+    /// Optional. When set, forge runs an `m`-tier LOC estimate agent before
+    /// implement and gates if the estimated PR add+del LOC exceeds this budget.
+    #[serde(default)]
+    pub max_loc: Option<u32>,
+    /// Exclude test paths from LOC counting / estimate (default true).
+    #[serde(default = "default_true")]
+    pub loc_exclude_test: bool,
+    /// Exclude doc paths from LOC counting / estimate (default true).
+    #[serde(default = "default_true")]
+    pub loc_exclude_doc: bool,
+    /// Exclude comment-only lines from LOC counting / estimate (default true).
+    #[serde(default = "default_true")]
+    pub loc_exclude_comments: bool,
+    /// File extensions (no leading dot) excluded from LOC counting / estimate.
+    #[serde(default = "default_loc_exclude_extensions")]
+    pub loc_exclude_extensions: Vec<String>,
     #[serde(default)]
     pub complexity: ComplexityConfig,
 }
@@ -330,6 +349,19 @@ fn default_bulk_concurrency() -> usize {
     3
 }
 
+/// Common binary / opaque extensions excluded from forge LOC counting by default.
+pub fn default_loc_exclude_extensions() -> Vec<String> {
+    [
+        "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz",
+        "tgz", "bz2", "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4",
+        "mov", "avi", "webm", "wav", "wasm", "dll", "so", "dylib", "exe", "bin", "class", "jar",
+        "war", "pyc", "pyo", "o", "a", "obj", "db", "sqlite", "sqlite3",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 impl Default for ForgeConfig {
     fn default() -> Self {
         Self {
@@ -357,6 +389,11 @@ impl Default for ForgeConfig {
             branch_headless: default_branch_headless(),
             bulk_concurrency: default_bulk_concurrency(),
             pr_description_prompt: None,
+            max_loc: None,
+            loc_exclude_test: true,
+            loc_exclude_doc: true,
+            loc_exclude_comments: true,
+            loc_exclude_extensions: default_loc_exclude_extensions(),
             complexity: ComplexityConfig::default(),
         }
     }
@@ -930,6 +967,7 @@ impl Config {
     ///
     /// - Explicit `[agent_models.<role>]` wins (tier name or raw model id).
     /// - `parley_prepush_plan` with no entry defaults to tier `xs`.
+    /// - `forge_loc_estimate` with no entry defaults to tier `m`.
     /// - Otherwise → `session_model`.
     pub fn resolve_agent_model(&self, client: &str, role: &str, session_model: &str) -> String {
         let entry = self
@@ -940,6 +978,7 @@ impl Config {
         let raw = match entry {
             Some(v) => v,
             None if role == "parley_prepush_plan" => "xs",
+            None if role == "forge_loc_estimate" => "m",
             None => return session_model.to_string(),
         };
         if let Some(tier) = tier_from_key(raw) {
@@ -1325,6 +1364,16 @@ mod tests {
         assert!(cfg.pack.explore.enable);
         assert!(cfg.forge.enable_figma);
         assert_eq!(cfg.forge.default_approach, "tdd");
+        assert!(cfg.forge.max_loc.is_none());
+        assert!(cfg.forge.loc_exclude_test);
+        assert!(cfg.forge.loc_exclude_doc);
+        assert!(cfg.forge.loc_exclude_comments);
+        assert!(
+            cfg.forge
+                .loc_exclude_extensions
+                .iter()
+                .any(|e| e == "png")
+        );
         let forge = cfg.suggested_forge("cursor", Tier::M, 0, String::new());
         assert!(forge.prompt_approach);
         assert!(forge.prompt_e2e);
@@ -1403,6 +1452,18 @@ mod tests {
         assert_eq!(
             cfg2.resolve_agent_model("claude", "parley_prepush_plan", "sonnet"),
             "haiku"
+        );
+        // LOC estimate role with no entry defaults to m.
+        assert_eq!(
+            cfg.resolve_agent_model("claude", "forge_loc_estimate", "haiku"),
+            "sonnet"
+        );
+        assert_eq!(
+            cfg.resolve_agent_model("cursor", "forge_loc_estimate", "big"),
+            cfg.models
+                .get("cursor")
+                .and_then(|m| m.m.clone())
+                .expect("cursor m")
         );
     }
 
