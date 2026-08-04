@@ -188,9 +188,31 @@ Content-signal gating (path globs + diff regexes). Full lists live in [`config/d
 |-----|---------|-------------|
 | `max_agents_total` | `4` | Hard cap on concurrent review agents |
 | `max_reviewers` | `2` | Cap on reviewers (also tightened when pack is small) |
-| `max_evangelists` | `1` | Cap on evangelists |
-| `reviewers_by_tier` | XS=0 S/M=1 L/XL=2 | Suggested reviewer count per tier |
-| `evangelists_by_tier` | XS–M=0 L/XL=1 | Suggested evangelist count per tier |
+| `max_evangelists` | `1` | Cap on evangelists (also caps parley verifiers) |
+
+#### `[agents.reviewers_by_tier]`
+
+Suggested reviewer count per eval tier (then capped by `max_reviewers` / `max_agents_total`).
+
+| Key | Default |
+|-----|---------|
+| `XS` | `0` |
+| `S` | `1` |
+| `M` | `1` |
+| `L` | `2` |
+| `XL` | `2` |
+
+#### `[agents.evangelists_by_tier]`
+
+Suggested evangelist count per eval tier (then capped by `max_evangelists` / `max_agents_total`).
+
+| Key | Default |
+|-----|---------|
+| `XS` | `0` |
+| `S` | `0` |
+| `M` | `0` |
+| `L` | `1` |
+| `XL` | `1` |
 
 ### `[git]`
 
@@ -245,6 +267,8 @@ Bounded agent exploration beyond the pack.
 | `scan.i18n.check_placeholders` | `true` | Flag mismatched `{placeholders}` |
 | `scan.i18n.check_empty_values` | `true` | Flag empty translation values |
 | `scan.i18n.full_catalog` | `false` | Compare full catalogs vs change-scoped |
+| `scan.i18n.plural_aware_filtering` | `true` | Ignore missing keys for unsupported plural categories (e.g., `_one` in `ms`/`th`). Unknown locales remain conservative. |
+| `scan.i18n.locale_plural_categories` | `{}` | Override map: locale → categories `["zero","one","two","few","many","other"]`. Built-in covers common single-category locales. |
 
 ### `[forge]`
 
@@ -311,6 +335,7 @@ Per-role model override. Key = agent label with `-` → `_` (same as `[prompts.a
 ```toml
 [agent_models]
 parley_prepush_plan = "xs"
+# parley_member = "l"
 # parley_push_fix = "m"
 ```
 
@@ -335,6 +360,7 @@ Seconds. `agent_wall_secs` is the base; unset stages derive from it (`0` = unset
 | `parley_agent_wall_secs` | base | Member / verifier / evangelist |
 | `parley_prepush_plan_wall_secs` | `120` | Pre-push plan agent (split log → chunks) |
 | `parley_prepush_fix_wall_secs` | base ×2 (`1200`) | Pre-push fix agent (per chunk) |
+| `headless_first_output_secs` | `90` | Kill headless agent with no stdout yet (`0` = disable) |
 
 ```toml
 [timeouts]
@@ -355,7 +381,7 @@ Role key = agent label with `-` → `_`. Unknown keys ignored. Team mode: only t
 | Surface | Role keys |
 |---------|-----------|
 | probe | `reviewer`, `evangelist`, `security`, `performance`, `error_handling`, `lead` |
-| parley | `parley_member`, `parley_lead`, `parley_verifier`, `parley_evangelist`, `parley_prepush_plan`, `parley_push_fix` |
+| parley | `parley_member`, `parley_lead`, `parley_verifier`, `parley_evangelist`, `parley_repair`, `parley_prepush_plan`, `parley_push_fix` |
 | forge | `forge_test_plan`, `forge_test_plan_revise`, `forge_implement`, `forge_po_team`, `forge_verify_fix` |
 
 ```toml

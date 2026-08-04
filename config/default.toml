@@ -165,6 +165,14 @@ path_globs = [
 check_placeholders = true
 check_empty_values = true
 full_catalog = false
+# Filter missing-key warnings for unsupported plural categories (zero/one/two/few/many/other).
+# When true, only warn when the target locale supports that category.
+# Unknown locales remain conservative (warn all). Built-in table covers common single-category
+# locales (ms/th/ja/ko/zh/id/vi = `other` only; tr = `one`+`other`).
+plural_aware_filtering = true
+# Explicit locale → supported categories override. Example for custom locales:
+# [scan.i18n.locale_plural_categories]
+# "custom-locale" = ["other"]
 
 [forge]
 enable_figma = true
@@ -251,6 +259,8 @@ parley_agent_wall_secs = 600
 parley_prepush_fix_wall_secs = 1200
 # Pre-push plan agent (splits the log into fix chunks; read-only).
 parley_prepush_plan_wall_secs = 120
+# Kill headless agents that produce no stdout within N seconds (0 = disable).
+headless_first_output_secs = 90
 
 # Per-role model overrides. Key = agent label prefix with "-" → "_".
 # Value = tier xs|s|m|l|xl (resolved via [models.<client>]) OR a raw model id.

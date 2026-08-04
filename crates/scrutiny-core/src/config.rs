@@ -109,6 +109,10 @@ pub struct TimeoutsConfig {
     /// Unset → 120.
     #[serde(default)]
     pub parley_prepush_plan_wall_secs: Option<u64>,
+    /// Kill a headless agent if it produces no stdout within this many seconds.
+    /// Unset → 90. `0` disables the early kill (full wall only).
+    #[serde(default)]
+    pub headless_first_output_secs: Option<u64>,
 }
 
 /// User-injected prompt text prepended to spawned-agent prompts.
@@ -796,6 +800,16 @@ pub struct ScanI18nConfig {
     pub check_empty_values: bool,
     #[serde(default)]
     pub full_catalog: bool,
+    /// Filter missing-key warnings for unsupported plural categories.
+    /// When true, only warn about missing keys when the target locale
+    /// supports that plural category. Unknown locales remain conservative (warn).
+    #[serde(default = "default_true")]
+    pub plural_aware_filtering: bool,
+    /// Explicit locale → supported plural categories override map.
+    /// Example: `{"ms": ["other"], "th": ["other"]}` for locales with only `other`.
+    /// Built-in table covers common single-category locales when omitted.
+    #[serde(default)]
+    pub locale_plural_categories: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 fn default_reference_locale() -> String {
@@ -820,6 +834,8 @@ impl Default for ScanI18nConfig {
             check_placeholders: true,
             check_empty_values: true,
             full_catalog: false,
+            plural_aware_filtering: true,
+            locale_plural_categories: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1344,6 +1360,36 @@ mod tests {
             cfg.resolve_agent_model("cursor", "parley_prepush_plan", "big"),
             "composer-2-fast"
         );
+
+        let mut cfg2 = cfg.clone();
+        cfg2.agent_models
+            .insert("parley_member".into(), "l".into());
+        cfg2.agent_models
+            .insert("parley_lead".into(), "l".into());
+        cfg2.agent_models
+            .insert("parley_verifier".into(), "l".into());
+        cfg2.agent_models
+            .insert("parley_evangelist".into(), "l".into());
+        cfg2.agent_models
+            .insert("parley_repair".into(), "l".into());
+        let expected_l = cfg2
+            .models
+            .get("claude")
+            .and_then(|m| m.l.clone())
+            .expect("claude l");
+        for role in [
+            "parley_member",
+            "parley_lead",
+            "parley_verifier",
+            "parley_evangelist",
+            "parley_repair",
+        ] {
+            assert_eq!(
+                cfg2.resolve_agent_model("claude", role, "sonnet"),
+                expected_l,
+                "{role}"
+            );
+        }
         // Explicit raw model id.
         let mut cfg2 = cfg.clone();
         cfg2.agent_models

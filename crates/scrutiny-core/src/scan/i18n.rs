@@ -179,13 +179,21 @@ fn parity_across_changed(
                 _ => {}
             }
         }
-        if !missing.is_empty() {
+
+        // Plural-aware filtering: remove unsupported plural-category keys
+        let filtered_missing = if cfg.plural_aware_filtering {
+            filter_unsupported_plural_keys(&missing, &touched, loc, cfg)
+        } else {
+            missing.clone()
+        };
+
+        if !filtered_missing.is_empty() {
             findings.push(finding(
                 "i18n key missing in locale",
                 format!(
                     "Locale `{loc}` missing {} key(s) present/changed in `{ref_locale}`: {}",
-                    missing.len(),
-                    missing.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                    filtered_missing.len(),
+                    filtered_missing.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
                 ),
                 &format!("Add the missing key(s) to `{path}`."),
                 "warning",
@@ -323,6 +331,112 @@ fn placeholders(s: &str) -> BTreeSet<String> {
     set
 }
 
+/// Filter missing keys to remove unsupported plural-category omissions.
+/// Returns only keys that should warn: non-plural keys + plural keys the locale supports.
+fn filter_unsupported_plural_keys(
+    missing: &[String],
+    all_ref_keys: &BTreeSet<String>,
+    locale: &str,
+    cfg: &ScanI18nConfig,
+) -> Vec<String> {
+    let supported = resolve_supported_plural_categories(locale, cfg);
+    let plural_groups = identify_plural_groups(all_ref_keys);
+
+    missing
+        .iter()
+        .filter(|k| {
+            if let Some(suffix) = extract_plural_suffix(k) {
+                // Plural key: keep if locale supports this category or locale unknown (conservative)
+                if supported.is_empty() {
+                    // Unknown locale → warn (conservative default)
+                    true
+                } else {
+                    supported.contains(&suffix.to_string())
+                }
+            } else if is_part_of_plural_group(k, &plural_groups) {
+                // Non-suffixed key in plural group → warn (base key matters)
+                true
+            } else {
+                // Non-plural key → always warn
+                true
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Extract plural category suffix from key (zero, one, two, few, many, other).
+fn extract_plural_suffix(key: &str) -> Option<&str> {
+    for suffix in ["_zero", "_one", "_two", "_few", "_many", "_other"] {
+        if key.ends_with(suffix) {
+            return Some(&suffix[1..]); // strip leading _
+        }
+    }
+    None
+}
+
+/// Identify plural groups: sets of keys sharing a base with different plural suffixes.
+fn identify_plural_groups(keys: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut groups = BTreeSet::new();
+    for k in keys {
+        if extract_plural_suffix(k).is_some() {
+            // Extract base: "models.allocation_one" → "models.allocation"
+            if let Some(pos) = k.rfind('_') {
+                let base = &k[..pos];
+                groups.insert(base.to_string());
+            }
+        }
+    }
+    groups
+}
+
+/// Check if a key is part of a plural group (its base appears in the group set).
+fn is_part_of_plural_group(key: &str, groups: &BTreeSet<String>) -> bool {
+    if let Some(pos) = key.rfind('_') {
+        let base = &key[..pos];
+        groups.contains(base)
+    } else {
+        false
+    }
+}
+
+/// Resolve supported plural categories for a locale.
+/// Returns empty vec for unknown locales (conservative: warn everything).
+fn resolve_supported_plural_categories(
+    locale: &str,
+    cfg: &ScanI18nConfig,
+) -> Vec<String> {
+    let normalized = normalize_locale_tag(locale);
+
+    // Check explicit config override first
+    if let Some(cats) = cfg.locale_plural_categories.get(&normalized) {
+        return cats.clone();
+    }
+    if let Some(cats) = cfg.locale_plural_categories.get(locale) {
+        return cats.clone();
+    }
+
+    // Built-in table for common single-category locales
+    match normalized.as_str() {
+        // East/Southeast Asian languages — `other` only
+        "zh" | "zh-hans" | "zh-hant" | "zh-cn" | "zh-tw" | "zh-hk" |
+        "ja" | "ko" | "th" | "vi" | "id" | "ms" | "my" | "km" | "lo" => {
+            vec!["other".to_string()]
+        }
+        // Turkish — `one` and `other`
+        "tr" => vec!["one".to_string(), "other".to_string()],
+        _ => {
+            // Unknown locale → empty (conservative: warn all missing keys)
+            Vec::new()
+        }
+    }
+}
+
+/// Normalize locale tag: lowercase, convert underscore to hyphen.
+fn normalize_locale_tag(tag: &str) -> String {
+    tag.to_ascii_lowercase().replace('_', "-")
+}
+
 /// Paths from eval that match i18n globs (for map bucket).
 pub fn is_i18n_path(path: &str, cfg: &ScanI18nConfig) -> bool {
     let Ok(gs) = build_globs(&cfg.path_globs) else {
@@ -347,5 +461,122 @@ mod tests {
         let a = placeholders("Hello {{name}} {count}");
         assert!(a.contains("name"));
         assert!(a.contains("count"));
+    }
+
+    #[test]
+    fn plural_suffix_extraction() {
+        assert_eq!(extract_plural_suffix("allocation_one"), Some("one"));
+        assert_eq!(extract_plural_suffix("allocation_other"), Some("other"));
+        assert_eq!(extract_plural_suffix("allocation_zero"), Some("zero"));
+        assert_eq!(extract_plural_suffix("allocation"), None);
+        assert_eq!(extract_plural_suffix("key_with_underscore"), None);
+    }
+
+    #[test]
+    fn plural_group_identification() {
+        let mut keys = BTreeSet::new();
+        keys.insert("models.allocation_one".into());
+        keys.insert("models.allocation_other".into());
+        keys.insert("models.user".into());
+        let groups = identify_plural_groups(&keys);
+        assert!(groups.contains("models.allocation"));
+        assert!(!groups.contains("models.user"));
+    }
+
+    #[test]
+    fn ms_th_missing_one_ignored() {
+        let missing = vec![
+            "mongodb.models.allocation_one".to_string(),
+            "mongodb.models.user".to_string(),
+        ];
+        let mut all_keys = BTreeSet::new();
+        all_keys.insert("mongodb.models.allocation_one".into());
+        all_keys.insert("mongodb.models.allocation_other".into());
+        all_keys.insert("mongodb.models.user".into());
+
+        let cfg = ScanI18nConfig {
+            plural_aware_filtering: true,
+            ..Default::default()
+        };
+
+        let filtered_ms = filter_unsupported_plural_keys(&missing, &all_keys, "ms", &cfg);
+        assert_eq!(filtered_ms, vec!["mongodb.models.user"]);
+
+        let filtered_th = filter_unsupported_plural_keys(&missing, &all_keys, "th", &cfg);
+        assert_eq!(filtered_th, vec!["mongodb.models.user"]);
+    }
+
+    #[test]
+    fn locale_with_one_support_still_warns() {
+        let missing = vec!["allocation_one".to_string()];
+        let mut all_keys = BTreeSet::new();
+        all_keys.insert("allocation_one".into());
+        all_keys.insert("allocation_other".into());
+
+        let cfg = ScanI18nConfig {
+            plural_aware_filtering: true,
+            ..Default::default()
+        };
+
+        // Turkish supports `one` → must warn
+        let filtered = filter_unsupported_plural_keys(&missing, &all_keys, "tr", &cfg);
+        assert_eq!(filtered, vec!["allocation_one"]);
+    }
+
+    #[test]
+    fn unknown_locale_conservative() {
+        let missing = vec!["allocation_one".to_string()];
+        let mut all_keys = BTreeSet::new();
+        all_keys.insert("allocation_one".into());
+        all_keys.insert("allocation_other".into());
+
+        let cfg = ScanI18nConfig {
+            plural_aware_filtering: true,
+            ..Default::default()
+        };
+
+        // Unknown locale "xyz" → warn everything (conservative)
+        let filtered = filter_unsupported_plural_keys(&missing, &all_keys, "xyz", &cfg);
+        assert_eq!(filtered, vec!["allocation_one"]);
+    }
+
+    #[test]
+    fn config_override_works() {
+        let missing = vec!["allocation_one".to_string()];
+        let mut all_keys = BTreeSet::new();
+        all_keys.insert("allocation_one".into());
+        all_keys.insert("allocation_other".into());
+
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("custom".to_string(), vec!["other".to_string()]);
+
+        let cfg = ScanI18nConfig {
+            plural_aware_filtering: true,
+            locale_plural_categories: overrides,
+            ..Default::default()
+        };
+
+        // Custom locale with override → `one` unsupported → no warning
+        let filtered = filter_unsupported_plural_keys(&missing, &all_keys, "custom", &cfg);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn non_plural_key_always_warns() {
+        let missing = vec!["mongodb.models.user".to_string()];
+        let mut all_keys = BTreeSet::new();
+        all_keys.insert("mongodb.models.user".into());
+
+        let cfg = ScanI18nConfig {
+            plural_aware_filtering: true,
+            ..Default::default()
+        };
+
+        // Non-plural keys always pass through, regardless of locale
+        let filtered_ms = filter_unsupported_plural_keys(&missing, &all_keys, "ms", &cfg);
+        assert_eq!(filtered_ms, vec!["mongodb.models.user"]);
+
+        let filtered_unknown = filter_unsupported_plural_keys(&missing, &all_keys, "xyz", &cfg);
+        assert_eq!(filtered_unknown, vec!["mongodb.models.user"]);
     }
 }
