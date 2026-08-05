@@ -152,7 +152,10 @@ fn render_brief(
 
     out.push_str("## Agent rules\n");
     out.push_str("- Read ticket/session/brief paths only. No re-fetch acli/gh/glab.\n");
-    out.push_str("- Caveman I/O. Partition workstreams. No full-repo fish.\n");
+    out.push_str(crate::caveman::dialect(
+        "- Caveman I/O. Partition workstreams. No full-repo fish.\n",
+        "- Keep replies terse. Partition workstreams. Do not fish the whole repo.\n",
+    ));
     out
 }
 

@@ -2,6 +2,7 @@
 
 pub mod agent_runner;
 pub mod bench_cmd;
+pub mod caveman;
 pub mod config;
 pub mod diff_loc;
 pub mod eval;

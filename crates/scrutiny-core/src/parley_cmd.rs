@@ -32,7 +32,7 @@ use crate::parley::reply::{run_parley_reply, ParleyReplyInput};
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
 use crate::prepush;
 use crate::runtime::{resolve_client, ResolveClientInput};
-use crate::terminal::{resolve_terminal, TerminalContext};
+use crate::terminal::{resolve_terminal, ResolvedTerminal};
 
 #[derive(Debug, Clone)]
 pub struct ParleyCmdInput {
@@ -156,10 +156,10 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
 
         if plan.spawn_mode == "team" {
             eprintln!("scrutiny parley: team lead…");
-            run_team_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_team_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
         } else {
             eprintln!("scrutiny parley: isolated members…");
-            run_isolated_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_isolated_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
         }
 
         // Verifier pass — both spawn modes, after fixes, before evangelist.
@@ -168,13 +168,13 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} verifier(s) check fixes…",
                 plan.verifiers
             );
-            run_verifier_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_verifier_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
         }
 
         // Repair pass — re-implement threads left as stubs or rejected by the
         // verifier so failures never get posted as PR replies.
         if cfg.parley.repair {
-            run_parley_repair(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_parley_repair(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
         }
 
         // Evangelist verify pass — isolated only
@@ -183,7 +183,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} evangelist(s) verify…",
                 plan.evangelists
             );
-            run_evangelist_parley(&cfg, &detected, &plan, &comments, &cwd, term, agent_wall)?;
+            run_evangelist_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
         }
     }
 
@@ -298,7 +298,7 @@ fn run_isolated_parley(
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
     wall_secs: u64,
 ) -> Result<()> {
     if plan.buckets.is_empty() {
@@ -537,7 +537,7 @@ fn run_team_parley(
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
     wall_secs: u64,
 ) -> Result<()> {
     let wall = Duration::from_secs(wall_secs);
@@ -627,7 +627,7 @@ fn run_verifier_parley(
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
     wall_secs: u64,
 ) -> Result<()> {
     let prompt = build_verifier_prompt(plan, comments);
@@ -651,7 +651,7 @@ fn run_evangelist_parley(
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
     wall_secs: u64,
 ) -> Result<()> {
     let prompt = build_evangelist_prompt(plan, comments);
@@ -677,7 +677,7 @@ fn run_verify_agents(
     client: &crate::runtime::DetectedClient,
     plan: &ParleyPlan,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
     count: u32,
     label_prefix: &str,
     prompt: &str,
@@ -733,9 +733,19 @@ fn build_member_prompt(
 ) -> String {
     let mut p = String::new();
     p.push_str(&format!(
-        "You are parley member #{index}. Address ONLY the PR review comments listed below.\n\
-         Do NOT git commit, git push, or call gh to reply — the host script does that.\n\
-         Do NOT touch comments outside your assignment.\n"
+        "{}",
+        crate::caveman::dialect(
+            &format!(
+                "You = parley member #{index}. Address ONLY PR review comments listed below.\n\
+                 Do NOT git commit, git push, or call gh to reply — host script does that.\n\
+                 Do NOT touch comments outside your assignment.\n"
+            ),
+            &format!(
+                "You are parley member #{index}. Address ONLY the PR review comments listed below.\n\
+                 Do NOT git commit, git push, or call gh to reply — the host script does that.\n\
+                 Do NOT touch comments outside your assignment.\n"
+            ),
+        )
     ));
     p.push_str(prepush::PREPUSH_OWNERSHIP);
     p.push_str(prepush::NO_ARTIFACTS);
@@ -771,12 +781,16 @@ fn push_threads(p: &mut String, slice: &[ParleyComment]) {
 /// as stubs or a verifier rejected, and overwrite their fix entries for real.
 fn build_repair_prompt(comments_path: &str, fixes_path: &str, slice: &[ParleyComment]) -> String {
     let mut p = String::new();
-    p.push_str(
+    p.push_str(crate::caveman::dialect(
+        "You = parley repair agent. Threads below NOT properly addressed on first pass — \
+         member timed out / errored, or verifier rejected fix. \
+         Actually implement each fix now.\n\
+         Do NOT git commit, git push, or call gh to reply — host script does that.\n",
         "You are the parley repair agent. The threads below were NOT properly addressed on the \
          first pass — the member timed out / errored, or a verifier rejected the fix. \
          Actually implement each fix now.\n\
          Do NOT git commit, git push, or call gh to reply — the host script does that.\n",
-    );
+    ));
     p.push_str(prepush::PREPUSH_OWNERSHIP);
     p.push_str(prepush::NO_ARTIFACTS);
     p.push('\n');
@@ -801,7 +815,7 @@ fn run_parley_repair(
     plan: &ParleyPlan,
     comments: &ParleyCommentsFile,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
     wall_secs: u64,
 ) -> Result<()> {
     let file = load_fixes(Path::new(&plan.fixes_path))?;
@@ -851,11 +865,14 @@ fn run_parley_repair(
 
 fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFile) -> String {
     let mut p = String::new();
-    p.push_str(
+    p.push_str(crate::caveman::dialect(
+        "You = parley team lead. Spawn/coordinate member agents for each bucket below \
+         (or do work yourself if you cannot spawn). Cover EVERY thread.\n\
+         Do NOT git commit, git push, or call gh to reply — host script does that.\n",
         "You are the parley team lead. Spawn/coordinate member agents for each bucket below \
          (or do the work yourself if you cannot spawn). Cover EVERY thread.\n\
          Do NOT git commit, git push, or call gh to reply — the host script does that.\n",
-    );
+    ));
     p.push_str(prepush::PREPUSH_OWNERSHIP);
     p.push_str(prepush::NO_ARTIFACTS);
     p.push('\n');
@@ -894,8 +911,12 @@ fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFil
 }
 
 fn build_verifier_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) -> String {
+    let intro = crate::caveman::dialect(
+        "You = parley verifier. Verify — do NOT re-implement — every entry in fixes file.\n",
+        "You are a parley verifier. Verify — do NOT re-implement — every entry in the fixes file.\n",
+    );
     format!(
-        "You are a parley verifier. Verify — do NOT re-implement — every entry in the fixes file.\n\
+        "{intro}\
          Read:\n- comments: {}\n- fixes: {}\n\n\
          For EACH fix entry:\n\
          - FIRST check `reply_body`. If it is a host failure placeholder — e.g. contains \
@@ -912,18 +933,25 @@ fn build_verifier_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) -> S
          Do NOT edit source code. Do NOT git commit, push, or gh-reply. Only read-merge-write the \
          fixes JSON: preserve every existing field, add `verified` and `verification`, and flip \
          `addressed` only when a claimed fix does not hold.\n\n{}",
-        plan.comments_path, plan.fixes_path, FIXES_PROTOCOL
+        plan.comments_path, plan.fixes_path, FIXES_PROTOCOL,
+        intro = intro,
     )
 }
 
 fn build_evangelist_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) -> String {
-    format!(
+    let intro = crate::caveman::dialect(
+        "You = parley evangelist. Verify PR review comment fixes sound \
+         (architecture, consistency, no half-fixed threads).\n",
         "You are a parley evangelist. Verify that PR review comment fixes are sound \
-         (architecture, consistency, no half-fixed threads).\n\
+         (architecture, consistency, no half-fixed threads).\n",
+    );
+    format!(
+        "{intro}\
          Read:\n- comments: {}\n- fixes: {}\n\
          You may edit code and amend `parley-fixes.json` entries (reply_body / explanation / snippets).\n\
          Do NOT git commit, push, or gh-reply.\n\n{}",
-        plan.comments_path, plan.fixes_path, FIXES_PROTOCOL
+        plan.comments_path, plan.fixes_path, FIXES_PROTOCOL,
+        intro = intro,
     )
 }
 

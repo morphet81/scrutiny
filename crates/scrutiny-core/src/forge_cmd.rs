@@ -33,7 +33,7 @@ use crate::git::{
 };
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
-use crate::terminal::{resolve_terminal, ItemSurface, TerminalContext};
+use crate::terminal::{resolve_terminal, ItemSurface, ResolvedTerminal};
 
 /// Shared case-title rules for TDD test-plan + implement agents.
 const TEST_TITLE_GUIDELINES: &str = "\
@@ -51,7 +51,7 @@ Test case titles (it/test strings in the plan and in code):\n\
 /// (`term`), or a per-item surface (`surface`, bulk mode). `dry` spawns no agent.
 #[derive(Clone, Copy)]
 struct AgentTarget<'a> {
-    term: Option<TerminalContext>,
+    term: Option<&'a ResolvedTerminal>,
     surface: Option<&'a ItemSurface>,
     dry: bool,
 }
@@ -310,7 +310,7 @@ pub(crate) struct ForgeItemCtx<'a> {
     pub answers: ForgeAnswers,
     pub cfg: &'a Config,
     pub prefix: String,
-    pub term: Option<TerminalContext>,
+    pub term: Option<ResolvedTerminal>,
     pub surface: Option<ItemSurface>,
     /// When true and on a TTY, the TDD plan is validated interactively.
     pub tdd_interactive: bool,
@@ -399,7 +399,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
 
     let pr_meta_path = session_root.join("pr.json");
     let target = AgentTarget {
-        term,
+        term: term.as_ref(),
         surface: surface.as_ref(),
         dry,
     };
@@ -969,10 +969,12 @@ fn build_loc_estimate_prompt(
     rules: &ForgeLocRules,
 ) -> String {
     let mut p = String::new();
-    p.push_str(
+    p.push_str(crate::caveman::dialect(
+        "You = LOC estimator. Do NOT implement code. Do NOT edit source files.\n\
+         Estimate eventual PR size vs current branch / merge-base.\n",
         "You are a LOC estimator. Do NOT implement code. Do NOT edit source files.\n\
          Estimate how large the eventual PR will be versus the current branch / merge-base.\n",
-    );
+    ));
     p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
     p.push_str(crate::prepush::NO_ARTIFACTS);
     p.push_str("Read these paths only:\n");
@@ -1105,7 +1107,10 @@ fn build_test_plan_prompt(
     comment: Option<&str>,
 ) -> String {
     let mut p = String::new();
-    p.push_str("You are a test planner. Do NOT implement production code.\n");
+    p.push_str(crate::caveman::dialect(
+        "You = test planner. Do NOT implement production code.\n",
+        "You are a test planner. Do NOT implement production code.\n",
+    ));
     p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
     p.push_str(crate::prepush::NO_ARTIFACTS);
     p.push_str("Read these paths only:\n");
@@ -1213,16 +1218,21 @@ fn build_implement_prompt(
 ) -> String {
     let mut p = String::new();
     if session.spawn_mode == "team" {
-        p.push_str(
+        p.push_str(crate::caveman::dialect(
+            "You = Product Owner / team lead for this ticket.\n\
+             Spawn team of agents to implement. Wait for members. Merge results.\n\
+             Do not invent ticket facts — read local files only.\n",
             "You are the Product Owner / team lead for this ticket.\n\
              Spawn a team of agents to implement. Wait for members. Merge results.\n\
              Do not invent ticket facts — read local files only.\n",
-        );
+        ));
     } else {
-        p.push_str(
+        p.push_str(crate::caveman::dialect(
             "You implement this ticket yourself (single agent).\n\
              Do not invent ticket facts — read local files only.\n",
-        );
+            "You implement this ticket yourself (single agent).\n\
+             Do not invent ticket facts — read local files only.\n",
+        ));
     }
     p.push_str(crate::prepush::PREPUSH_OWNERSHIP);
     p.push_str(crate::prepush::NO_ARTIFACTS);
@@ -1487,12 +1497,16 @@ fn build_verify_fix_prompt(
     coverage_target: u32,
 ) -> String {
     let mut p = String::new();
-    p.push_str(
+    p.push_str(crate::caveman::dialect(
+        "Previous attempt failed verify gate. Fix ONLY what listed below.\n\
+         Do NOT weaken, skip, or delete tests. Do NOT commit, push, or open PR.\n\
+         Do NOT run tests, lint, build, or any check yourself — \
+         scrutiny re-runs them and verifies your fix.\n",
         "The previous attempt failed the verify gate. Fix ONLY what is listed below.\n\
          Do NOT weaken, skip, or delete tests. Do NOT commit, push, or open a PR.\n\
          Do NOT run the tests, lint, build, or any check command yourself — \
          scrutiny re-runs them and verifies your fix.\n",
-    );
+    ));
     p.push_str("\nContext (already on disk — read only if needed):\n");
     p.push_str(&format!("- ticket: {}\n", ticket_path.display()));
     p.push_str(&format!("- session: {}\n", session_path.display()));

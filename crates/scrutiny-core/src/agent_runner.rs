@@ -18,7 +18,7 @@ use crate::plan::ConfirmedPlan;
 use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
-use crate::terminal::{launch_agent_in_surface, launch_agent_window, ItemSurface, TerminalContext};
+use crate::terminal::{launch_agent_in_surface, launch_agent_window, ItemSurface, ResolvedTerminal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessKind {
@@ -224,13 +224,27 @@ pub const ASK_REVISE_JSON_SCHEMA: &str = r#"{
   "required": ["answer"]
 }"#;
 
-/// Shared `fix_options` + `explanation` policy, pasted into every findings prompt so the
-/// four builders stay in sync. Keep caveman ultra.
-pub const FIX_OPTIONS_POLICY: &str = "\
+/// Shared `fix_options` + `explanation` policy (English).
+const FIX_OPTIONS_POLICY_EN: &str = "\
 - `fix_options`: default EMPTY. Put single best fix in `proposed_fix`.\n\
 - Fill `fix_options` ONLY when 2+ real, materially-different approaches with true tradeoffs. NEVER exactly 1 option.\n\
 - If filled: first entry = AI-preferred; its text say WHY preferred. Other entries say their tradeoff.\n\
 - `explanation` (the Why): ONE short simple sentence. State problem, not story. Terse — shown in full.";
+
+/// Shared policy, caveman ultra dialect.
+const FIX_OPTIONS_POLICY_CV: &str = "\
+- `fix_options`: default EMPTY. Best fix → `proposed_fix`.\n\
+- Fill `fix_options` ONLY when 2+ real different approaches + true tradeoffs. NEVER exactly 1.\n\
+- If filled: first = AI-preferred; say WHY. Others: tradeoff.\n\
+- `explanation`: ONE short sentence. Problem, not story.";
+
+/// Shared `fix_options` + `explanation` policy for findings prompts.
+pub fn fix_options_policy() -> &'static str {
+    crate::caveman::dialect(FIX_OPTIONS_POLICY_CV, FIX_OPTIONS_POLICY_EN)
+}
+
+/// Backward-compat alias (English text; prefer [`fix_options_policy`]).
+pub const FIX_OPTIONS_POLICY: &str = FIX_OPTIONS_POLICY_EN;
 
 /// Base agent wall, config-resolved. `[timeouts] agent_wall_secs` overrides it.
 pub fn agent_wall_secs() -> u64 {
@@ -253,12 +267,9 @@ pub struct HeadlessOutcome {
     pub wall_ms: u64,
 }
 
-/// When true, skip prepending [`CAVEMAN_STYLE`] (bench skill arm without caveman).
+/// When true, skip caveman inject (bench skill arm / config / env).
 pub fn caveman_disabled() -> bool {
-    matches!(
-        std::env::var("SCRUTINY_NO_CAVEMAN").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    )
+    !crate::caveman::caveman_enabled()
 }
 
 /// Optional preamble (full skill markdown) injected after caveman / before overrides.
@@ -392,18 +403,16 @@ fn agent_type_from_label(label: &str) -> String {
         .replace('-', "_")
 }
 
-/// Mandatory caveman style directive prepended to every spawned-agent prompt.
-pub const CAVEMAN_STYLE: &str = "STYLE (mandatory): load + follow **caveman skill** if present \
-     (skill `name: caveman`, `/caveman ultra`). Intensity ultra. Terse. No fluff. \
-     Substance stay. Never announce style.";
+/// Embedded caveman-ultra preamble (re-export for tests / callers).
+pub use crate::caveman::{CAVEMAN_STYLE, CAVEMAN_ULTRA_PROMPT};
 
 /// Prepend style / skill preamble / configured overrides to a prompt.
-/// Order: caveman (unless `SCRUTINY_NO_CAVEMAN`) → bench skill preamble →
+/// Order: caveman ultra (unless disabled) → bench skill preamble →
 /// global/agent overrides → scrutiny's prompt.
-fn inject_overrides(label: &str, prompt: &str) -> String {
+pub fn inject_overrides(label: &str, prompt: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if !caveman_disabled() {
-        parts.push(CAVEMAN_STYLE.to_string());
+    if crate::caveman::caveman_enabled() {
+        parts.push(CAVEMAN_ULTRA_PROMPT.to_string());
     }
     if let Some(skill) = bench_skill_preamble() {
         parts.push(format!("# Skill context (mandatory)\n\n{skill}"));
@@ -679,7 +688,7 @@ pub fn run_nonheadless(
     cwd: &Path,
     prompt: &str,
     label: &str,
-    ctx: TerminalContext,
+    ctx: &ResolvedTerminal,
 ) -> Result<PathBuf> {
     let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, label)?;
     eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
@@ -971,7 +980,7 @@ pub fn build_isolated_prompt(
     plan: &ConfirmedPlan,
 ) -> String {
     let paths_list = if paths.is_empty() {
-        "(entire pack)".into()
+        crate::caveman::dialect("(entire pack)", "(entire pack)").into()
     } else {
         paths
             .iter()
@@ -980,22 +989,60 @@ pub fn build_isolated_prompt(
             .join("\n")
     };
     let focus = match role {
-        "security" => "ONLY security: auth, injection, secrets, access control.",
-        "performance" => "ONLY performance: N+1, hot loops, waste work, memory.",
-        "error_handling" => "ONLY error handling: swallowed errors, missing checks, bad retries.",
-        "evangelist" => "Architecture / pattern consistency across change.",
-        _ => "General review on assigned paths.",
+        "security" => crate::caveman::dialect(
+            "ONLY security: auth, injection, secrets, access control.",
+            "ONLY security: auth, injection, secrets, access control.",
+        ),
+        "performance" => crate::caveman::dialect(
+            "ONLY performance: N+1, hot loops, waste work, memory.",
+            "ONLY performance: N+1, hot loops, waste work, memory.",
+        ),
+        "error_handling" => crate::caveman::dialect(
+            "ONLY error handling: swallowed errors, missing checks, bad retries.",
+            "ONLY error handling: swallowed errors, missing checks, bad retries.",
+        ),
+        "evangelist" => crate::caveman::dialect(
+            "Architecture / pattern consistency across change.",
+            "Architecture / pattern consistency across the change.",
+        ),
+        _ => crate::caveman::dialect(
+            "General review on assigned paths.",
+            "General review on assigned paths.",
+        ),
     };
-    format!(
-        r#"Scrutiny {role} specialist. ISOLATED mode. No subagents.
+    let header = format!("Scrutiny {role} specialist. ISOLATED mode. No subagents.");
+    let body = crate::caveman::dialect(
+        r#"Pack: `{pack}`
+Prefer pack.md sibling if present (same stem). Paths:
+{paths_list}
 
-STYLE (mandatory):
-- Load + follow **caveman skill** if present on this machine (skill `name: caveman`, invoke `/caveman ultra` or equivalent).
-- Intensity: **ultra**. Terse. No fluff. No filler. Substance stay. Normal pronouns (`I`/`you`).
-- title / explanation / proposed_fix / fix_options text: caveman ultra too.
-- Never announce style. Never add "Caveman:" wrapper.
+## Context policy (save tokens)
 
-Pack: `{pack}`
+Tier 0 (default): pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
+Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path (or exact fetch_cmd). Prefer Read over Bash.
+Tier 2: at most 6 extra Reads of head files already in pack/xref/imports. No whole-repo rg/find. No writes.
+Stop at quota. No explore "to get oriented." Finding `line` MUST sit on that path's pack unified diff (GitHub-attachable). Explore = understanding only.
+
+Pack shape (v2):
+- `manifest[]`: changed-file outline; `dropped_regions` may sit in annex.
+- `referenced_signatures[]`: cross-file defs (may include short body slice).
+- Locale/i18n files NOT for AI review — deterministic scan owns them.
+
+Analyses on: security={sec} performance={perf} error_handling={err}
+Focus: {focus}
+
+Output: JSON ONLY. No prose outside JSON.
+{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
+
+Rules:
+- Every finding: path + line (1-based).
+- **CRITICAL:** `line` MUST be **changed** line in that path's pack unified diff — added `+` (RIGHT) preferred, or deleted `-` (LEFT). Never context ` ` line. GitHub reject out-of-diff — never invent from full file.
+- Issue only on unchanged context line → omit finding or file-level (omit `line`).
+- Nothing: {{"findings":[]}}
+- Severity: critical|warning|suggestion
+{policy}
+"#,
+        r#"Pack: `{pack}`
 Prefer pack.md sibling if present (same stem). Paths:
 {paths_list}
 
@@ -1011,7 +1058,7 @@ Pack shape (v2):
 - `referenced_signatures[]`: cross-file defs (may include short body slice).
 - Locale/i18n files are NOT for AI review — deterministic scan owns them.
 
-Analyses on: security={} performance={} error_handling={}
+Analyses on: security={sec} performance={perf} error_handling={err}
 Focus: {focus}
 
 Output: JSON ONLY. No prose outside JSON.
@@ -1025,40 +1072,51 @@ Rules:
 - Severity: critical|warning|suggestion
 {policy}
 "#,
-        plan.security,
-        plan.performance,
-        plan.error_handling,
-        pack = pack_path.display(),
-        role = role,
-        paths_list = paths_list,
-        focus = focus,
-        policy = FIX_OPTIONS_POLICY,
-    )
+    );
+    // Templates use `{…}` placeholders; double-brace JSON stays as `{{` until one replace pass.
+    let filled = body
+        .replace("{pack}", &pack_path.display().to_string())
+        .replace("{paths_list}", &paths_list)
+        .replace("{sec}", &plan.security.to_string())
+        .replace("{perf}", &plan.performance.to_string())
+        .replace("{err}", &plan.error_handling.to_string())
+        .replace("{focus}", focus)
+        .replace("{policy}", fix_options_policy())
+        .replace("{{", "{")
+        .replace("}}", "}");
+    format!("{header}\n\n{filled}")
 }
 
 pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String {
     let mut member_briefs = String::new();
+    let spawn_reviewers = crate::caveman::dialect(
+        "Spawn **exactly {n}** reviewer(s). Partition pack paths across them.\n\
+         For each spawn: paste template below VERBATIM, then replace Paths section \
+         with that reviewer's assigned paths only.\n",
+        "Spawn **exactly {n}** reviewer(s). Partition pack paths across them.\n\
+         For each spawn: paste the template below VERBATIM, then replace the Paths section \
+         with that reviewer's assigned paths only.\n",
+    );
+    let spawn_evangelists = crate::caveman::dialect(
+        "Spawn **exactly {n}** evangelist(s). Paste VERBATIM (entire pack):\n",
+        "Spawn **exactly {n}** evangelist(s). Paste VERBATIM (entire pack):\n",
+    );
 
     if plan.reviewers > 0 {
         let n = plan.reviewers;
-        // Template: entire pack; lead assigns partitioned path lists when spawning each reviewer.
         let brief = build_isolated_prompt("reviewer", pack_path, &[], plan);
+        let howto = spawn_reviewers.replace("{n}", &n.to_string());
         member_briefs.push_str(&format!(
-            "\n### reviewer × {n}\n\
-             Spawn **exactly {n}** reviewer(s). Partition pack paths across them.\n\
-             For each spawn: paste the template below VERBATIM, then replace the Paths section \
-             with that reviewer's assigned paths only.\n\
-             ```\n{brief}\n```\n"
+            "\n### reviewer × {n}\n{howto}```\n{brief}\n```\n"
         ));
     }
 
     if plan.evangelists > 0 {
         let n = plan.evangelists;
         let brief = build_isolated_prompt("evangelist", pack_path, &[], plan);
+        let howto = spawn_evangelists.replace("{n}", &n.to_string());
         member_briefs.push_str(&format!(
-            "\n### evangelist × {n}\n\
-             Spawn **exactly {n}** evangelist(s). Paste VERBATIM (entire pack):\n\
-             ```\n{brief}\n```\n"
+            "\n### evangelist × {n}\n{howto}```\n{brief}\n```\n"
         ));
     }
 
@@ -1082,19 +1140,39 @@ pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String 
     }
 
     if member_briefs.is_empty() {
-        member_briefs.push_str(
+        member_briefs.push_str(crate::caveman::dialect(
+            "\n(No member roles enabled — return {\"findings\":[]} or review pack yourself \
+             using same JSON rules.)\n",
             "\n(No member roles enabled — return {\"findings\":[]} or review pack yourself \
              using the same JSON rules.)\n",
-        );
+        ));
     }
 
-    format!(
-        r#"Scrutiny lead. TEAM mode. You spawn team. You collate. You own final report.
+    let header = crate::caveman::dialect(
+        "Scrutiny lead. TEAM mode. You spawn team. You collate. You own final report.",
+        "Scrutiny lead. TEAM mode. You spawn the team. You collate. You own the final report.",
+    );
+    let ops = crate::caveman::dialect(
+        r#"## Lead ops (mandatory)
 
-STYLE (mandatory):
-- Load + follow **caveman skill** if present on this machine (skill `name: caveman`, invoke `/caveman ultra` or equivalent).
-- Intensity: **ultra**. Terse. No fluff. Substance stay. Normal pronouns (`I`/`you`).
-- Finding text in final JSON: caveman ultra. Never announce style.
+1. Spawn **exactly** counts above (parallel when possible).
+2. Wait for **ALL** members → findings JSON array before consolidate. Status/idle/progress pings NOT complete — re-request JSON if missing.
+3. Reject / re-ask finding missing path+line, or line not **changed** (added `+` or deleted `-`) in that path's pack unified diff. Context ` ` lines bad. Prefer pack+annex; bounded Tier-1/2 explore only (see member templates). No whole-repo fishing.
+4. Dedupe. Disagreement on same issue → keep **higher** severity (critical > warning > suggestion).
+5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on changed lines in path unified_diff.
+6. Return ONE final JSON on stdout (no prose outside JSON)."#,
+        r#"## Lead ops (mandatory)
+
+1. Spawn **exactly** the counts above (parallel when possible).
+2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
+3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`) in that path's pack unified diff. Context ` ` lines are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
+4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
+5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on changed lines (added `+` or deleted `-`) in the path unified_diff.
+6. Return ONE final JSON on stdout (no prose outside JSON)."#,
+    );
+
+    format!(
+        r#"{header}
 
 Pack: `{pack}`
 Team size (effective counts — honor exactly):
@@ -1110,14 +1188,7 @@ Do **NOT** invent alternate system prompts for teammates.
 When you spawn each member, the spawn message body MUST be the matching template below (verbatim), only adjusting the Paths section for reviewers as noted.
 {member_briefs}
 
-## Lead ops (mandatory)
-
-1. Spawn **exactly** the counts above (parallel when possible).
-2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
-3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`) in that path's pack unified diff. Context ` ` lines are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
-4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
-5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on changed lines (added `+` or deleted `-`) in the path unified_diff.
-6. Return ONE final JSON on stdout (no prose outside JSON).
+{ops}
 
 Output: JSON ONLY.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
@@ -1130,32 +1201,43 @@ Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
         plan.security,
         plan.performance,
         plan.error_handling,
+        header = header,
         pack = pack_path.display(),
         member_briefs = member_briefs,
-        policy = FIX_OPTIONS_POLICY,
+        ops = ops,
+        policy = fix_options_policy(),
     )
 }
 
 /// Consolidation agent prompt (isolated mode). Input = the raw findings from
 /// all reviewers; output = the same JSON shape, semantically deduped.
 pub fn build_consolidation_prompt(findings_json: &str, pack_path: &Path) -> String {
-    format!(
-        r#"Scrutiny consolidator. ISOLATED mode. Input = raw findings from all reviewers. You dedupe. You do not review.
+    let header = crate::caveman::dialect(
+        "Scrutiny consolidator. ISOLATED mode. Input = raw findings from all reviewers. You dedupe. You do not review.",
+        "Scrutiny consolidator. ISOLATED mode. Input = raw findings from all reviewers. You dedupe. You do not review.",
+    );
+    let rules = crate::caveman::dialect(
+        r#"## Rules (mandatory)
 
-STYLE (mandatory):
-- Load + follow **caveman skill** if present (skill `name: caveman`, `/caveman ultra`).
-- Intensity: **ultra**. Terse. No fluff. Substance stay. Normal pronouns (`I`/`you`).
-- Finding text in output JSON: caveman ultra. Never announce style.
-
-Pack (reference only — Read to disambiguate a duplicate if needed): `{pack}`
-
-## Rules (mandatory)
+1. Merge findings = **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently.
+2. Duplicates differ `severity` → keep **higher**. Rank: critical > warning > suggestion.
+3. Do **NOT** invent new findings. Do **NOT** change anchors. Do **NOT** drop unique finding. Consolidate only.
+4. Every kept finding retain `path` + `line`.
+5. Prefer clearest `title`/`explanation`/`proposed_fix` among merged duplicates."#,
+        r#"## Rules (mandatory)
 
 1. Merge findings that describe the **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently by different reviewers.
 2. On duplicates with differing `severity`, keep the **higher** one. Rank: critical > warning > suggestion.
 3. Do **NOT** invent new findings. Do **NOT** change anchors. Do **NOT** drop a unique finding. Consolidate only.
 4. Every kept finding must retain `path` + `line`.
-5. Prefer the clearest `title`/`explanation`/`proposed_fix` among merged duplicates.
+5. Prefer the clearest `title`/`explanation`/`proposed_fix` among merged duplicates."#,
+    );
+    format!(
+        r#"{header}
+
+Pack (reference only — Read to disambiguate a duplicate if needed): `{pack}`
+
+{rules}
 
 ## Input findings
 {findings}
@@ -1167,35 +1249,54 @@ JSON ONLY (no prose outside JSON):
 Nothing to merge → return the input findings unchanged. Empty input → {{"findings":[]}}.
 {policy}
 "#,
+        header = header,
         pack = pack_path.display(),
+        rules = rules,
         findings = findings_json,
-        policy = FIX_OPTIONS_POLICY,
+        policy = fix_options_policy(),
     )
 }
 
 /// Triage-time ask: answer the reviewer, and revise the finding only if the
 /// answer actually changes it.
 pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
-    format!(
-        "Answer reviewer question about a code-review finding, then revise the finding only if needed.\n\n\
-         STYLE (mandatory): load + follow **caveman skill** if present (`/caveman ultra`). \
-         Intensity ultra. Terse. Never announce style.\n\n\
-         Context (includes file diff and code window — answer from it; Read only if strictly necessary):\n\
-         {context}\n\n\
-         Question:\n{question}\n\n\
-         Output: JSON ONLY (no prose outside JSON):\n\
-         {{\"answer\":\"...\",\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
-\"path\":\"rel/path\",\"line\":1}}\n\
-         Rules:\n\
+    let intro = crate::caveman::dialect(
+        "Answer reviewer question about code-review finding, then revise finding only if needed.",
+        "Answer the reviewer question about a code-review finding, then revise the finding only if needed.",
+    );
+    let rules = crate::caveman::dialect(
+        "Rules:\n\
+         - `answer` REQUIRED: direct reply, 1-3 short sentences. Answer it, do not restate finding.\n\
+         - Say plainly when reviewer right and finding wrong or moot — valid answer.\n\
+         - All other fields OPTIONAL. OMIT every field answer does not change. \
+           Unchanged finding = `answer` only.\n\
+         - Include field only when new value differs from current in Context.\n\
+         - path+line must point to **changed** line: added `+` (RIGHT) or deleted `-` (LEFT). Never context line.\n\
+         - Prefer added (+) line. Never invent out-of-diff lines.\n",
+        "Rules:\n\
          - `answer` is REQUIRED: direct reply to the question, 1-3 short sentences. Answer it, do not restate the finding.\n\
          - Say plainly when the reviewer is right and the finding is wrong or moot — that is a valid answer.\n\
          - All other fields are OPTIONAL. OMIT every field the answer does not change. \
            Unchanged finding = `answer` only.\n\
          - Include a field only when its new value differs from the current one shown in Context.\n\
          - path+line must point to a **changed** line: added `+` (RIGHT side) or deleted `-` (LEFT side). Never a context line.\n\
-         - Prefer an added (+) line. Never invent out-of-diff lines.\n\
+         - Prefer an added (+) line. Never invent out-of-diff lines.\n",
+    );
+    format!(
+        "{intro}\n\n\
+         Context (includes file diff and code window — answer from it; Read only if strictly necessary):\n\
+         {context}\n\n\
+         Question:\n{question}\n\n\
+         Output: JSON ONLY (no prose outside JSON):\n\
+         {{\"answer\":\"...\",\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
+\"path\":\"rel/path\",\"line\":1}}\n\
+         {rules}\
          {policy}\n",
-        policy = FIX_OPTIONS_POLICY,
+        intro = intro,
+        context = context,
+        question = question,
+        rules = rules,
+        policy = fix_options_policy(),
     )
 }
 
@@ -1314,7 +1415,7 @@ pub fn run_isolated_review(
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
 ) -> Result<(ReviewReport, PathBuf)> {
     let mut jobs: Vec<(String, u32, Vec<String>)> = Vec::new();
 
@@ -1585,7 +1686,7 @@ pub fn run_team_review(
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
-    term: Option<TerminalContext>,
+    term: Option<&ResolvedTerminal>,
 ) -> Result<(ReviewReport, PathBuf)> {
     let prompt_base = build_team_lead_prompt(pack_path, plan);
 
@@ -1704,6 +1805,7 @@ pub struct AgentPromptInput {
 }
 
 /// Print isolated (or team-lead) prompt text for skill/debug paste.
+/// Applies the same [`inject_overrides`] path as real spawns (caveman + [prompts]).
 pub fn run_agent_prompt(input: AgentPromptInput) -> Result<String> {
     let plan = if let Some(p) = &input.plan_path {
         let text = fs::read_to_string(p)
@@ -1718,7 +1820,12 @@ pub fn run_agent_prompt(input: AgentPromptInput) -> Result<String> {
     } else {
         build_isolated_prompt(&role, &input.pack_path, &input.paths, &plan)
     };
-    Ok(text)
+    let label = if role == "lead" || role == "team" || role == "team_lead" {
+        "lead#1"
+    } else {
+        role.as_str()
+    };
+    Ok(inject_overrides(label, &text))
 }
 
 fn minimal_plan_for_prompt(pack_path: &Path) -> ConfirmedPlan {
@@ -1810,23 +1917,41 @@ mod tests {
 
     #[test]
     fn caveman_always_injected() {
-        // Every spawned prompt carries the caveman directive, even with no
-        // configured overrides.
+        let _g = crate::caveman::tests::lock_for_test();
+        crate::caveman::store_caveman_enabled(true);
         std::env::remove_var("SCRUTINY_NO_CAVEMAN");
         std::env::remove_var("SCRUTINY_BENCH_SKILL_PREAMBLE");
         let out = inject_overrides("parley-member#1", "Fix the thing.");
-        assert!(out.starts_with(CAVEMAN_STYLE));
+        assert!(
+            out.contains("# STYLE (mandatory) — caveman ultra"),
+            "expected embedded ultra preamble"
+        );
         assert!(out.ends_with("Fix the thing."));
     }
 
     #[test]
     fn caveman_skipped_when_env_set() {
+        let _g = crate::caveman::tests::lock_for_test();
+        crate::caveman::store_caveman_enabled(true);
         std::env::set_var("SCRUTINY_NO_CAVEMAN", "1");
         std::env::remove_var("SCRUTINY_BENCH_SKILL_PREAMBLE");
         let out = inject_overrides("reviewer#1", "Review me.");
         std::env::remove_var("SCRUTINY_NO_CAVEMAN");
-        assert!(!out.contains(CAVEMAN_STYLE));
         assert_eq!(out, "Review me.");
+    }
+
+    #[test]
+    fn dialect_isolated_prompt_smoke() {
+        let _g = crate::caveman::tests::lock_for_test();
+        crate::caveman::store_caveman_enabled(true);
+        std::env::remove_var("SCRUTINY_NO_CAVEMAN");
+        let plan = minimal_plan_for_prompt(Path::new("/tmp/pack.json"));
+        let cv = build_isolated_prompt("reviewer", Path::new("/tmp/pack.json"), &[], &plan);
+        assert!(cv.contains("Context policy (save tokens)"), "caveman body");
+        crate::caveman::store_caveman_enabled(false);
+        let en = build_isolated_prompt("reviewer", Path::new("/tmp/pack.json"), &[], &plan);
+        crate::caveman::store_caveman_enabled(true);
+        assert!(en.contains("Context policy (graduated"), "english body");
     }
 
     #[test]

@@ -29,6 +29,10 @@ pub struct Config {
     /// agent in a visible terminal window in auto mode (claude + tmux/zellij/macOS).
     #[serde(default = "default_true")]
     pub headless: bool,
+    /// Inject caveman-ultra style + dialect into spawned-agent prompts (default on).
+    /// Override off with `caveman = false` or env `SCRUTINY_NO_CAVEMAN=1`.
+    #[serde(default = "default_true")]
+    pub caveman: bool,
     /// Force headless client for `scrutiny probe` (cursor|claude|codex). Omit → detect + prompt.
     #[serde(default)]
     pub force_client: Option<String>,
@@ -1302,6 +1306,7 @@ pub fn load_config(path: &Path) -> Result<Config> {
 
     let mut cfg: Config = value.try_into().context("parse config.toml")?;
     store_prompt_overrides(&cfg.prompts);
+    crate::caveman::store_caveman_enabled(cfg.caveman);
     seed_parley_timeouts(&mut cfg);
     crate::timeouts::install(crate::timeouts::Timeouts::resolve(&cfg.timeouts));
     Ok(cfg)
@@ -1344,6 +1349,7 @@ mod tests {
     fn parses_default_toml() {
         let cfg: Config = toml::from_str(DEFAULT_TOML).expect("parse default");
         assert_eq!(cfg.default_client, "claude");
+        assert!(cfg.caveman);
         assert_eq!(cfg.agents.reviewers_by_tier.get(Tier::Xs), 0);
         assert!(!cfg.review.security_by_tier.get(Tier::S));
         assert!(cfg.review.security_by_tier.get(Tier::M));

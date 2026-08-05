@@ -4,6 +4,10 @@ default_client = "claude"
 # macOS Terminal/iTerm2). Applies to parley, probe, and forge.
 # Unsupported surfaces or non-claude clients fall back to headless.
 headless = true
+# Inject caveman-ultra style into every spawned-agent prompt and write
+# scrutiny instruction text in caveman dialect. Set false for plain English.
+# Env SCRUTINY_NO_CAVEMAN=1 also disables (used by `scrutiny bench` skill arm).
+caveman = true
 # When set, skip client prompt for `scrutiny probe` (must be installed on PATH).
 # force_client = "claude"
 # When set, skip spawn-mode prompt. Default when unset: isolated.

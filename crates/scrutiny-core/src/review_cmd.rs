@@ -166,10 +166,10 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         let term = resolve_terminal(cfg.headless, &detected.client, "probe");
         let (report, rpath) = if plan.spawn_mode == "team" {
             eprintln!("scrutiny probe: team lead agent…");
-            run_team_review(&detected, &plan, &pack_path, &cwd, term)?
+            run_team_review(&detected, &plan, &pack_path, &cwd, term.as_ref())?
         } else {
             eprintln!("scrutiny probe: isolated parallel agents…");
-            run_isolated_review(&detected, &plan, &pack_path, &cwd, term)?
+            run_isolated_review(&detected, &plan, &pack_path, &cwd, term.as_ref())?
         };
         eprintln!(
             "  report {} ({} findings, from {} raw)",

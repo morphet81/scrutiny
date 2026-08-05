@@ -132,7 +132,7 @@ pub fn run_forge_bulk(input: ForgeBulkInput) -> Result<Vec<PathBuf>> {
         let ticket_path = session_root.join("ticket.json");
         write_json_pretty(&ticket_path, ticket)?;
 
-        let surface = match term {
+        let surface = match term.as_ref() {
             Some(ctx) => Some(
                 open_item_surface(ctx, &ticket.id, &worktree)
                     .with_context(|| format!("open surface for {}", ticket.id))?,

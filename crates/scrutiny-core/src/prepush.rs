@@ -113,10 +113,8 @@ pub fn run_checks_to_log(cwd: &Path, cmd: &str, log_path: &Path) -> std::io::Res
 /// Prompt for the plan agent: read the log, emit chunk JSON only (no edits).
 pub fn build_prepush_plan_prompt(findings_path: &Path, max_chunks: u32) -> String {
     format!(
-        "The repository's pre-push checks (lint / tests / typecheck) are FAILING. \
-         scrutiny already ran them and saved the full output to disk.\n\n\
-         Findings file (READ ONLY — this is your only input): {}\n\n\
-         Your job: analyse the log and split the work into independent fix chunks.\n\
+        "{}Findings file (READ ONLY — this is your only input): {}\n\n\
+         {}\n\
          Group related failures (same file / package / suite). Cap at {max_chunks} chunks.\n\
          Each chunk needs: id (short slug), title, files (paths to edit), excerpt \
          (only the relevant log lines — not the whole log).\n\n\
@@ -124,7 +122,17 @@ pub fn build_prepush_plan_prompt(findings_path: &Path, max_chunks: u32) -> Strin
          {{\"chunks\":[{{\"id\":\"…\",\"title\":\"…\",\"files\":[\"…\"],\"excerpt\":\"…\"}}]}}\n\n\
          Do NOT edit files, run checks, lint, tests, build, commit, or push.\n\
          If the log is unparseable, emit one chunk with id/title \"all\" and a truncated tail excerpt.\n",
-        findings_path.display()
+        crate::caveman::dialect(
+            "Repo pre-push checks (lint / tests / typecheck) FAILING. \
+             scrutiny already ran them, saved full output to disk.\n\n",
+            "The repository's pre-push checks (lint / tests / typecheck) are FAILING. \
+             scrutiny already ran them and saved the full output to disk.\n\n",
+        ),
+        findings_path.display(),
+        crate::caveman::dialect(
+            "Your job: analyse log, split work into independent fix chunks.",
+            "Your job: analyse the log and split the work into independent fix chunks.",
+        ),
     )
 }
 
@@ -141,9 +149,7 @@ pub fn build_prepush_chunk_fix_prompt(findings_path: &Path, chunk: &PrepushChunk
             .join("\n")
     };
     format!(
-        "The repository's pre-push checks (lint / tests / typecheck) are FAILING. \
-         scrutiny already ran them. You own ONE scoped chunk only.\n\n\
-         Chunk id: {}\n\
+        "{}Chunk id: {}\n\
          Title: {}\n\
          Files to touch (prefer these; do not wander):\n{files}\n\n\
          Failure excerpt (your primary input):\n\
@@ -154,6 +160,12 @@ pub fn build_prepush_chunk_fix_prompt(findings_path: &Path, chunk: &PrepushChunk
          scrutiny re-runs them and verifies your fix.\n\
          Do NOT git commit, git push, or call gh — the host script commits and retries.\n\
          Do NOT fix failures belonging to other chunks.\n",
+        crate::caveman::dialect(
+            "Repo pre-push checks (lint / tests / typecheck) FAILING. \
+             scrutiny already ran them. You own ONE scoped chunk only.\n\n",
+            "The repository's pre-push checks (lint / tests / typecheck) are FAILING. \
+             scrutiny already ran them. You own ONE scoped chunk only.\n\n",
+        ),
         chunk.id,
         chunk.title,
         truncate_chars(&chunk.excerpt, EXCERPT_MAX_CHARS),
@@ -165,13 +177,17 @@ pub fn build_prepush_chunk_fix_prompt(findings_path: &Path, chunk: &PrepushChunk
 /// unscoped form; gate prefers [`build_prepush_chunk_fix_prompt`].
 pub fn build_prepush_fix_prompt(findings_path: &Path) -> String {
     format!(
-        "The repository's pre-push checks (lint / tests / typecheck) are FAILING. \
-         scrutiny already ran them and saved the full output to disk.\n\n\
-         Findings file (read it — this is your only input): {}\n\n\
+        "{}Findings file (read it — this is your only input): {}\n\n\
          Fix ONLY what the findings report as failing. Do NOT weaken, skip, or delete tests.\n\
          Do NOT run the checks, lint, tests, build, or any pre-push command yourself — \
          scrutiny re-runs them and verifies your fix.\n\
          Do NOT git commit, git push, or call gh — the host script commits and retries.\n",
+        crate::caveman::dialect(
+            "Repo pre-push checks (lint / tests / typecheck) FAILING. \
+             scrutiny already ran them, saved full output to disk.\n\n",
+            "The repository's pre-push checks (lint / tests / typecheck) are FAILING. \
+             scrutiny already ran them and saved the full output to disk.\n\n",
+        ),
         findings_path.display()
     )
 }
