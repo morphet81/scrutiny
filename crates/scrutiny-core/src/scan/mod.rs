@@ -91,7 +91,8 @@ pub fn run_scan(
         None
     };
 
-    let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
+    let shipped =
+        find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
@@ -182,8 +183,8 @@ fn collect_diff_findings(root: &Path, map: &MapReport, out: &mut Vec<Finding>) -
     paths.dedup();
 
     for path in paths {
-        let diff =
-            git::diff_unified_paths(root, &map.base, &map.head, &[path.clone()]).unwrap_or_default();
+        let diff = git::diff_unified_paths(root, &map.base, &map.head, &[path.clone()])
+            .unwrap_or_default();
         for line in diff.lines() {
             if !line.starts_with('+') || line.starts_with("+++") {
                 continue;
@@ -264,7 +265,11 @@ fn collect_missing_tests(map: &MapReport, eval: Option<&EvalReport>, out: &mut V
         "Add or update a companion test for the behavior change.",
         "medium",
         "scan.missing_test",
-        source_changed.iter().take(8).map(|s| s.to_string()).collect(),
+        source_changed
+            .iter()
+            .take(8)
+            .map(|s| s.to_string())
+            .collect(),
         "Test inconsistency",
     ));
 }

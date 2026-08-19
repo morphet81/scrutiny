@@ -17,9 +17,7 @@ use crate::forge::brief::run_forge_brief;
 use crate::forge::context::run_forge_context;
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::figma::export_figma_designs;
-use crate::forge::loc::{
-    decide_loc_gate, parse_loc_estimate, ForgeLocRules, LocGateDecision,
-};
+use crate::forge::loc::{decide_loc_gate, parse_loc_estimate, ForgeLocRules, LocGateDecision};
 use crate::forge::plan::{run_forge_plan_write, ForgePlanWriteInput, ForgeSessionPlan};
 use crate::forge::scaffold;
 use crate::forge::tools::playwright_cli_available;
@@ -195,7 +193,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         },
     )?;
 
-    // Non-headless: open each agent in a visible window (claude + tmux/zellij/macOS).
+    // Non-headless: open each agent in a visible window (claude/cursor + tmux/zellij/macOS).
     let term = resolve_terminal(cfg.headless, &detected.client, "forge");
 
     eprintln!("scrutiny forge: fetch ticket…");
@@ -208,10 +206,8 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         title: input.title.clone(),
     })?;
 
-    let session_root = crate::paths::init_artifact_ctx(
-        &cwd,
-        &crate::paths::session_name(None, Some(&ticket.id)),
-    )?;
+    let session_root =
+        crate::paths::init_artifact_ctx(&cwd, &crate::paths::session_name(None, Some(&ticket.id)))?;
     eprintln!(
         "scrutiny forge: ticket {} → {}",
         ticket.id,
@@ -235,8 +231,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
     }
 
     let answers = if let Some(raw) = &input.from_json {
-        let v: ForgeFromJson =
-            serde_json::from_str(raw).context("parse forge --from-json")?;
+        let v: ForgeFromJson = serde_json::from_str(raw).context("parse forge --from-json")?;
         v.plan
     } else if input.non_interactive {
         let sug = ticket.suggested_forge.clone();
@@ -368,9 +363,8 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         figma_dir: ticket.figma_dir.clone(),
     })?;
 
-    let mut session: ForgeSessionPlan = serde_json::from_str(
-        &fs::read_to_string(&session_path).context("read session")?,
-    )?;
+    let mut session: ForgeSessionPlan =
+        serde_json::from_str(&fs::read_to_string(&session_path).context("read session")?)?;
 
     eprintln!("scrutiny forge: context + brief…");
     let (cx, context_path) = run_forge_context(&ticket_path, &cwd)?;
@@ -742,10 +736,7 @@ pub(crate) fn prompt_forge_answers(client: &str, ticket: &TicketReport) -> Resul
     let model = if sug.prompt_model {
         let models = &sug.available_models;
         if models.len() > 1 {
-            let default_idx = models
-                .iter()
-                .position(|m| m == &sug.model)
-                .unwrap_or(0);
+            let default_idx = models.iter().position(|m| m == &sug.model).unwrap_or(0);
             let prompt_label = if sug.complexity_reason.is_empty() {
                 format!("Model  [tier {}]", sug.tier)
             } else {
@@ -799,8 +790,18 @@ fn run_tdd_plan_loop(
 
     // Generate once up front; the loop only re-renders and (on Revise) re-runs.
     run_test_plan_agent(
-        client, model, cwd, ticket_path, session_path, brief_path, context_path, session,
-        &plan_path, None, "forge-test-plan", target,
+        client,
+        model,
+        cwd,
+        ticket_path,
+        session_path,
+        brief_path,
+        context_path,
+        session,
+        &plan_path,
+        None,
+        "forge-test-plan",
+        target,
     )?;
 
     loop {
@@ -832,8 +833,18 @@ fn run_tdd_plan_loop(
             _ => {
                 let comment = read_multiline_comment().context("test plan comment")?;
                 run_test_plan_agent(
-                    client, model, cwd, ticket_path, session_path, brief_path, context_path,
-                    session, &plan_path, Some(&comment), "forge-test-plan-revise", target,
+                    client,
+                    model,
+                    cwd,
+                    ticket_path,
+                    session_path,
+                    brief_path,
+                    context_path,
+                    session,
+                    &plan_path,
+                    Some(&comment),
+                    "forge-test-plan-revise",
+                    target,
                 )?;
             }
         }
@@ -1056,7 +1067,11 @@ fn run_test_plan_agent(
     );
     eprintln!(
         "scrutiny forge: {} test plan…",
-        if comment.is_some() { "revising" } else { "generating" }
+        if comment.is_some() {
+            "revising"
+        } else {
+            "generating"
+        }
     );
     let out = run_forge_agent(
         client,
@@ -1253,7 +1268,10 @@ fn build_implement_prompt(
     p.push_str(&format!("- tdd: {}\n", session.tdd));
     p.push_str(&format!("- e2e_required: {}\n", session.e2e));
     p.push_str(&format!("- coverage_target: {}%\n", session.coverage_pct));
-    p.push_str(&format!("- use_playwright_cli: {}\n", session.use_playwright));
+    p.push_str(&format!(
+        "- use_playwright_cli: {}\n",
+        session.use_playwright
+    ));
 
     if session.tdd {
         if session.tdd_plan_path.is_some() {
@@ -1307,14 +1325,17 @@ fn build_implement_prompt(
          the host script will create. commit_subject MUST start with the prefix `{prefix}:` \
          (the host already picked this prefix).\n"
     ));
-    match ticket.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+    match ticket
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
         Some(url) => {
             p.push_str(&format!("Ticket URL (cite this in pr_body): {url}\n"));
         }
         None => {
-            p.push_str(
-                "No ticket URL (inline / missing) — omit ticket links from pr_body.\n",
-            );
+            p.push_str("No ticket URL (inline / missing) — omit ticket links from pr_body.\n");
         }
     }
 
@@ -1326,9 +1347,7 @@ fn build_implement_prompt(
     );
     if !verify.is_empty() {
         p.push_str("\n## Verification gate (host will enforce)\n");
-        p.push_str(
-            "After you finish, the host runs these and will NOT commit until they pass:\n",
-        );
+        p.push_str("After you finish, the host runs these and will NOT commit until they pass:\n");
         for c in &verify.commands {
             p.push_str(&format!("- `{}`\n", c.command));
         }
@@ -1375,9 +1394,7 @@ fn run_verify_gate(
     let mut cov_unmeasurable_warned = false;
     let max = plan.max_loops.max(1);
     for attempt in 1..=max {
-        eprintln!(
-            "scrutiny forge: verify gate (attempt {attempt}/{max})…"
-        );
+        eprintln!("scrutiny forge: verify gate (attempt {attempt}/{max})…");
         let mut report = FailureReport::default();
 
         for cmd in &plan.commands {
@@ -1535,9 +1552,7 @@ fn build_verify_fix_prompt(
     }
 
     if let Some(tail) = &report.raw_tail {
-        p.push_str(
-            "\n### Raw output (structured parsing unavailable — inspect manually)\n```\n",
-        );
+        p.push_str("\n### Raw output (structured parsing unavailable — inspect manually)\n```\n");
         p.push_str(tail);
         p.push_str("\n```\n");
     }
@@ -1557,8 +1572,7 @@ fn load_pr_meta(path: &Path) -> Result<PrMeta> {
             path.display()
         );
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let meta: PrMeta = serde_json::from_str(&raw)
         .with_context(|| format!("parse pr.json at {}", path.display()))?;
     // pr_title / commit_subject may be empty — the host falls back to a guess.
@@ -1763,7 +1777,11 @@ mod tests {
             version: 1,
             client: "claude".into(),
             model: "sonnet".into(),
-            approach: if tdd { "tdd".into() } else { "heads_down".into() },
+            approach: if tdd {
+                "tdd".into()
+            } else {
+                "heads_down".into()
+            },
             e2e,
             agents: 1,
             testers: 1,

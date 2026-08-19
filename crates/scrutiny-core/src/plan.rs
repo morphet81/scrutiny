@@ -196,7 +196,11 @@ fn prompt_plan_answers(
     let error_handling = Confirm::with_theme(&theme)
         .with_prompt(format!(
             "4) Error-handling analysis? (recommended: {} — {})",
-            if suggested.error_handling { "yes" } else { "no" },
+            if suggested.error_handling {
+                "yes"
+            } else {
+                "no"
+            },
             suggested.error_handling_reason
         ))
         .default(suggested.error_handling)
@@ -274,17 +278,12 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
             &fs::read_to_string(p).with_context(|| format!("read pack {}", p.display()))?,
         )
         .context("parse pack json")?;
-        v.get("chars_used")
-            .and_then(|c| c.as_u64())
-            .unwrap_or(0) as usize
+        v.get("chars_used").and_then(|c| c.as_u64()).unwrap_or(0) as usize
     } else {
         usize::MAX
     };
 
-    let architecture_risk = scan
-        .as_ref()
-        .map(|s| s.architecture_risk)
-        .unwrap_or(false);
+    let architecture_risk = scan.as_ref().map(|s| s.architecture_risk).unwrap_or(false);
 
     let reviewers_requested = input.reviewers;
     let evangelists_requested = input.evangelists;
@@ -314,14 +313,19 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
         crate::config::ensure_config(&shipped)
             .ok()
             .and_then(|p| crate::config::load_config(&p).ok())
-            .map(|c| (c.agents.max_reviewers, c.agents.max_evangelists, c.agents.max_agents_total))
+            .map(|c| {
+                (
+                    c.agents.max_reviewers,
+                    c.agents.max_evangelists,
+                    c.agents.max_agents_total,
+                )
+            })
     };
     if let Some((max_r, max_e, max_total)) = agent_caps {
         reviewers = reviewers.min(max_r);
         evangelists = evangelists.min(max_e);
-        let specialists = (input.security as u32)
-            + (input.performance as u32)
-            + (input.error_handling as u32);
+        let specialists =
+            (input.security as u32) + (input.performance as u32) + (input.error_handling as u32);
         while reviewers + evangelists + specialists > max_total && evangelists > 0 {
             evangelists -= 1;
         }
@@ -408,8 +412,8 @@ pub fn compute_skip_ai(
     spawn_mode: &str,
 ) -> (bool, Option<String>) {
     let scan_empty = scan.map(|s| s.findings.is_empty()).unwrap_or(true);
-    let docs_only = change_class.eq_ignore_ascii_case("docs")
-        || change_class.eq_ignore_ascii_case("doc");
+    let docs_only =
+        change_class.eq_ignore_ascii_case("docs") || change_class.eq_ignore_ascii_case("doc");
 
     if tier == Tier::Xs && docs_only && scan_empty {
         return (
@@ -436,26 +440,57 @@ mod tests {
 
     #[test]
     fn xs_docs_empty_skips() {
-        let (skip, reason) = compute_skip_ai(Tier::Xs, "docs", None, 1, 1, true, true, true, "isolated");
+        let (skip, reason) =
+            compute_skip_ai(Tier::Xs, "docs", None, 1, 1, true, true, true, "isolated");
         assert!(skip);
         assert!(reason.unwrap().contains("XS"));
     }
 
     #[test]
     fn zero_agents_skips() {
-        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 0, 0, false, false, false, "isolated");
+        let (skip, _) = compute_skip_ai(
+            Tier::M,
+            "feature",
+            None,
+            0,
+            0,
+            false,
+            false,
+            false,
+            "isolated",
+        );
         assert!(skip);
     }
 
     #[test]
     fn specialists_keep_ai() {
-        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 0, 0, true, false, false, "isolated");
+        let (skip, _) = compute_skip_ai(
+            Tier::M,
+            "feature",
+            None,
+            0,
+            0,
+            true,
+            false,
+            false,
+            "isolated",
+        );
         assert!(!skip);
     }
 
     #[test]
     fn m_with_agents_runs() {
-        let (skip, _) = compute_skip_ai(Tier::M, "feature", None, 1, 0, false, false, false, "isolated");
+        let (skip, _) = compute_skip_ai(
+            Tier::M,
+            "feature",
+            None,
+            1,
+            0,
+            false,
+            false,
+            false,
+            "isolated",
+        );
         assert!(!skip);
     }
 

@@ -283,7 +283,10 @@ fn extract_symbol(line: &str) -> Option<String> {
     }
     // class Foo
     if let Some(rest) = trimmed.strip_prefix("class ") {
-        let name = rest.split(|c: char| c == ' ' || c == '{' || c == '<').next()?.trim();
+        let name = rest
+            .split(|c: char| c == ' ' || c == '{' || c == '<')
+            .next()?
+            .trim();
         if !name.is_empty() {
             return Some(format!("class:{name}"));
         }

@@ -143,10 +143,8 @@ pub fn run_forge_plan_write(input: ForgePlanWriteInput) -> Result<(ForgeSessionP
         figma_dir: input.figma_dir.or(ticket.figma_dir.clone()),
     };
 
-    let _ = crate::paths::init_artifact_ctx(
-        &cwd,
-        &crate::paths::session_name(None, Some(&ticket.id)),
-    );
+    let _ =
+        crate::paths::init_artifact_ctx(&cwd, &crate::paths::session_name(None, Some(&ticket.id)));
     let path = temp_artifact_path("forge", &ticket.id, "session");
     write_json_pretty(&path, &plan)?;
     Ok((plan, path))

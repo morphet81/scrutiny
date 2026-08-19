@@ -236,21 +236,36 @@ fn parse_thread(node: &Value) -> Option<ParleyComment> {
         .unwrap_or_default();
     let mut trail = Vec::new();
     for c in &comment_nodes {
-        let cid = c.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let cid = c
+            .get("id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
         if cid.is_empty() {
             continue;
         }
         trail.push(ParleyThreadComment {
             id: cid,
             database_id: c.get("databaseId").and_then(|d| d.as_u64()),
-            body: c.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string(),
-            url: c.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
+            body: c
+                .get("body")
+                .and_then(|b| b.as_str())
+                .unwrap_or("")
+                .to_string(),
+            url: c
+                .get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string(),
             author: c
                 .pointer("/author/login")
                 .and_then(|a| a.as_str())
                 .unwrap_or("")
                 .to_string(),
-            path: c.get("path").and_then(|p| p.as_str()).map(|s| s.to_string()),
+            path: c
+                .get("path")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string()),
             line: c.get("line").and_then(|l| l.as_u64()),
             // diffSide lives on the thread, not PullRequestReviewComment
             diff_side: diff_side.clone(),
@@ -270,9 +285,7 @@ fn parse_thread(node: &Value) -> Option<ParleyComment> {
     let comment_id = first.map(|c| c.id.clone()).unwrap_or_default();
     let database_id = first.and_then(|c| c.database_id);
     let path = if path.is_empty() {
-        first
-            .and_then(|c| c.path.clone())
-            .unwrap_or_default()
+        first.and_then(|c| c.path.clone()).unwrap_or_default()
     } else {
         path
     };

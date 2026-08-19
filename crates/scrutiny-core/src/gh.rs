@@ -95,7 +95,14 @@ pub fn split_repo(repo: &str) -> Result<(String, String)> {
 
 pub fn repo_name_with_owner(cwd: &Path) -> Result<String> {
     let output = Command::new("gh")
-        .args(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+        .args([
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ])
         .current_dir(cwd)
         .output()
         .context("gh repo view")?;

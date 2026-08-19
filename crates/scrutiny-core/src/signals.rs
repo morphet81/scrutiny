@@ -86,7 +86,10 @@ pub fn detect_content_signals(
             perf_hits.push(format!("css:{}", f.path));
         }
     }
-    perf_hits.extend(diff_pattern_hits(unified_diff, &sig.performance_diff_patterns));
+    perf_hits.extend(diff_pattern_hits(
+        unified_diff,
+        &sig.performance_diff_patterns,
+    ));
 
     // CSS-only presentational without hot patterns → no perf
     let css_only = !scored.is_empty()

@@ -305,8 +305,18 @@ mod tests {
     fn source_served_before_test() {
         let big = "y".repeat(4000);
         let w = vec![
-            work("t_spec.rb", "test", "@@ -1 +1 @@\n+t\n", vec![(1, 100, &big)]),
-            work("src.rb", "source", "@@ -1 +1 @@\n+s\n", vec![(1, 100, &big)]),
+            work(
+                "t_spec.rb",
+                "test",
+                "@@ -1 +1 @@\n+t\n",
+                vec![(1, 100, &big)],
+            ),
+            work(
+                "src.rb",
+                "source",
+                "@@ -1 +1 @@\n+s\n",
+                vec![(1, 100, &big)],
+            ),
         ];
         let a = allocate(w, 2500, 0, &cfg());
         let src = a.slices.iter().find(|s| s.path == "src.rb").unwrap();
@@ -320,8 +330,18 @@ mod tests {
     fn deterministic() {
         let mk = || {
             vec![
-                work("a.rs", "source", "@@ -1 +1 @@\n+a\n", vec![(1, 5, "fn a() {}")]),
-                work("b.rs", "source", "@@ -1 +1 @@\n+b\n", vec![(1, 5, "fn b() {}")]),
+                work(
+                    "a.rs",
+                    "source",
+                    "@@ -1 +1 @@\n+a\n",
+                    vec![(1, 5, "fn a() {}")],
+                ),
+                work(
+                    "b.rs",
+                    "source",
+                    "@@ -1 +1 @@\n+b\n",
+                    vec![(1, 5, "fn b() {}")],
+                ),
             ]
         };
         let a = allocate(mk(), 5000, 0, &cfg());

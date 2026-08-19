@@ -20,8 +20,8 @@ pub mod parley_cmd;
 pub mod paths;
 pub mod plan;
 pub mod pr;
-pub mod prepush;
 pub mod pr_cmd;
+pub mod prepush;
 pub mod review_cmd;
 pub mod review_session;
 pub mod runtime;
@@ -35,6 +35,10 @@ pub mod terminal;
 pub mod timeouts;
 pub mod treesitter;
 
+pub use agent_runner::{
+    build_isolated_prompt, build_team_lead_prompt, run_agent_prompt, AgentPromptInput,
+};
+pub use bench_cmd::{run_bench, BenchArm, BenchCmdInput, BenchWorkload};
 pub use config::{
     ensure_config, find_shipped_default, load_config, resolve_prompt_prefix, Config, PromptsConfig,
 };
@@ -52,28 +56,24 @@ pub use forge::{
 pub use forge_bulk::{run_forge_bulk, run_forge_bulk_item, ForgeBulkInput};
 pub use forge_cmd::{run_forge, ForgeCmdInput};
 pub use map::{run_map, MapReport};
+pub use pack::{run_pack, PackReport};
 pub use parley::{
     run_parley_fetch, run_parley_plan_write, run_parley_reply, ParleyAnswers, ParleyFetchInput,
     ParleyPlanWriteInput, ParleyReplyInput,
 };
 pub use parley_cmd::{run_parley, ParleyCmdInput};
-pub use pack::{run_pack, PackReport};
 pub use paths::{
-    prepare_artifacts, temp_artifact_path, warn_if_scrutiny_unignored, init_artifact_ctx,
+    init_artifact_ctx, prepare_artifacts, temp_artifact_path, warn_if_scrutiny_unignored,
 };
 pub use plan::{
     load_plan_answers, run_plan_confirm, run_plan_write, ConfirmedPlan, PlanAnswers,
     PlanConfirmInput, PlanWriteInput,
 };
 pub use pr_cmd::{run_pr, PrCmdInput};
-pub use agent_runner::{
-    build_isolated_prompt, build_team_lead_prompt, AgentPromptInput, run_agent_prompt,
-};
-pub use bench_cmd::{run_bench, BenchArm, BenchCmdInput, BenchWorkload};
 pub use review_cmd::{run_review, run_review_from_report, ReportResumeInput, ReviewCmdInput};
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
 };
-pub use runtime::{detect_clients, resolve_client, normalize_spawn_mode, DetectedClient};
+pub use runtime::{detect_clients, normalize_spawn_mode, resolve_client, DetectedClient};
 pub use scan::{normalize_severity, run_scan, ScanReport};
 pub use skills_install::{run_skills_install, SkillsInstallInput};

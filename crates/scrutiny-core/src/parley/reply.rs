@@ -69,7 +69,10 @@ pub fn run_parley_reply(input: ParleyReplyInput) -> Result<(ParleyReplyResult, P
              This means the run degenerated (agents produced no distinct fixes). \
              Nothing posted; re-run parley.",
             postable.len(),
-            compose_reply_body(postable[0]).chars().take(80).collect::<String>()
+            compose_reply_body(postable[0])
+                .chars()
+                .take(80)
+                .collect::<String>()
         );
     }
 
@@ -131,10 +134,7 @@ pub fn run_parley_reply(input: ParleyReplyInput) -> Result<(ParleyReplyResult, P
     let path = artifact_path("parley-reply");
     write_json_pretty(&path, &result)?;
     if !result.failed.is_empty() {
-        eprintln!(
-            "scrutiny parley-reply: {} failed",
-            result.failed.len()
-        );
+        eprintln!("scrutiny parley-reply: {} failed", result.failed.len());
         for f in &result.failed {
             eprintln!("  - {f}");
         }
@@ -171,8 +171,7 @@ pub fn reply_input_json(thread_id: &str, body: &str) -> serde_json::Value {
 }
 
 pub fn load_reply_result(path: &Path) -> Result<ParleyReplyResult> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 

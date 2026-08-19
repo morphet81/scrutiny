@@ -21,11 +21,45 @@ pub(crate) struct RefUse {
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "puts" | "print" | "require" | "require_relative" | "new" | "raise" | "loop" | "lambda"
-            | "println" | "print!" | "format" | "vec" | "Some" | "None" | "Ok" | "Err" | "String"
-            | "Vec" | "Box" | "self" | "super" | "len" | "clone" | "to_string" | "into"
-            | "unwrap" | "expect" | "iter" | "map" | "filter" | "collect" | "push"
-            | "console" | "log" | "Error" | "Object" | "Array" | "Promise" | "JSON"
+        "puts"
+            | "print"
+            | "require"
+            | "require_relative"
+            | "new"
+            | "raise"
+            | "loop"
+            | "lambda"
+            | "println"
+            | "print!"
+            | "format"
+            | "vec"
+            | "Some"
+            | "None"
+            | "Ok"
+            | "Err"
+            | "String"
+            | "Vec"
+            | "Box"
+            | "self"
+            | "super"
+            | "len"
+            | "clone"
+            | "to_string"
+            | "into"
+            | "unwrap"
+            | "expect"
+            | "iter"
+            | "map"
+            | "filter"
+            | "collect"
+            | "push"
+            | "console"
+            | "log"
+            | "Error"
+            | "Object"
+            | "Array"
+            | "Promise"
+            | "JSON"
     )
 }
 
@@ -45,7 +79,10 @@ pub(crate) fn resolve(
         if defined.contains(&r.name) || is_builtin(&r.name) {
             continue;
         }
-        by_name.entry(r.name.clone()).or_default().insert(r.from.clone());
+        by_name
+            .entry(r.name.clone())
+            .or_default()
+            .insert(r.from.clone());
     }
     let mut names: Vec<String> = by_name.keys().cloned().collect();
     names.truncate(cfg.xref_max_symbols);

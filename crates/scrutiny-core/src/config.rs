@@ -25,8 +25,8 @@ const LOCAL_CONFIG_FILE_NAME: &str = "scrutiny.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_client: String,
-    /// Run spawned agents headless (stdout captured). When false, parley opens each
-    /// agent in a visible terminal window in auto mode (claude + tmux/zellij/macOS).
+    /// Run spawned agents headless (stdout captured). When false, opens each
+    /// agent in a visible terminal window (claude/cursor + tmux/zellij/macOS).
     #[serde(default = "default_true")]
     pub headless: bool,
     /// Inject caveman-ultra style + dialect into spawned-agent prompts (default on).
@@ -356,10 +356,10 @@ fn default_bulk_concurrency() -> usize {
 /// Common binary / opaque extensions excluded from forge LOC counting by default.
 pub fn default_loc_exclude_extensions() -> Vec<String> {
     [
-        "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz",
-        "tgz", "bz2", "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4",
-        "mov", "avi", "webm", "wav", "wasm", "dll", "so", "dylib", "exe", "bin", "class", "jar",
-        "war", "pyc", "pyo", "o", "a", "obj", "db", "sqlite", "sqlite3",
+        "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz", "tgz", "bz2",
+        "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi",
+        "webm", "wav", "wasm", "dll", "so", "dylib", "exe", "bin", "class", "jar", "war", "pyc",
+        "pyo", "o", "a", "obj", "db", "sqlite", "sqlite3",
     ]
     .into_iter()
     .map(str::to_string)
@@ -445,42 +445,73 @@ fn default_story_point_fields() -> Vec<String> {
 }
 fn default_breadth_keywords() -> Vec<String> {
     vec![
-        "refactor".into(), "migrate".into(), "rewrite".into(),
-        "redesign".into(), "architecture".into(), "overhaul".into(),
-        "restructure".into(), "across".into(),
+        "refactor".into(),
+        "migrate".into(),
+        "rewrite".into(),
+        "redesign".into(),
+        "architecture".into(),
+        "overhaul".into(),
+        "restructure".into(),
+        "across".into(),
     ]
 }
 fn default_integration_keywords() -> Vec<String> {
     vec![
-        "api".into(), "endpoint".into(), "webhook".into(),
-        "schema".into(), "database".into(), "migration".into(),
-        "third-party".into(), "external".into(), "integration".into(),
+        "api".into(),
+        "endpoint".into(),
+        "webhook".into(),
+        "schema".into(),
+        "database".into(),
+        "migration".into(),
+        "third-party".into(),
+        "external".into(),
+        "integration".into(),
     ]
 }
 fn default_risk_keywords() -> Vec<String> {
     vec![
-        "auth".into(), "security".into(), "payment".into(),
-        "permission".into(), "encryption".into(), "pii".into(),
-        "credential".into(), "oauth".into(), "token".into(),
+        "auth".into(),
+        "security".into(),
+        "payment".into(),
+        "permission".into(),
+        "encryption".into(),
+        "pii".into(),
+        "credential".into(),
+        "oauth".into(),
+        "token".into(),
     ]
 }
 fn default_trivial_keywords() -> Vec<String> {
     vec![
-        "typo".into(), "copy".into(), "wording".into(),
-        "rename".into(), "bump".into(), "documentation".into(),
-        "translation".into(), "minor".into(), "spelling".into(),
+        "typo".into(),
+        "copy".into(),
+        "wording".into(),
+        "rename".into(),
+        "bump".into(),
+        "documentation".into(),
+        "translation".into(),
+        "minor".into(),
+        "spelling".into(),
     ]
 }
 fn default_bump_labels() -> Vec<String> {
     vec![
-        "urgent".into(), "complex".into(), "breaking-change".into(),
-        "breaking".into(), "epic".into(), "large".into(),
+        "urgent".into(),
+        "complex".into(),
+        "breaking-change".into(),
+        "breaking".into(),
+        "epic".into(),
+        "large".into(),
     ]
 }
 fn default_lower_labels() -> Vec<String> {
     vec![
-        "trivial".into(), "minor".into(), "quick".into(),
-        "simple".into(), "easy".into(), "small".into(),
+        "trivial".into(),
+        "minor".into(),
+        "quick".into(),
+        "simple".into(),
+        "easy".into(),
+        "small".into(),
     ]
 }
 fn default_tier_thresholds() -> [u32; 4] {
@@ -613,11 +644,13 @@ fn default_performance_path_globs() -> Vec<String> {
 
 fn default_performance_diff_patterns() -> Vec<String> {
     vec![
-        r"(?i)\b(useEffect|useLayoutEffect|useMemo|useCallback|useTransition|startTransition)\s*\(".into(),
+        r"(?i)\b(useEffect|useLayoutEffect|useMemo|useCallback|useTransition|startTransition)\s*\("
+            .into(),
         r"(?i)\b(React\.memo|memo\s*\()".into(),
         r"(?i)\.map\s*\(|\.filter\s*\(|\.reduce\s*\(|\.flatMap\s*\(".into(),
         r"(?i)\bfor\s*\(|\bwhile\s*\(|\.forEach\s*\(".into(),
-        r"(?i)requestAnimationFrame|getBoundingClientRect|offsetWidth|offsetHeight|scrollTop".into(),
+        r"(?i)requestAnimationFrame|getBoundingClientRect|offsetWidth|offsetHeight|scrollTop"
+            .into(),
         r"(?i)\b(will-change|contain:|content-visibility:)".into(),
         r"(?i)\.clone\s*\(|to_vec\s*\(|collect::<Vec".into(),
         r"(?i)\bMutex::|\bRwLock::|blocking_".into(),
@@ -1045,7 +1078,11 @@ impl Config {
             tier_err && (content.error_handling || content.security || content.performance)
         };
 
-        let mut reviewers = self.agents.reviewers_by_tier.get(tier).min(self.agents.max_reviewers);
+        let mut reviewers = self
+            .agents
+            .reviewers_by_tier
+            .get(tier)
+            .min(self.agents.max_reviewers);
         let mut evangelists = self
             .agents
             .evangelists_by_tier
@@ -1374,12 +1411,7 @@ mod tests {
         assert!(cfg.forge.loc_exclude_test);
         assert!(cfg.forge.loc_exclude_doc);
         assert!(cfg.forge.loc_exclude_comments);
-        assert!(
-            cfg.forge
-                .loc_exclude_extensions
-                .iter()
-                .any(|e| e == "png")
-        );
+        assert!(cfg.forge.loc_exclude_extensions.iter().any(|e| e == "png"));
         let forge = cfg.suggested_forge("cursor", Tier::M, 0, String::new());
         assert!(forge.prompt_approach);
         assert!(forge.prompt_e2e);
@@ -1390,7 +1422,9 @@ mod tests {
         assert!(cfg.prompts.global.is_empty());
         assert!(cfg.prompts.agents.is_empty());
         assert_eq!(
-            cfg.agent_models.get("parley_prepush_plan").map(|s| s.as_str()),
+            cfg.agent_models
+                .get("parley_prepush_plan")
+                .map(|s| s.as_str()),
             Some("xs")
         );
         assert_eq!(cfg.parley.prepush_fix_max_chunks, 8);
@@ -1417,16 +1451,13 @@ mod tests {
         );
 
         let mut cfg2 = cfg.clone();
-        cfg2.agent_models
-            .insert("parley_member".into(), "l".into());
-        cfg2.agent_models
-            .insert("parley_lead".into(), "l".into());
+        cfg2.agent_models.insert("parley_member".into(), "l".into());
+        cfg2.agent_models.insert("parley_lead".into(), "l".into());
         cfg2.agent_models
             .insert("parley_verifier".into(), "l".into());
         cfg2.agent_models
             .insert("parley_evangelist".into(), "l".into());
-        cfg2.agent_models
-            .insert("parley_repair".into(), "l".into());
+        cfg2.agent_models.insert("parley_repair".into(), "l".into());
         let expected_l = cfg2
             .models
             .get("claude")
@@ -1548,7 +1579,10 @@ mod tests {
         assert_eq!(t.forge_implement, 5400, "explicit stage override wins");
         assert_eq!(t.forge_fix, 1800, "unset stage derives from the new base");
         assert_eq!(t.parley_agent, 120, "[timeouts] beats [parley]");
-        assert_eq!(t.parley_prepush_fix, 1200, "legacy [parley] key still seeds");
+        assert_eq!(
+            t.parley_prepush_fix, 1200,
+            "legacy [parley] key still seeds"
+        );
     }
 
     #[test]

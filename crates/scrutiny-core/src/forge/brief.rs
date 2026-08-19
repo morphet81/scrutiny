@@ -139,13 +139,16 @@ fn render_brief(
 
     if !ticket.comments.is_empty() {
         out.push_str("## Comments (last 3)\n");
-        for c in ticket.comments.iter().rev().take(3).collect::<Vec<_>>().into_iter().rev()
+        for c in ticket
+            .comments
+            .iter()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
         {
-            out.push_str(&format!(
-                "- {}: {}\n",
-                c.author,
-                truncate(&c.body, 200)
-            ));
+            out.push_str(&format!("- {}: {}\n", c.author, truncate(&c.body, 200)));
         }
         out.push('\n');
     }
@@ -270,7 +273,9 @@ mod tests {
             decls.push(OutlineDecl {
                 kind: "fn".into(),
                 name: format!("f{i}"),
-                signature: format!("fn f{i}() {{ /* padding so lines are long enough for budget */ }}"),
+                signature: format!(
+                    "fn f{i}() {{ /* padding so lines are long enough for budget */ }}"
+                ),
                 start: i + 1,
                 end: i + 1,
             });

@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{ensure_config, find_shipped_default, load_config, Config, SuggestedPlan};
 use crate::git::{self, DiffFile, RepoContext};
 use crate::paths::{temp_artifact_path, write_json_pretty};
-use crate::score::{
-    compute_scatter, score_tier_detailed, ScoreBreakdown, ScoreSignals, Tier,
-};
+use crate::score::{compute_scatter, score_tier_detailed, ScoreBreakdown, ScoreSignals, Tier};
 use crate::taxonomy::{
     aggregate_blast, blast_stub_for_path, change_class, classify_path, excluded_from_score,
     is_risk_path, layer_for_path, PathKind,
@@ -66,14 +64,12 @@ pub struct ExcludedFile {
 
 pub fn run_eval(input: EvalInput) -> Result<(EvalReport, PathBuf)> {
     let repo = git::discover_repo(&input.cwd)?;
-    let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| input.cwd.clone()));
+    let shipped =
+        find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| input.cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
-    let head = input
-        .head
-        .clone()
-        .unwrap_or_else(|| "HEAD".to_string());
+    let head = input.head.clone().unwrap_or_else(|| "HEAD".to_string());
     let base = if let Some(b) = &input.base {
         b.clone()
     } else {

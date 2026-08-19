@@ -11,7 +11,7 @@ pub use fixes::{
     ParleyFixesFile,
 };
 pub use plan::{
-    partition_comments, prompt_parley_answers, run_parley_plan_write, ParleyAnswers,
-    ParleyPlan, ParleyPlanWriteInput,
+    partition_comments, prompt_parley_answers, run_parley_plan_write, ParleyAnswers, ParleyPlan,
+    ParleyPlanWriteInput,
 };
 pub use reply::{run_parley_reply, ParleyReplyInput, ParleyReplyResult};

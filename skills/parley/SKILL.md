@@ -64,11 +64,11 @@ edit source code. N>1 verifiers each check all threads (redundant).
 ## Headless vs windows
 
 Config root `headless` (default `true`). Set `headless = false` to open each
-agent in a visible terminal window in claude **auto** mode
-(`--permission-mode auto`), on the current surface: tmux/zellij (new session/
-pane), macOS Terminal/iTerm2 (new window). Agents write fixes to disk; the host
-polls a per-agent done sentinel. Non-claude clients or unsupported surfaces
-(plain SSH/CI) fall back to headless.
+agent in a visible terminal window (claude `--permission-mode auto`, cursor
+`--force`), on the current surface: tmux/zellij (new session/pane), macOS
+Terminal/iTerm2 (new window). Agents write fixes to disk; the host polls a
+per-agent done sentinel. Codex or unsupported surfaces (plain SSH/CI) fall
+back to headless.
 
 ## Hard rules
 

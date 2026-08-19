@@ -193,7 +193,12 @@ fn parity_across_changed(
                 format!(
                     "Locale `{loc}` missing {} key(s) present/changed in `{ref_locale}`: {}",
                     filtered_missing.len(),
-                    filtered_missing.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                    filtered_missing
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 &format!("Add the missing key(s) to `{path}`."),
                 "warning",
@@ -402,10 +407,7 @@ fn is_part_of_plural_group(key: &str, groups: &BTreeSet<String>) -> bool {
 
 /// Resolve supported plural categories for a locale.
 /// Returns empty vec for unknown locales (conservative: warn everything).
-fn resolve_supported_plural_categories(
-    locale: &str,
-    cfg: &ScanI18nConfig,
-) -> Vec<String> {
+fn resolve_supported_plural_categories(locale: &str, cfg: &ScanI18nConfig) -> Vec<String> {
     let normalized = normalize_locale_tag(locale);
 
     // Check explicit config override first
@@ -419,8 +421,8 @@ fn resolve_supported_plural_categories(
     // Built-in table for common single-category locales
     match normalized.as_str() {
         // East/Southeast Asian languages — `other` only
-        "zh" | "zh-hans" | "zh-hant" | "zh-cn" | "zh-tw" | "zh-hk" |
-        "ja" | "ko" | "th" | "vi" | "id" | "ms" | "my" | "km" | "lo" => {
+        "zh" | "zh-hans" | "zh-hant" | "zh-cn" | "zh-tw" | "zh-hk" | "ja" | "ko" | "th" | "vi"
+        | "id" | "ms" | "my" | "km" | "lo" => {
             vec!["other".to_string()]
         }
         // Turkish — `one` and `other`

@@ -79,20 +79,12 @@ pub fn init_artifact_ctx(cwd: &Path, session: &str) -> Result<PathBuf> {
 }
 
 /// Prepare artifacts: gitignore warning + session dir. `pr` optional; else infer from hint paths.
-pub fn prepare_artifacts(
-    cwd: &Path,
-    pr: Option<&str>,
-    hint_paths: &[&Path],
-) -> Result<PathBuf> {
+pub fn prepare_artifacts(cwd: &Path, pr: Option<&str>, hint_paths: &[&Path]) -> Result<PathBuf> {
     warn_if_scrutiny_unignored(cwd);
     let session = pr
         .and_then(parse_pr_number)
         .map(|n| n.to_string())
-        .or_else(|| {
-            hint_paths
-                .iter()
-                .find_map(|p| infer_session_from_path(p))
-        })
+        .or_else(|| hint_paths.iter().find_map(|p| infer_session_from_path(p)))
         .or_else(|| std::env::var("SCRUTINY_SESSION").ok())
         .unwrap_or_else(|| "local".into());
     init_artifact_ctx(cwd, &session)
@@ -123,12 +115,7 @@ pub fn artifact_path_unique(kind: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() ^ (d.as_secs() as u32))
         .unwrap_or(0);
-    root.join(format!(
-        "{}-{}-{:08x}.json",
-        slug_kind(kind),
-        ts,
-        nonce
-    ))
+    root.join(format!("{}-{}-{:08x}.json", slug_kind(kind), ts, nonce))
 }
 
 /// Legacy name — writes into the active `.scrutiny/<session>/` tree.
@@ -170,8 +157,7 @@ pub fn slug(s: &str) -> String {
 
 pub fn write_json_pretty(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(value).context("serialize json")?;
     std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
@@ -246,10 +232,7 @@ mod tests {
 
     #[test]
     fn parse_pr_from_url() {
-        assert_eq!(
-            parse_pr_number("https://github.com/o/r/pull/42"),
-            Some(42)
-        );
+        assert_eq!(parse_pr_number("https://github.com/o/r/pull/42"), Some(42));
         assert_eq!(parse_pr_number("99"), Some(99));
     }
 

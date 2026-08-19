@@ -1,8 +1,8 @@
 default_client = "claude"
 # Run spawned agents headless (stdout captured). Set false to open each agent
-# in a visible terminal window in auto mode (claude only; tmux/zellij/
-# macOS Terminal/iTerm2). Applies to parley, probe, and forge.
-# Unsupported surfaces or non-claude clients fall back to headless.
+# in a visible terminal window (claude/cursor; tmux/zellij/macOS Terminal/iTerm2).
+# Applies to parley, probe, and forge.
+# Unsupported surfaces or Codex fall back to headless.
 headless = true
 # Inject caveman-ultra style into every spawned-agent prompt and write
 # scrutiny instruction text in caveman dialect. Set false for plain English.

@@ -148,8 +148,10 @@ fn parse_agents_json(raw: &str) -> Result<Vec<ReviewAgentRecord>> {
     let v: serde_json::Value =
         serde_json::from_str(raw).context("parse review-session --from-json")?;
     if let Some(arr) = v.as_array() {
-        return Ok(serde_json::from_value(serde_json::Value::Array(arr.clone()))
-            .context("parse agents array")?);
+        return Ok(
+            serde_json::from_value(serde_json::Value::Array(arr.clone()))
+                .context("parse agents array")?,
+        );
     }
     if let Some(agents) = v.get("agents") {
         return Ok(serde_json::from_value(agents.clone()).context("parse agents field")?);

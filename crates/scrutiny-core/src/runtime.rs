@@ -187,12 +187,7 @@ pub fn resolve_client(cfg: &Config, input: ResolveClientInput) -> Result<Detecte
         } else {
             ""
         };
-        eprintln!(
-            "  [{}] {} ({}){mark}",
-            i + 1,
-            d.client,
-            d.binary.display()
-        );
+        eprintln!("  [{}] {} ({}){mark}", i + 1, d.client, d.binary.display());
     }
     eprint!(
         "Choose client 1-{} [default {}]: ",
@@ -262,7 +257,9 @@ pub fn resolve_spawn_mode(
     }
 
     eprintln!("scrutiny: spawn mode");
-    eprintln!("  [1] isolated — script runs reviewers/evangelists/specialists in parallel (default)");
+    eprintln!(
+        "  [1] isolated — script runs reviewers/evangelists/specialists in parallel (default)"
+    );
     eprintln!("  [2] team     — one lead agent spawns its own team and builds the report");
     eprint!("Choose 1 or 2 [default 1]: ");
     let _ = io::stderr().flush();

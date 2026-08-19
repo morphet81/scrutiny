@@ -137,8 +137,8 @@ pub struct ReferencedSignature {
 }
 
 pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
-    let text = fs::read_to_string(map_path)
-        .with_context(|| format!("read map {}", map_path.display()))?;
+    let text =
+        fs::read_to_string(map_path).with_context(|| format!("read map {}", map_path.display()))?;
     let map: MapReport = serde_json::from_str(&text).context("parse map json")?;
 
     let shipped =
@@ -174,9 +174,13 @@ pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
     let mut referrers: Vec<xref::RefUse> = Vec::new();
     let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (path, kind) in paths {
-        let diff =
-            git::diff_unified_paths(&repo.root, &map.base, &map.head, std::slice::from_ref(&path))
-                .unwrap_or_default();
+        let diff = git::diff_unified_paths(
+            &repo.root,
+            &map.base,
+            &map.head,
+            std::slice::from_ref(&path),
+        )
+        .unwrap_or_default();
         if diff.is_empty() {
             continue;
         }

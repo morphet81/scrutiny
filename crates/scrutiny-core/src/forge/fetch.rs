@@ -12,8 +12,8 @@ use std::process::Command;
 use crate::config::{ensure_config, find_shipped_default, load_config, SuggestedForge};
 use crate::forge::complexity::estimate_ticket_tier;
 use crate::forge::tools::{require_acli, require_gh, require_glab};
-use crate::score::Tier;
 use crate::paths::{temp_artifact_path, write_json_pretty};
+use crate::score::Tier;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -207,10 +207,13 @@ fn is_jira_key(s: &str) -> bool {
     };
     parts.next().is_none()
         && proj.len() >= 2
-        && proj
-            .chars()
-            .enumerate()
-            .all(|(i, c)| if i == 0 { c.is_ascii_uppercase() } else { c.is_ascii_uppercase() || c.is_ascii_digit() })
+        && proj.chars().enumerate().all(|(i, c)| {
+            if i == 0 {
+                c.is_ascii_uppercase()
+            } else {
+                c.is_ascii_uppercase() || c.is_ascii_digit()
+            }
+        })
         && !num.is_empty()
         && num.chars().all(|c| c.is_ascii_digit())
 }
@@ -237,9 +240,7 @@ fn extract_jira_key_from_text(text: &str) -> Option<String> {
     while i < bytes.len() {
         if bytes[i].is_ascii_uppercase() {
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit())
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit()) {
                 i += 1;
             }
             if i < bytes.len() && bytes[i] == b'-' {
@@ -326,7 +327,9 @@ fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
     let key = jira_key_from_url_or_raw(raw)?;
     require_acli()?;
     let output = Command::new("acli")
-        .args(["jira", "workitem", "view", &key, "--fields", "*all", "--json"])
+        .args([
+            "jira", "workitem", "view", &key, "--fields", "*all", "--json",
+        ])
         .current_dir(cwd)
         .output()
         .context("run acli jira workitem view")?;
@@ -357,8 +360,8 @@ fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
         .unwrap_or_default();
     let comments = extract_jira_comments(&raw_json);
     let self_url = raw_json.get("self").and_then(|v| v.as_str());
-    let url = jira_browse_url(&key, raw, self_url)
-        .or_else(|| Some(format_jira_browse_url(raw, &key)));
+    let url =
+        jira_browse_url(&key, raw, self_url).or_else(|| Some(format_jira_browse_url(raw, &key)));
 
     let attachments_dir = download_jira_attachments(cwd, &key, &raw_json)?;
 
@@ -632,10 +635,7 @@ fn download_jira_attachments(cwd: &Path, key: &str, raw: &Value) -> Result<Optio
         return Ok(None);
     }
     // Prefer active forge session dir
-    let root = crate::paths::init_artifact_ctx(
-        cwd,
-        &crate::paths::session_name(None, Some(key)),
-    )?;
+    let root = crate::paths::init_artifact_ctx(cwd, &crate::paths::session_name(None, Some(key)))?;
     let dir = root.join("attachments");
     fs::create_dir_all(&dir).context("create attachments dir")?;
 
@@ -713,7 +713,10 @@ struct AcliJiraProfile {
 }
 
 /// Env bearer → env API token (Basic) → macOS acli keychain OAuth → validated `acli auth token`.
-fn resolve_jira_download_auth(cwd: &Path, profile: Option<&AcliJiraProfile>) -> Option<JiraDownloadAuth> {
+fn resolve_jira_download_auth(
+    cwd: &Path,
+    profile: Option<&AcliJiraProfile>,
+) -> Option<JiraDownloadAuth> {
     for key in ["SCRUTINY_JIRA_BEARER", "ATLASSIAN_ACCESS_TOKEN"] {
         if let Ok(v) = std::env::var(key) {
             let t = v.trim().to_string();
@@ -778,10 +781,10 @@ fn attachment_download_url(
         }
         JiraDownloadAuth::Basic { .. } => {
             if let Some(site) = site.filter(|s| !s.is_empty()) {
-                let host = site.trim_start_matches("https://").trim_start_matches("http://");
-                return Some(format!(
-                    "https://{host}/rest/api/3/attachment/content/{id}"
-                ));
+                let host = site
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                return Some(format!("https://{host}/rest/api/3/attachment/content/{id}"));
             }
             // Last resort: content URL from JSON (may be unreachable off-VPN).
             att.get("content")
@@ -1052,7 +1055,10 @@ fn parse_github_ref(cwd: &Path, raw: &str) -> Result<(Option<String>, String)> {
     {
         let parts: Vec<&str> = rest.split('/').collect();
         if parts.len() >= 4 && parts[2] == "issues" {
-            return Ok((Some(format!("{}/{}", parts[0], parts[1])), parts[3].to_string()));
+            return Ok((
+                Some(format!("{}/{}", parts[0], parts[1])),
+                parts[3].to_string(),
+            ));
         }
     }
     // owner/repo#42
@@ -1077,7 +1083,10 @@ fn fetch_gitlab(cwd: &Path, raw: &str) -> Result<TicketReport> {
     if let Some(p) = &project {
         cmd.args(["--repo", p]);
     }
-    let output = cmd.current_dir(cwd).output().context("run glab issue view")?;
+    let output = cmd
+        .current_dir(cwd)
+        .output()
+        .context("run glab issue view")?;
     if !output.status.success() {
         bail!(
             "glab failed: {}",
@@ -1165,10 +1174,7 @@ fn parse_gitlab_ref(raw: &str) -> Result<(Option<String>, String)> {
 }
 
 fn write_raw(cwd: &Path, id: &str, kind: &str, value: &Value) -> Result<PathBuf> {
-    let repo = cwd
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("repo");
+    let repo = cwd.file_name().and_then(|s| s.to_str()).unwrap_or("repo");
     let path = temp_artifact_path(repo, id, &format!("raw-{kind}"));
     write_json_pretty(&path, value)?;
     Ok(path)
@@ -1271,7 +1277,10 @@ mod tests {
         let md = flatten_adf_text(&doc);
         assert!(md.contains("## Acceptance Criteria"), "heading: {md}");
         assert!(md.contains("\n\n"), "blank-line separation: {md}");
-        assert!(md.contains("- Meals with **reservations** still show."), "bullet+bold: {md}");
+        assert!(
+            md.contains("- Meals with **reservations** still show."),
+            "bullet+bold: {md}"
+        );
         // Headers no longer glue onto following text.
         assert!(!md.contains("CriteriaCalendar"), "no glued text: {md}");
     }
@@ -1320,7 +1329,9 @@ mod tests {
         let help = "Authenticate to use Atlassian CLI.\n\nUsage:\n  acli auth [command]\n";
         assert!(!looks_like_bearer_token(help));
         assert!(!looks_like_bearer_token("short"));
-        assert!(!looks_like_bearer_token("token with spaces that are long enough!!"));
+        assert!(!looks_like_bearer_token(
+            "token with spaces that are long enough!!"
+        ));
         assert!(looks_like_bearer_token(
             "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.abc.def"
         ));

@@ -260,6 +260,9 @@ mod tests {
             "chore: already lower"
         );
         // no separator → unchanged
-        assert_eq!(normalize_conventional_title("No prefix Here"), "No prefix Here");
+        assert_eq!(
+            normalize_conventional_title("No prefix Here"),
+            "No prefix Here"
+        );
     }
 }

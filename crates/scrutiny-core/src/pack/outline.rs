@@ -13,7 +13,12 @@ use super::OutlineEntry;
 pub(crate) fn changed_ranges(diff: &str) -> Vec<(usize, usize)> {
     let pairs: Vec<(usize, usize)> = super::hunk::parse_hunk_new_ranges(diff)
         .into_iter()
-        .map(|(start, count)| (start, start.saturating_add(count.saturating_sub(1)).max(start)))
+        .map(|(start, count)| {
+            (
+                start,
+                start.saturating_add(count.saturating_sub(1)).max(start),
+            )
+        })
         .collect();
     merge_ranges(pairs)
 }

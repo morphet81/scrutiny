@@ -265,8 +265,7 @@ pub fn chunks_files_disjoint(chunks: &[PrepushChunk]) -> bool {
 /// Write chunks JSON to `path` (pretty).
 pub fn write_chunks_file(path: &Path, chunks: &[PrepushChunk]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let file = PrepushChunksFile {
         chunks: chunks.to_vec(),

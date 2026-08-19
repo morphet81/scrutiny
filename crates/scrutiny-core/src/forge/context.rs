@@ -88,8 +88,8 @@ fn keywords_from_ticket(ticket: &TicketReport) -> Vec<String> {
         }
         let lower = t.to_ascii_lowercase();
         const STOP: &[&str] = &[
-            "the", "and", "for", "with", "that", "this", "from", "into", "should", "when",
-            "have", "will", "must", "need", "also", "user", "users", "page", "able",
+            "the", "and", "for", "with", "that", "this", "from", "into", "should", "when", "have",
+            "will", "must", "need", "also", "user", "users", "page", "able",
         ];
         if STOP.contains(&lower.as_str()) {
             return;
@@ -99,7 +99,10 @@ fn keywords_from_ticket(ticket: &TicketReport) -> Vec<String> {
         }
     };
 
-    for part in ticket.title.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+    for part in ticket
+        .title
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+    {
         push_token(part);
     }
     for line in ticket.description.lines().take(20) {
@@ -143,11 +146,7 @@ fn find_related_paths(cwd: &Path, keywords: &[String]) -> Vec<String> {
         if let Ok(out) = output {
             if out.status.success() {
                 let text = String::from_utf8_lossy(&out.stdout);
-                return text
-                    .lines()
-                    .take(40)
-                    .map(|s| s.to_string())
-                    .collect();
+                return text.lines().take(40).map(|s| s.to_string()).collect();
             }
         }
     }

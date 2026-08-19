@@ -9,12 +9,12 @@ use crate::agent_runner::{
 };
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
-use crate::git;
 use crate::findings::{
     attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,
     run_findings_init_empty, run_findings_resolve, run_findings_triage, run_findings_validate,
     run_post_comments, FindingsInitInput, PostCommentsInput, TriageAskCtx,
 };
+use crate::git;
 use crate::map::run_map;
 use crate::pack::run_pack;
 use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteInput};
@@ -73,9 +73,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         });
     }
 
-    let shipped = find_shipped_default(
-        &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
-    );
+    let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
@@ -332,7 +330,9 @@ fn finish_triage_and_post(
     client_override: Option<String>,
 ) -> Result<()> {
     if non_interactive {
-        eprintln!("scrutiny probe: non-interactive — skip triage/post (edit findings JSON manually)");
+        eprintln!(
+            "scrutiny probe: non-interactive — skip triage/post (edit findings JSON manually)"
+        );
         return Ok(());
     }
 
@@ -344,7 +344,11 @@ fn finish_triage_and_post(
         pack_hint: &pack_hint,
     };
     let (report, _) = run_findings_triage(findings_path, Some(cwd), Some(&mut ask))?;
-    let selected = report.findings.iter().filter(|f| f.include == Some(true)).count();
+    let selected = report
+        .findings
+        .iter()
+        .filter(|f| f.include == Some(true))
+        .count();
     if selected == 0 {
         eprintln!("scrutiny probe: no findings selected — nothing to post.");
         return Ok(());

@@ -66,8 +66,9 @@ pub fn resolve_base_branch(
     pr_base: Option<&str>,
 ) -> Result<String> {
     if let Some(base) = pr_base {
-        let resolved = resolve_existing_ref(root, base)
-            .ok_or_else(|| anyhow::anyhow!("PR base ref not found locally: {base} (fetch first?)"))?;
+        let resolved = resolve_existing_ref(root, base).ok_or_else(|| {
+            anyhow::anyhow!("PR base ref not found locally: {base} (fetch first?)")
+        })?;
         return Ok(resolved);
     }
 
@@ -142,7 +143,10 @@ fn resolve_existing_ref(root: &Path, name: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if git_ok(root, &["rev-parse", "--verify", &format!("{name}^{{commit}}")]) {
+    if git_ok(
+        root,
+        &["rev-parse", "--verify", &format!("{name}^{{commit}}")],
+    ) {
         return Some(name.to_string());
     }
     let short = normalize_ref(name);
@@ -238,23 +242,24 @@ pub fn delete_branch(root: &Path, name: &str) -> Result<()> {
 }
 
 pub fn ref_exists(root: &Path, name: &str) -> bool {
-    git_ok(root, &["rev-parse", "--verify", &format!("{name}^{{commit}}")])
-        || git_ok(
-            root,
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{name}^{{commit}}"),
-            ],
-        )
-        || git_ok(
-            root,
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("refs/remotes/origin/{name}^{{commit}}"),
-            ],
-        )
+    git_ok(
+        root,
+        &["rev-parse", "--verify", &format!("{name}^{{commit}}")],
+    ) || git_ok(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{name}^{{commit}}"),
+        ],
+    ) || git_ok(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/remotes/origin/{name}^{{commit}}"),
+        ],
+    )
 }
 
 fn fork_point(root: &Path, cand: &str) -> Option<String> {

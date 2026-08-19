@@ -82,8 +82,7 @@ pub fn init_fixes_file(path: &Path, pr_number: u64) -> Result<()> {
 }
 
 pub fn load_fixes(path: &Path) -> Result<ParleyFixesFile> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -94,8 +93,7 @@ pub fn save_fixes(path: &Path, file: &ParleyFixesFile) -> Result<()> {
 /// Merge entries by comment_id (later wins).
 pub fn merge_fix_entries(file: &mut ParleyFixesFile, entries: &[FixEntry]) {
     for e in entries {
-        if let Some(existing) = file.fixes.iter_mut().find(|f| f.comment_id == e.comment_id)
-        {
+        if let Some(existing) = file.fixes.iter_mut().find(|f| f.comment_id == e.comment_id) {
             *existing = e.clone();
         } else {
             file.fixes.push(e.clone());

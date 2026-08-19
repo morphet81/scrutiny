@@ -83,7 +83,10 @@ pub fn run_forge_bulk(input: ForgeBulkInput) -> Result<Vec<PathBuf>> {
     }
 
     // Stage 2 — fetch + complexity (serial; global artifact churn harmless here).
-    eprintln!("scrutiny forge bulk: validating {} ticket(s)…", tokens.len());
+    eprintln!(
+        "scrutiny forge bulk: validating {} ticket(s)…",
+        tokens.len()
+    );
     let mut tickets: Vec<TicketReport> = Vec::new();
     for tok in &tokens {
         match run_forge_fetch(ForgeFetchInput {
@@ -109,8 +112,7 @@ pub fn run_forge_bulk(input: ForgeBulkInput) -> Result<Vec<PathBuf>> {
     }
 
     // Stage 3 — git repo mandatory (per-item worktrees).
-    let repo = git::discover_repo(&cwd)
-        .context("bulk needs a git repo for per-item worktrees")?;
+    let repo = git::discover_repo(&cwd).context("bulk needs a git repo for per-item worktrees")?;
 
     // Stage 4 — params: same-for-all or per-item.
     let per_answers = resolve_bulk_answers(&detected.client, &tickets, input.non_interactive)?;
@@ -524,7 +526,8 @@ pub fn run_forge_bulk_item(plan_path: &Path, headless: bool, dry: bool) -> Resul
     let worktree = plan.worktree.clone();
     let session_root = init_artifact_ctx(&worktree, &plan.session)?;
 
-    let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| worktree.clone()));
+    let shipped =
+        find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| worktree.clone()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
     let detected = resolve_client(

@@ -188,7 +188,10 @@ mod tests {
     fn outline_rust() {
         let src = "pub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\nstruct Beta {\n    n: u32,\n}\n";
         let o = outline("a.rs", src).unwrap();
-        let names: Vec<_> = o.iter().map(|d| (d.kind.as_str(), d.name.as_str())).collect();
+        let names: Vec<_> = o
+            .iter()
+            .map(|d| (d.kind.as_str(), d.name.as_str()))
+            .collect();
         assert!(names.contains(&("fn", "alpha")));
         assert!(names.contains(&("struct", "Beta")));
         let alpha = o.iter().find(|d| d.name == "alpha").unwrap();

@@ -81,8 +81,7 @@ pub fn prompt_parley_answers(
     skip_prompt: bool,
 ) -> Result<ParleyAnswers> {
     if let Some(raw) = from_json {
-        let mut a: ParleyAnswers =
-            serde_json::from_str(raw).context("parse parley --from-json")?;
+        let mut a: ParleyAnswers = serde_json::from_str(raw).context("parse parley --from-json")?;
         a.spawn_mode = normalize_spawn_mode(&a.spawn_mode)?;
         a.members = a.members.max(1);
         if comment_count > 0 {
@@ -107,10 +106,7 @@ pub fn prompt_parley_answers(
         .parley
         .default_evangelists
         .min(cfg.agents.max_evangelists);
-    let default_verifiers = cfg
-        .parley
-        .default_verifiers
-        .min(cfg.agents.max_evangelists);
+    let default_verifiers = cfg.parley.default_verifiers.min(cfg.agents.max_evangelists);
 
     if skip_prompt || !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         let spawn = if let Some(m) = spawn_mode_preset {
@@ -320,14 +316,12 @@ pub fn partition_comments(comments: &[ParleyComment], n: u32) -> Vec<Vec<String>
 }
 
 pub fn load_parley_plan(path: &Path) -> Result<ParleyPlan> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
 pub fn load_parley_comments(path: &Path) -> Result<ParleyCommentsFile> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -367,7 +361,10 @@ mod tests {
         let cfg: Config = toml::from_str(crate::config::DEFAULT_TOML).unwrap();
         let raw = r#"{"client":"claude","model":"opus","members":1,"spawn_mode":"isolated"}"#;
         let a = prompt_parley_answers(&cfg, "claude", "opus", 3, None, Some(raw), true).unwrap();
-        assert_eq!(a.verifiers, default_verifiers().min(cfg.agents.max_evangelists));
+        assert_eq!(
+            a.verifiers,
+            default_verifiers().min(cfg.agents.max_evangelists)
+        );
     }
 
     #[test]
@@ -382,11 +379,7 @@ mod tests {
 
     #[test]
     fn partition_caps_and_groups() {
-        let comments = vec![
-            c("a", "foo.rs"),
-            c("b", "foo.rs"),
-            c("c", "bar.rs"),
-        ];
+        let comments = vec![c("a", "foo.rs"), c("b", "foo.rs"), c("c", "bar.rs")];
         let buckets = partition_comments(&comments, 2);
         assert_eq!(buckets.len(), 2);
         let total: usize = buckets.iter().map(|b| b.len()).sum();

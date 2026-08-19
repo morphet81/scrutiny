@@ -71,9 +71,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     // authored changes — never pre-existing WIP or build/test artifacts.
     let base_pre_agents: WorktreeSnapshot = snapshot_worktree(&cwd).unwrap_or_default();
 
-    let shipped = find_shipped_default(
-        &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
-    );
+    let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
@@ -150,16 +148,32 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     init_fixes_file(&fixes_path, plan.pr_number)?;
 
     if !input.skip_agents {
-        // Non-headless: open each agent in a visible window (claude + tmux/zellij/macOS).
+        // Non-headless: open each agent in a visible window (claude/cursor + tmux/zellij/macOS).
         let term = resolve_terminal(cfg.headless, &detected.client, "parley");
         let agent_wall = crate::timeouts::get().parley_agent;
 
         if plan.spawn_mode == "team" {
             eprintln!("scrutiny parley: team lead…");
-            run_team_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
+            run_team_parley(
+                &cfg,
+                &detected,
+                &plan,
+                &comments,
+                &cwd,
+                term.as_ref(),
+                agent_wall,
+            )?;
         } else {
             eprintln!("scrutiny parley: isolated members…");
-            run_isolated_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
+            run_isolated_parley(
+                &cfg,
+                &detected,
+                &plan,
+                &comments,
+                &cwd,
+                term.as_ref(),
+                agent_wall,
+            )?;
         }
 
         // Verifier pass — both spawn modes, after fixes, before evangelist.
@@ -168,13 +182,29 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} verifier(s) check fixes…",
                 plan.verifiers
             );
-            run_verifier_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
+            run_verifier_parley(
+                &cfg,
+                &detected,
+                &plan,
+                &comments,
+                &cwd,
+                term.as_ref(),
+                agent_wall,
+            )?;
         }
 
         // Repair pass — re-implement threads left as stubs or rejected by the
         // verifier so failures never get posted as PR replies.
         if cfg.parley.repair {
-            run_parley_repair(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
+            run_parley_repair(
+                &cfg,
+                &detected,
+                &plan,
+                &comments,
+                &cwd,
+                term.as_ref(),
+                agent_wall,
+            )?;
         }
 
         // Evangelist verify pass — isolated only
@@ -183,7 +213,15 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
                 "scrutiny parley: {} evangelist(s) verify…",
                 plan.evangelists
             );
-            run_evangelist_parley(&cfg, &detected, &plan, &comments, &cwd, term.as_ref(), agent_wall)?;
+            run_evangelist_parley(
+                &cfg,
+                &detected,
+                &plan,
+                &comments,
+                &cwd,
+                term.as_ref(),
+                agent_wall,
+            )?;
         }
     }
 
@@ -217,7 +255,11 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             session_root: plan_path.parent().unwrap_or(&cwd),
             skip_prompts: input.non_interactive,
             client: &detected,
-            plan_model: cfg.resolve_agent_model(&detected.client, "parley_prepush_plan", &plan.model),
+            plan_model: cfg.resolve_agent_model(
+                &detected.client,
+                "parley_prepush_plan",
+                &plan.model,
+            ),
             fix_model: cfg.resolve_agent_model(&detected.client, "parley_push_fix", &plan.model),
             prepush_cmd: cfg.parley.prepush_cmd.clone(),
             prepush_fix_max_loops: cfg.parley.prepush_fix_max_loops,
@@ -413,7 +455,8 @@ fn run_isolated_parley(
         for id in &still_missing {
             let one = std::slice::from_ref(id);
             let slice = comments_for_ids(comments, one);
-            let prompt = build_member_prompt(&plan.comments_path, &plan.fixes_path, &slice, 1, false);
+            let prompt =
+                build_member_prompt(&plan.comments_path, &plan.fixes_path, &slice, 1, false);
             let label = format!("parley-retry#{id}");
             let out = run_headless(
                 client,
@@ -521,12 +564,7 @@ fn merge_member_outcome(
 /// Assigned ids that still lack a real (non-stub) entry.
 fn missing_real_ids(file: &crate::parley::fixes::ParleyFixesFile, ids: &[String]) -> Vec<String> {
     ids.iter()
-        .filter(|id| {
-            !file
-                .fixes
-                .iter()
-                .any(|f| &f.comment_id == *id && !f.stub)
-        })
+        .filter(|id| !file.fixes.iter().any(|f| &f.comment_id == *id && !f.stub))
         .cloned()
         .collect()
 }
@@ -546,8 +584,7 @@ fn run_team_parley(
 
     if let Some(ctx) = term {
         let sentinel = run_nonheadless(client, &model, cwd, &prompt, "parley-lead", ctx)?;
-        let missing =
-            wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
+        let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
                 "scrutiny parley: team lead window did not signal done within {}s — collecting partial fixes",
@@ -704,7 +741,15 @@ fn run_verify_agents(
     let wall = Duration::from_secs(wall_secs);
     for i in 0..count {
         let label = format!("{label_prefix}#{}", i + 1);
-        let out = run_headless(client, model, cwd, prompt, HeadlessKind::Parley, &label, wall)?;
+        let out = run_headless(
+            client,
+            model,
+            cwd,
+            prompt,
+            HeadlessKind::Parley,
+            &label,
+            wall,
+        )?;
         let mut file = load_fixes(Path::new(&plan.fixes_path))?;
         let entries = parse_fixes_from_agent_stdout(&out.stdout);
         if !entries.is_empty() {
@@ -755,21 +800,18 @@ fn build_member_prompt(
             "After fixing, do a clean-code / consistency pass on touched files before writing fixes.\n\n",
         );
     }
-    p.push_str(&format!("Comments file (full): {comments_path}\n"));
+    p.push_str(FIXES_PROTOCOL);
+    p.push_str(&format!("\nComments file (full): {comments_path}\n"));
     p.push_str(&format!("Fixes file to update: {fixes_path}\n\n"));
     p.push_str("## Assigned threads\n");
     push_threads(&mut p, slice);
-    p.push_str(FIXES_PROTOCOL);
     p
 }
 
 /// Render assigned/repair threads (id, location, author, body) into a prompt.
 fn push_threads(p: &mut String, slice: &[ParleyComment]) {
     for c in slice {
-        let line = c
-            .line
-            .map(|l| l.to_string())
-            .unwrap_or_else(|| "?".into());
+        let line = c.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
         p.push_str(&format!(
             "### Thread `{}` — {}:{} (@{})\n{}\n\n",
             c.id, c.path, line, c.author, c.body
@@ -794,16 +836,16 @@ fn build_repair_prompt(comments_path: &str, fixes_path: &str, slice: &[ParleyCom
     p.push_str(prepush::PREPUSH_OWNERSHIP);
     p.push_str(prepush::NO_ARTIFACTS);
     p.push('\n');
+    p.push_str(FIXES_PROTOCOL);
+    p.push_str(
+        "\nOverwrite each thread's fix entry with a REAL reply_body and correct `addressed` — \
+         remove any placeholder / failure text. Only set `addressed: false` for a genuine, \
+         explained won't-fix.\n\n",
+    );
     p.push_str(&format!("Comments file (full): {comments_path}\n"));
     p.push_str(&format!("Fixes file to update: {fixes_path}\n\n"));
     p.push_str("## Threads to repair\n");
     push_threads(&mut p, slice);
-    p.push_str(
-        "Overwrite each thread's fix entry with a REAL reply_body and correct `addressed` — \
-         remove any placeholder / failure text. Only set `addressed: false` for a genuine, \
-         explained won't-fix.\n\n",
-    );
-    p.push_str(FIXES_PROTOCOL);
     p
 }
 
@@ -889,10 +931,7 @@ fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFil
         p.push_str(&format!("### Member {}\n", i + 1));
         for id in bucket {
             if let Some(c) = comments.comments.iter().find(|c| &c.id == id) {
-                let line = c
-                    .line
-                    .map(|l| l.to_string())
-                    .unwrap_or_else(|| "?".into());
+                let line = c.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
                 p.push_str(&format!(
                     "- `{}` {}:{} — {}\n",
                     c.id,
@@ -1309,7 +1348,12 @@ fn run_parley_prepush_gate(
         if to_stage.is_empty() {
             eprintln!("scrutiny parley: fix agents made no committable change — re-checking");
         } else {
-            host_commit(cwd, session_root, "fix: repair pre-push failures", &to_stage)?;
+            host_commit(
+                cwd,
+                session_root,
+                "fix: repair pre-push failures",
+                &to_stage,
+            )?;
         }
     }
     unreachable!("loop returns green or bails on final attempt")
@@ -1443,8 +1487,7 @@ fn run_prepush_fix_agents(
 /// (no terminal echo — a spinner covers the wait).
 fn run_git_push_tee(cwd: &Path, args: &[&str], log_path: &Path) -> Result<PushAttempt> {
     if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
 
     let mut child = Command::new("git")

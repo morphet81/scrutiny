@@ -47,7 +47,12 @@ pub fn run_pr(input: PrCmdInput) -> Result<PathBuf> {
 
     preflight_branch(&cwd, &cfg, input.non_interactive)?;
 
-    let ticket = resolve_ticket(&cwd, input.ticket.as_deref(), input.source.as_deref(), input.non_interactive);
+    let ticket = resolve_ticket(
+        &cwd,
+        input.ticket.as_deref(),
+        input.source.as_deref(),
+        input.non_interactive,
+    );
 
     let (suggested_title, suggested_body, ticket_id) = match &ticket {
         Some(t) => {
@@ -114,9 +119,8 @@ fn push_need(has_upstream: bool, ahead_of_upstream: usize) -> PushNeed {
 /// Gate PR creation on branch state: no-commits (hard fail), dirty tree
 /// (confirm), and unpushed commits (confirm → push). See the plan for rules.
 fn preflight_branch(cwd: &Path, cfg: &Config, non_interactive: bool) -> Result<()> {
-    let interactive = !non_interactive
-        && std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal();
+    let interactive =
+        !non_interactive && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
 
     // 1) No commits vs base → fail early (skip if base can't be resolved).
     if let Ok(base) = git::resolve_base_branch(cwd, &cfg.git.base_candidates, None) {
@@ -160,10 +164,11 @@ fn preflight_branch(cwd: &Path, cfg: &Config, non_interactive: bool) -> Result<(
                         "Branch not pushed to origin. Push and continue?".to_string()
                     }
                     PushNeed::Ahead(n) => {
-                        let upstream = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string();
+                        let upstream =
+                            git_stdout(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+                                .unwrap_or_default()
+                                .trim()
+                                .to_string();
                         format!("{n} local commit(s) not pushed to {upstream}. Push and continue?")
                     }
                     PushNeed::None => unreachable!(),
@@ -201,7 +206,10 @@ fn resolve_ticket(
 
     // Branch gave nothing: reuse a ticket already fetched into .scrutiny/.
     if let Some(report) = cached_ticket(cwd) {
-        eprintln!("scrutiny pr: reusing ticket {} from .scrutiny (cached)", report.id);
+        eprintln!(
+            "scrutiny pr: reusing ticket {} from .scrutiny (cached)",
+            report.id
+        );
         return Some(report);
     }
 
@@ -334,10 +342,7 @@ mod tests {
 
     #[test]
     fn cached_ticket_prefers_branch_match_over_others() {
-        let picked = pick_cached_ticket(
-            vec![report("ABC-1"), report("NERO-531")],
-            "feat/nero-531",
-        );
+        let picked = pick_cached_ticket(vec![report("ABC-1"), report("NERO-531")], "feat/nero-531");
         assert_eq!(picked.map(|r| r.id), Some("NERO-531".into()));
     }
 

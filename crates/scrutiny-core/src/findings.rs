@@ -139,10 +139,7 @@ pub fn run_findings_init(input: FindingsInitInput) -> Result<(FindingsReport, Pa
         .as_ref()
         .map(|e| e.head.clone())
         .unwrap_or_else(|| "HEAD".into());
-    let base_ref = eval
-        .as_ref()
-        .map(|e| e.base.clone())
-        .unwrap_or_default();
+    let base_ref = eval.as_ref().map(|e| e.base.clone()).unwrap_or_default();
     let repo = eval
         .as_ref()
         .map(|e| e.repo.clone())
@@ -329,10 +326,7 @@ pub fn attach_pr_to_findings(
 }
 
 /// Prompt for PR number/URL when missing (interactive). Writes findings JSON if provided.
-pub fn prompt_pr_if_missing(
-    findings_path: &Path,
-    cwd: &Path,
-) -> Result<FindingsReport> {
+pub fn prompt_pr_if_missing(findings_path: &Path, cwd: &Path) -> Result<FindingsReport> {
     use std::io::{self, Write};
     let report = attach_pr_to_findings(findings_path, cwd, None)?;
     if report.pr_number.is_some() {
@@ -341,9 +335,7 @@ pub fn prompt_pr_if_missing(
     eprint!("No PR linked. Enter PR number/URL (empty = skip post): ");
     let _ = io::stderr().flush();
     let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .context("read PR")?;
+    io::stdin().read_line(&mut line).context("read PR")?;
     let pr = line.trim();
     if pr.is_empty() {
         return Ok(report);
@@ -352,10 +344,7 @@ pub fn prompt_pr_if_missing(
 }
 
 /// Findings shell with zero scan findings (resume from AI report without `--scan`).
-pub fn run_findings_init_empty(
-    cwd: &Path,
-    pr: Option<&str>,
-) -> Result<(FindingsReport, PathBuf)> {
+pub fn run_findings_init_empty(cwd: &Path, pr: Option<&str>) -> Result<(FindingsReport, PathBuf)> {
     let repo_ctx = crate::git::discover_repo(cwd)?;
     let (pr_number, pr_url, head_from_pr) = resolve_pr(cwd, pr)?;
     let head_oid = resolve_oid(cwd, head_from_pr.as_deref().unwrap_or("HEAD"))?;
@@ -550,7 +539,11 @@ pub fn run_findings_triage(
             .pack_path
             .as_deref()
             .filter(|p| !p.is_empty())
-            .or_else(|| ask.as_ref().map(|ctx| ctx.pack_hint).filter(|p| !p.is_empty()));
+            .or_else(|| {
+                ask.as_ref()
+                    .map(|ctx| ctx.pack_hint)
+                    .filter(|p| !p.is_empty())
+            });
         path_str.and_then(|p| read_json::<PackReport>(Path::new(p)).ok())
     };
 
@@ -564,7 +557,11 @@ pub fn run_findings_triage(
                 eprintln!();
                 match sev.as_str() {
                     "critical" => {
-                        eprintln!("{}## Critical{}", style_sev("critical", color), style_reset())
+                        eprintln!(
+                            "{}## Critical{}",
+                            style_sev("critical", color),
+                            style_reset()
+                        )
                     }
                     "warning" => {
                         eprintln!("{}## Warning{}", style_sev("warning", color), style_reset())
@@ -655,13 +652,8 @@ pub fn run_findings_triage(
                     };
 
                     let context = {
-                        let mut c = build_ask_context(
-                            f,
-                            cwd,
-                            &head_oid,
-                            &snapshot,
-                            loaded_pack.as_ref(),
-                        );
+                        let mut c =
+                            build_ask_context(f, cwd, &head_oid, &snapshot, loaded_pack.as_ref());
                         if !pack_hint.is_empty() {
                             c.push_str(&format!(
                                 "\nPack JSON: {pack_hint} (Read for additional detail if needed)\n"
@@ -669,8 +661,7 @@ pub fn run_findings_triage(
                         }
                         c
                     };
-                    let prompt =
-                        crate::agent_runner::build_ask_revise_prompt(&context, &question);
+                    let prompt = crate::agent_runner::build_ask_revise_prompt(&context, &question);
                     let out = crate::agent_runner::run_headless(
                         &client,
                         ask_model,
@@ -840,8 +831,7 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
             } else {
                 None
             }
-        })
-    {
+        }) {
         let rest = rest.trim();
         if rest.is_empty() {
             eprint!("  question: ");
@@ -868,7 +858,6 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
     }
     Ok(TriagePick::Ask(question))
 }
-
 
 fn print_finding_block(
     f: &TriageFinding,
@@ -1096,8 +1085,8 @@ fn style_sev(sev: &str, on: bool) -> &'static str {
         return "";
     }
     match sev {
-        "critical" => "\x1b[1;31m", // bold red
-        "warning" => "\x1b[1;33m",  // bold yellow
+        "critical" => "\x1b[1;31m",   // bold red
+        "warning" => "\x1b[1;33m",    // bold yellow
         "suggestion" => "\x1b[1;36m", // bold cyan
         _ => "\x1b[1m",
     }
@@ -1193,7 +1182,11 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub fn run_findings_resolve(findings_path: &Path, cwd: &Path, strict: bool) -> Result<(FindingsReport, PathBuf)> {
+pub fn run_findings_resolve(
+    findings_path: &Path,
+    cwd: &Path,
+    strict: bool,
+) -> Result<(FindingsReport, PathBuf)> {
     let mut report: FindingsReport = read_json(findings_path)?;
     let pack: Option<PackReport> = if let Some(p) = &report.pack_path {
         let path = Path::new(p);
@@ -1324,8 +1317,7 @@ pub fn run_findings_resolve(findings_path: &Path, cwd: &Path, strict: bool) -> R
                     if let Some(new_line) = re_anchor {
                         if (new_line as usize) <= lines.len() {
                             f.anchor.line = Some(new_line);
-                            f.anchor.line_text =
-                                Some(lines[(new_line as usize) - 1].to_string());
+                            f.anchor.line_text = Some(lines[(new_line as usize) - 1].to_string());
                         }
                         true
                     } else {
@@ -1399,7 +1391,11 @@ pub fn run_findings_validate(findings_path: &Path) -> Result<(FindingsReport, Pa
         if f.include != Some(true) {
             continue;
         }
-        if f.comment_body.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if f.comment_body
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             errs.push(format!("{}: comment_body required when include=true", f.id));
         }
         if !f.fix_options.is_empty() && f.chosen_option.is_none() {
@@ -1456,9 +1452,7 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
     run_findings_resolve(&input.findings_path, &input.cwd, input.strict)?;
     let (mut report, _) = run_findings_validate(&input.findings_path)?;
 
-    let pr = report
-        .pr_number
-        .context("pr_number required to post")?;
+    let pr = report.pr_number.context("pr_number required to post")?;
     let (owner, name) = split_repo(&report.repo)?;
 
     ensure_gh()?;
@@ -1538,12 +1532,8 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
                     "2".to_string()
                 }
             } else {
-                eprintln!(
-                    "  1) Add findings to pending review, then submit (drafts kept)"
-                );
-                eprintln!(
-                    "  2) Submit pending as-is, then post findings as a separate review"
-                );
+                eprintln!("  1) Add findings to pending review, then submit (drafts kept)");
+                eprintln!("  2) Submit pending as-is, then post findings as a separate review");
                 eprint!("Enter 1 or 2: ");
                 let _ = io::stderr().flush();
                 read_stdin_line()?
@@ -1728,7 +1718,10 @@ fn build_comment_payloads(report: &mut FindingsReport, strict: bool) -> Result<C
         f.status = "posted_body".into();
         f.fail_reason = None;
         if strict && f.severity == "critical" {
-            bail!("strict: critical {} has no path for file/line comment", f.id);
+            bail!(
+                "strict: critical {} has no path for file/line comment",
+                f.id
+            );
         }
     }
     Ok(CommentPayloads {
@@ -1772,7 +1765,10 @@ fn create_new_review(
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .context("new pending review missing node_id")?;
-    let pending = PendingReview { id: review_id, node_id };
+    let pending = PendingReview {
+        id: review_id,
+        node_id,
+    };
     finish_pending_with_comments(cwd, owner, name, pr, &pending, event, review_body, ctx)
 }
 
@@ -1850,28 +1846,16 @@ fn post_pull_request_review(
         if ok2 {
             return Ok((resp2, stripped.len() as u32));
         }
-        let err = resp2
-            .get("stderr")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let stdout = resp2
-            .get("stdout")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let err = resp2.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+        let stdout = resp2.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
         bail!(
             "gh api review failed (after stripping multilines). No body dump — fix anchors / PR head and re-run.\n{err}\n{stdout}\npayload: {}",
             payload_path.display()
         );
     }
 
-    let err = resp
-        .get("stderr")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let stdout = resp
-        .get("stdout")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let err = resp.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    let stdout = resp.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
     bail!(
         "gh api review failed. No body dump — line comments must attach on the PR diff.\n{err}\n{stdout}\npayload: {}",
         payload_path.display()
@@ -2029,19 +2013,9 @@ fn finish_pending_with_comments(
         "scrutiny post-comments: submitting pending #{} as {event}…",
         pending.id
     );
-    let resp = submit_review_event(
-        cwd,
-        owner,
-        name,
-        pr,
-        pending.id,
-        event,
-        Some(review_body),
-    )?;
+    let resp = submit_review_event(cwd, owner, name, pr, pending.id, event, Some(review_body))?;
     let posted = appended + skipped;
-    eprintln!(
-        "scrutiny post-comments: append ok — {posted} comment(s) submitted as {event}"
-    );
+    eprintln!("scrutiny post-comments: append ok — {posted} comment(s) submitted as {event}");
     Ok((resp, posted))
 }
 
@@ -2053,11 +2027,7 @@ mutation($input: AddPullRequestReviewThreadInput!) {
 }
 "#;
 
-fn add_pending_review_thread(
-    cwd: &Path,
-    review_node_id: &str,
-    comment: &Value,
-) -> Result<()> {
+fn add_pending_review_thread(cwd: &Path, review_node_id: &str, comment: &Value) -> Result<()> {
     let body = comment
         .get("body")
         .and_then(|b| b.as_str())
@@ -2192,8 +2162,7 @@ fn submit_review_event(
     event: &str,
     body: Option<&str>,
 ) -> Result<Value> {
-    let endpoint =
-        format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}/events");
+    let endpoint = format!("repos/{owner}/{name}/pulls/{pr}/reviews/{review_id}/events");
     let mut payload = json!({ "event": event });
     if let Some(b) = body.filter(|s| !s.is_empty()) {
         payload["body"] = json!(b);
@@ -2338,9 +2307,7 @@ fn finalize_post(
     report.review.posted = true;
     report.review.review_id = review_id;
     report.review.html_url = html_url.clone();
-    report.review.body = Some(ensure_ai_tag(
-        report.review.body.as_deref().unwrap_or(""),
-    ));
+    report.review.body = Some(ensure_ai_tag(report.review.body.as_deref().unwrap_or("")));
     write_json_pretty(findings_path, report)?;
 
     let result = PostResult {
@@ -2400,7 +2367,10 @@ fn included_counts(report: &FindingsReport) -> (u32, u32, u32) {
 fn format_fallback_bullet(f: &TriageFinding, body: &str) -> String {
     let path = f.anchor.path.as_deref().unwrap_or("?");
     let line = f.anchor.line.unwrap_or(0);
-    format!("- **{}** (`{path}:{line}`) — {}\n{body}\n", f.title, f.severity)
+    format!(
+        "- **{}** (`{path}:{line}`) — {}\n{body}\n",
+        f.title, f.severity
+    )
 }
 
 fn default_review_body(report: &FindingsReport) -> String {
@@ -2596,12 +2566,7 @@ fn fetch_pr_file_patches(
     Ok(map)
 }
 
-fn fetch_pr_head_oid(
-    cwd: &Path,
-    owner: &str,
-    name: &str,
-    pr: u64,
-) -> Result<Option<String>> {
+fn fetch_pr_head_oid(cwd: &Path, owner: &str, name: &str, pr: u64) -> Result<Option<String>> {
     let endpoint = format!("repos/{owner}/{name}/pulls/{pr}");
     let output = Command::new("gh")
         .args(["api", &endpoint, "-q", ".head.sha"])
@@ -2677,10 +2642,7 @@ fn resolve_pr(
     }
     let v: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
     let number = v.get("number").and_then(|n| n.as_u64());
-    let url = v
-        .get("url")
-        .and_then(|u| u.as_str())
-        .map(|s| s.to_string());
+    let url = v.get("url").and_then(|u| u.as_str()).map(|s| s.to_string());
     let head = v
         .get("headRefOid")
         .and_then(|h| h.as_str())
@@ -2694,7 +2656,14 @@ fn normalize_repo_name(repo: &str, cwd: &Path) -> Result<String> {
     }
     if command_exists("gh") {
         let output = Command::new("gh")
-            .args(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+            .args([
+                "repo",
+                "view",
+                "--json",
+                "nameWithOwner",
+                "-q",
+                ".nameWithOwner",
+            ])
             .current_dir(cwd)
             .output();
         if let Ok(output) = output {
@@ -2801,12 +2770,12 @@ mod tests {
         //  more     → new=12, old=12 (context)
         let patch = "@@ -10,3 +10,4 @@\n context\n-old\n+new\n more\n";
 
-        assert!(line_is_added(patch, 11));   // "+new" is added at new-side line 11
-        assert!(!line_is_added(patch, 10));  // context line — not added
-        assert!(!line_is_added(patch, 12));  // context line — not added
-        assert!(!line_is_added(patch, 99));  // out of range
+        assert!(line_is_added(patch, 11)); // "+new" is added at new-side line 11
+        assert!(!line_is_added(patch, 10)); // context line — not added
+        assert!(!line_is_added(patch, 12)); // context line — not added
+        assert!(!line_is_added(patch, 99)); // out of range
 
-        assert!(line_is_deleted(patch, 11));  // "-old" is deleted at old-side line 11
+        assert!(line_is_deleted(patch, 11)); // "-old" is deleted at old-side line 11
         assert!(!line_is_deleted(patch, 10)); // context line — not deleted
         assert!(!line_is_deleted(patch, 99)); // out of range
     }

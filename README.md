@@ -92,7 +92,7 @@ scrutiny parley --pr 42
 
 Flow: fetch unresolved threads → fix agents → verifier → optional evangelist → pre-push gate → commit + push → reply under each thread.
 
-Set `headless = false` to open each agent in a visible terminal (claude; tmux/zellij/macOS).
+Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
 Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Tmux non-bulk splits into the origin window (`$TMUX_PANE`).
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
@@ -141,7 +141,7 @@ base_candidates = ["develop", "main"]
 | Key | Default | Explanation |
 |-----|---------|-------------|
 | `default_client` | `"claude"` | AI client: `claude` \| `cursor` \| `codex` |
-| `headless` | `true` | `true` = capture agent stdout. `false` = visible terminal window (claude; tmux/zellij/Terminal/iTerm2). Applies to probe, forge, parley |
+| `headless` | `true` | `true` = capture agent stdout. `false` = visible terminal window (claude/cursor; tmux/zellij/Terminal/iTerm2). Codex stays headless. Applies to probe, forge, parley |
 | `caveman` | `true` | Inject caveman-ultra preamble + dialect into spawned-agent prompts. `false` or `SCRUTINY_NO_CAVEMAN=1` = plain English |
 | `force_client` | unset | Skip client prompt for `scrutiny probe` |
 | `force_spawn_mode` | unset | Skip spawn prompt: `isolated` \| `team`. Unset → prompt (default **isolated**) |

@@ -52,14 +52,7 @@ pub fn export_figma_designs(
 
         let inspect_out = slot.join("structure.txt");
         let inspect = Command::new("fcli")
-            .args([
-                "file",
-                "inspect",
-                "--url",
-                url,
-                "--depth",
-                "8",
-            ])
+            .args(["file", "inspect", "--url", url, "--depth", "8"])
             .current_dir(cwd)
             .output();
         match inspect {

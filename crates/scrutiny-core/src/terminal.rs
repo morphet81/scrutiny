@@ -1,7 +1,8 @@
 //! Detect the terminal surface and launch a visible agent window on it.
 //!
-//! Used by non-headless parley (`headless = false`): each agent runs in its own
-//! visible window/pane in claude auto mode instead of a captured headless child.
+//! Used by non-headless parley/probe/forge (`headless = false`): each agent
+//! runs in its own visible window/pane (claude/cursor) instead of a captured
+//! headless child.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -120,19 +121,25 @@ fn probe_zellij_caps() -> ZellijCaps {
         .args(["run", "--help"])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)
+        })
         .unwrap_or_default();
     let new_pane_help = Command::new("zellij")
         .args(["action", "new-pane", "--help"])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)
+        })
         .unwrap_or_default();
     let action_help = Command::new("zellij")
         .args(["action", "--help"])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)
+        })
         .unwrap_or_default();
     ZellijCaps {
         near_current_pane: run_help.contains("near-current-pane")
@@ -174,19 +181,25 @@ pub fn detect_from_env(
     }
 }
 
+/// Clients that can run in a visible tmux/zellij/iTerm2/Terminal.app pane.
+/// Codex stays headless (`codex exec`).
+pub fn supports_visible_terminal(client: &str) -> bool {
+    matches!(client, "claude" | "cursor")
+}
+
 /// Decide the non-headless terminal surface for a spawned agent, or `None` to
 /// run headless. Captures origin tab/window anchors for multiplexers.
 ///
-/// `None` when: `headless = true`; the client is not claude (non-headless
-/// supports claude only); or no supported surface is detected.
+/// `None` when: `headless = true`; the client is not claude/cursor (Codex stays
+/// headless); or no supported surface is detected.
 pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<ResolvedTerminal> {
     if headless {
         return None;
     }
     match detect_terminal() {
-        Some(_) if client != "claude" => {
+        Some(_) if !supports_visible_terminal(client) => {
             eprintln!(
-                "scrutiny {tool}: headless=false but non-headless mode supports claude only \
+                "scrutiny {tool}: headless=false but non-headless mode supports claude/cursor only \
                  (got {client}) — running headless"
             );
             None
@@ -414,15 +427,17 @@ pub fn launch_agent_window(ctx: &ResolvedTerminal, label: &str, script_path: &Pa
     let run_cmd = format!("bash '{script}'");
     match ctx.kind {
         TerminalContext::Tmux => {
-            let target = ctx
-                .tmux
-                .as_ref()
-                .map(|a| a.target.as_str())
-                .unwrap_or("");
+            let target = ctx.tmux.as_ref().map(|a| a.target.as_str()).unwrap_or("");
             let status = if target.is_empty() {
                 // Fallback: dedicated detached session (legacy).
                 Command::new("tmux")
-                    .args(["new-session", "-d", "-s", &tmux_session_name(label), &run_cmd])
+                    .args([
+                        "new-session",
+                        "-d",
+                        "-s",
+                        &tmux_session_name(label),
+                        &run_cmd,
+                    ])
                     .status()
                     .context("spawn tmux new-session")?
             } else {
@@ -440,7 +455,9 @@ pub fn launch_agent_window(ctx: &ResolvedTerminal, label: &str, script_path: &Pa
             }
             Ok(())
         }
-        TerminalContext::Zellij => launch_zellij_in_origin(ctx.zellij.as_ref(), label, &script, true),
+        TerminalContext::Zellij => {
+            launch_zellij_in_origin(ctx.zellij.as_ref(), label, &script, true)
+        }
         TerminalContext::AppleTerminal => {
             let status = Command::new("osascript")
                 .args([
@@ -491,7 +508,8 @@ fn launch_zellij_in_origin(
     if let Some(a) = anchor {
         if caps.tab_id {
             if let Some(id) = a.tab_id {
-                let args = zellij_new_pane_tab_id_argv(id, label, script, close_on_exit, caps.no_focus);
+                let args =
+                    zellij_new_pane_tab_id_argv(id, label, script, close_on_exit, caps.no_focus);
                 let status = zellij_cmd(&args)
                     .status()
                     .context("spawn zellij action new-pane --tab-id")?;
@@ -525,9 +543,7 @@ fn launch_zellij_in_origin(
 }
 
 fn run_zellij_argv(args: &[String]) -> Result<()> {
-    let status = zellij_cmd(args)
-        .status()
-        .context("spawn zellij")?;
+    let status = zellij_cmd(args).status().context("spawn zellij")?;
     if !status.success() {
         bail!("zellij exited with {status}");
     }
@@ -587,7 +603,8 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
             })
         }
         TerminalContext::ITerm2 => {
-            let id = osascript_capture(&iterm_open_script(key, &cwd)).context("iTerm2 new window")?;
+            let id =
+                osascript_capture(&iterm_open_script(key, &cwd)).context("iTerm2 new window")?;
             Ok(ItemSurface::ITerm2 { window_id: id })
         }
         TerminalContext::AppleTerminal => {
@@ -642,22 +659,34 @@ pub fn launch_agent_in_surface(
         ItemSurface::Tmux { session } => {
             run_argv("tmux", &tmux_launch_argv(session, &run_cmd)).context("tmux split-window")?;
             // Best-effort pane title + readable layout (ignore failures).
-            let _ = run_argv("tmux", &["select-pane", "-t", session, "-T", role].map(String::from));
-            let _ = run_argv("tmux", &["select-layout", "-t", session, "tiled"].map(String::from));
+            let _ = run_argv(
+                "tmux",
+                &["select-pane", "-t", session, "-T", role].map(String::from),
+            );
+            let _ = run_argv(
+                "tmux",
+                &["select-layout", "-t", session, "tiled"].map(String::from),
+            );
             Ok(())
         }
         ItemSurface::Zellij { tab, tab_id } => {
             let caps = zellij_caps();
             if caps.tab_id {
                 if let Some(id) = tab_id {
-                    let args =
-                        zellij_new_pane_tab_id_argv(*id, role, &script, close_on_exit, caps.no_focus);
+                    let args = zellij_new_pane_tab_id_argv(
+                        *id,
+                        role,
+                        &script,
+                        close_on_exit,
+                        caps.no_focus,
+                    );
                     return run_zellij_argv(&args).context("zellij new-pane --tab-id");
                 }
             }
             let _g = focus_guard();
             run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name")?;
-            run_zellij_argv(&zellij_run_argv(role, &script, close_on_exit)).context("zellij run")?;
+            run_zellij_argv(&zellij_run_argv(role, &script, close_on_exit))
+                .context("zellij run")?;
             Ok(())
         }
         ItemSurface::ITerm2 { window_id } => {
@@ -669,15 +698,24 @@ pub fn launch_agent_in_surface(
                 };
                 return launch_agent_window(&fallback, role, script_path);
             }
-            run_argv("osascript", &["-e".to_string(), iterm_launch_script(window_id, role, &run_cmd)])
-                .context("iTerm2 new tab")
+            run_argv(
+                "osascript",
+                &[
+                    "-e".to_string(),
+                    iterm_launch_script(window_id, role, &run_cmd),
+                ],
+            )
+            .context("iTerm2 new tab")
         }
         ItemSurface::Apple { .. } => {
             // Terminal.app has no clean create-tab-in-window verb — best-effort
             // new window per agent, titled by role.
             let _g = focus_guard();
-            run_argv("osascript", &["-e".to_string(), apple_launch_script(role, &run_cmd)])
-                .context("Terminal.app window")
+            run_argv(
+                "osascript",
+                &["-e".to_string(), apple_launch_script(role, &run_cmd)],
+            )
+            .context("Terminal.app window")
         }
     }
 }
@@ -714,7 +752,10 @@ pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
             }
             run_argv(
                 "osascript",
-                &["-e".to_string(), format!("tell application \"iTerm\" to close (window id {window_id})")],
+                &[
+                    "-e".to_string(),
+                    format!("tell application \"iTerm\" to close (window id {window_id})"),
+                ],
             )
             .context("iTerm2 close window")
         }
@@ -725,7 +766,10 @@ pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
             let _g = focus_guard();
             run_argv(
                 "osascript",
-                &["-e".to_string(), format!("tell application \"Terminal\" to close window id {window_id}")],
+                &[
+                    "-e".to_string(),
+                    format!("tell application \"Terminal\" to close window id {window_id}"),
+                ],
             )
             .context("Terminal.app close window")
         }
@@ -759,28 +803,42 @@ fn osascript_capture(script: &str) -> Result<String> {
 }
 
 fn tmux_open_argv(session: &str, cwd: &str) -> Vec<String> {
-    ["new-session", "-d", "-s", session, "-c", cwd].map(String::from).to_vec()
+    ["new-session", "-d", "-s", session, "-c", cwd]
+        .map(String::from)
+        .to_vec()
 }
 
 fn tmux_launch_argv(session: &str, run_cmd: &str) -> Vec<String> {
-    ["split-window", "-t", session, run_cmd].map(String::from).to_vec()
+    ["split-window", "-t", session, run_cmd]
+        .map(String::from)
+        .to_vec()
 }
 
 /// Non-bulk: split into the origin session:window.
 pub fn tmux_split_origin_argv(target: &str, run_cmd: &str) -> Vec<String> {
-    ["split-window", "-t", target, run_cmd].map(String::from).to_vec()
+    ["split-window", "-t", target, run_cmd]
+        .map(String::from)
+        .to_vec()
 }
 
 /// Send an explicit `cd` into the session's (placeholder) pane after startup, so a
 /// profile that `cd`s during shell init cannot leave it outside the worktree.
 fn tmux_cd_argv(session: &str, cwd: &str) -> Vec<String> {
-    ["send-keys", "-t", session, &format!("cd '{cwd}'; clear"), "Enter"]
-        .map(String::from)
-        .to_vec()
+    [
+        "send-keys",
+        "-t",
+        session,
+        &format!("cd '{cwd}'; clear"),
+        "Enter",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
-    ["action", "new-tab", "--name", tab, "--cwd", cwd].map(String::from).to_vec()
+    ["action", "new-tab", "--name", tab, "--cwd", cwd]
+        .map(String::from)
+        .to_vec()
 }
 
 fn zellij_goto_argv(tab: &str) -> Vec<String> {
@@ -913,6 +971,15 @@ mod tests {
     #[test]
     fn resolve_terminal_headless_is_none() {
         assert!(resolve_terminal(true, "claude", "probe").is_none());
+        assert!(resolve_terminal(true, "cursor", "probe").is_none());
+    }
+
+    #[test]
+    fn supports_visible_terminal_claude_and_cursor() {
+        assert!(supports_visible_terminal("claude"));
+        assert!(supports_visible_terminal("cursor"));
+        assert!(!supports_visible_terminal("codex"));
+        assert!(!supports_visible_terminal("unknown"));
     }
 
     #[test]
@@ -935,7 +1002,13 @@ mod tests {
     fn tmux_cd_argv_sends_cd_and_enter() {
         assert_eq!(
             tmux_cd_argv("nero-8729", "/tmp/wt"),
-            vec!["send-keys", "-t", "nero-8729", "cd '/tmp/wt'; clear", "Enter"]
+            vec![
+                "send-keys",
+                "-t",
+                "nero-8729",
+                "cd '/tmp/wt'; clear",
+                "Enter"
+            ]
         );
     }
 
@@ -943,7 +1016,15 @@ mod tests {
     fn zellij_run_argv_toggles_close_on_exit() {
         assert_eq!(
             zellij_run_argv("developer", "/tmp/s.sh", true),
-            vec!["run", "--close-on-exit", "--name", "developer", "--", "bash", "/tmp/s.sh"]
+            vec![
+                "run",
+                "--close-on-exit",
+                "--name",
+                "developer",
+                "--",
+                "bash",
+                "/tmp/s.sh"
+            ]
         );
         assert_eq!(
             zellij_run_argv("developer", "/tmp/s.sh", false),

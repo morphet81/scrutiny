@@ -63,7 +63,7 @@ Many tickets in one run, each on its own branch + worktree, run concurrently.
 - Validate all (fetch + complexity), then ask **same settings for all** or **per-item** (same questions as single forge).
 - Per item: new branch + git worktree `<type>-<projectkey>-<number>` (e.g. `feat-nero-8729`).
 - Concurrency cap `forge.bulk_concurrency` (default **3**); override `--concurrency <N>`.
-- Non-headless (claude + tmux/zellij/iTerm2/Terminal.app): each item = own terminal container named by ticket key; panes named by role (PO/developer/tester/reviewer/evangelist/tdd-plan/implement) in that item's worktree; TDD plan validated in that item's pane.
+- Non-headless (claude/cursor + tmux/zellij/iTerm2/Terminal.app): each item = own terminal container named by ticket key; panes named by role (PO/developer/tester/reviewer/evangelist/tdd-plan/implement) in that item's worktree; TDD plan validated in that item's pane.
 - Ship step (confirm commit subject, PR title/body, draft PR) serialized on main terminal, one item at a time.
 - Requires a git repo. tmux most reliable; Terminal.app best-effort.
 

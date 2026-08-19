@@ -253,10 +253,8 @@ fn count_ac(description: &str) -> u32 {
 }
 
 fn count_numbered_under_ac_heading(description: &str) -> u32 {
-    let ac_heading = Regex::new(
-        r"(?i)^#+\s*(acceptance criteria?|requirements?|criteria|ac)\b",
-    )
-    .ok();
+    let ac_heading =
+        Regex::new(r"(?i)^#+\s*(acceptance criteria?|requirements?|criteria|ac)\b").ok();
     let other_heading = Regex::new(r"^#+\s+\w").ok();
     let numbered = Regex::new(r"^\d+\.\s+\S").ok();
 
@@ -298,9 +296,7 @@ fn keyword_hits(text: &str, keywords: &[String]) -> u32 {
         .filter(|kw| {
             let escaped = regex::escape(&kw.to_ascii_lowercase());
             let pat = format!(r"(?i)\b{escaped}\b");
-            Regex::new(&pat)
-                .ok()
-                .map_or(false, |re| re.is_match(text))
+            Regex::new(&pat).ok().map_or(false, |re| re.is_match(text))
         })
         .count() as u32
 }
@@ -374,8 +370,7 @@ mod tests {
             - [ ] Performance within 10% of baseline\n\
             - [ ] Security audit passed\n\
             Refactor the auth system across all microservices. Migrate to the new schema.";
-        let (tier, score) =
-            tier_for("Refactor auth across microservices", desc);
+        let (tier, score) = tier_for("Refactor auth across microservices", desc);
         assert!(
             matches!(tier, Tier::L | Tier::Xl),
             "expected L/XL got {tier} score={score}"
@@ -393,7 +388,10 @@ mod tests {
 
     #[test]
     fn count_ac_checkbox() {
-        assert_eq!(count_ac("Do the thing.\n- [ ] Step one\n- [ ] Step two\n- [x] Done"), 3);
+        assert_eq!(
+            count_ac("Do the thing.\n- [ ] Step one\n- [ ] Step two\n- [x] Done"),
+            3
+        );
     }
 
     #[test]
@@ -413,15 +411,32 @@ mod tests {
     fn trivial_keywords_reduce_score() {
         let (_, score_normal) = tier_for("Add new feature", "Implement a new dashboard widget");
         let (_, score_trivial) = tier_for("Fix typo", "typo in wording, very minor change");
-        assert!(score_trivial < score_normal, "{score_trivial} should be < {score_normal}");
+        assert!(
+            score_trivial < score_normal,
+            "{score_trivial} should be < {score_normal}"
+        );
     }
 
     #[test]
     fn figma_bump() {
-        let (_, s_no_figma, _) =
-            estimate_ticket_tier("UI change", "Update the button", &[], 0, 0, &json!({}), &cfg());
-        let (_, s_with_figma, _) =
-            estimate_ticket_tier("UI change", "Update the button", &[], 0, 1, &json!({}), &cfg());
+        let (_, s_no_figma, _) = estimate_ticket_tier(
+            "UI change",
+            "Update the button",
+            &[],
+            0,
+            0,
+            &json!({}),
+            &cfg(),
+        );
+        let (_, s_with_figma, _) = estimate_ticket_tier(
+            "UI change",
+            "Update the button",
+            &[],
+            0,
+            1,
+            &json!({}),
+            &cfg(),
+        );
         assert!(s_with_figma > s_no_figma);
     }
 }

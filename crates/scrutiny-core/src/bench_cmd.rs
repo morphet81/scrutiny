@@ -99,10 +99,7 @@ pub fn run_bench(input: BenchCmdInput) -> Result<PathBuf> {
     fs::create_dir_all(&input.out)
         .with_context(|| format!("create bench out {}", input.out.display()))?;
 
-    let model = input
-        .model
-        .clone()
-        .unwrap_or_else(|| "sonnet".to_string());
+    let model = input.model.clone().unwrap_or_else(|| "sonnet".to_string());
 
     let workloads: Vec<BenchWorkload> = match input.workload {
         BenchWorkload::Both => vec![BenchWorkload::Probe, BenchWorkload::Forge],
@@ -115,7 +112,9 @@ pub fn run_bench(input: BenchCmdInput) -> Result<PathBuf> {
         for arm in &input.arms {
             let label = format!("{} / {}", wl_name(wl), arm.as_str());
             eprintln!("scrutiny bench: run {label}…");
-            let arm_dir = input.out.join(format!("arm-{}-{}", wl_name(wl), arm.as_str()));
+            let arm_dir = input
+                .out
+                .join(format!("arm-{}-{}", wl_name(wl), arm.as_str()));
             fs::create_dir_all(&arm_dir)?;
 
             let started = Instant::now();
@@ -223,12 +222,7 @@ fn clear_arm_env() {
     std::env::remove_var("SCRUTINY_BENCH_SKILL_PREAMBLE");
 }
 
-fn run_probe_arm(
-    input: &BenchCmdInput,
-    _arm: BenchArm,
-    cwd: &Path,
-    model: &str,
-) -> Result<()> {
+fn run_probe_arm(input: &BenchCmdInput, _arm: BenchArm, cwd: &Path, model: &str) -> Result<()> {
     // All arms use the same orchestrated probe path so pack/plan match.
     // Style + skill preamble differ via env (inject_overrides).
     let from_json = input.from_json.clone().unwrap_or_else(|| {
@@ -269,12 +263,7 @@ fn run_probe_arm(
     Ok(())
 }
 
-fn run_forge_arm(
-    input: &BenchCmdInput,
-    _arm: BenchArm,
-    cwd: &Path,
-    model: &str,
-) -> Result<()> {
+fn run_forge_arm(input: &BenchCmdInput, _arm: BenchArm, cwd: &Path, model: &str) -> Result<()> {
     let from_json = input.forge_from_json.clone().unwrap_or_else(|| {
         serde_json::json!({
             "client": "claude",
@@ -427,8 +416,7 @@ fn print_table(report: &BenchReport) {
                 if base == 0 {
                     "n/a".into()
                 } else {
-                    let delta =
-                        (a.usage.total() as f64 - base as f64) * 100.0 / base as f64;
+                    let delta = (a.usage.total() as f64 - base as f64) * 100.0 / base as f64;
                     format!("{delta:+.1}%")
                 }
             } else {

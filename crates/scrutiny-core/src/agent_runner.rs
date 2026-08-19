@@ -13,12 +13,14 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::paths::{artifact_path_unique, temp_artifact_path, write_json_pretty};
+use crate::paths::{artifact_path, artifact_path_unique, temp_artifact_path, write_json_pretty};
 use crate::plan::ConfirmedPlan;
 use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
-use crate::terminal::{launch_agent_in_surface, launch_agent_window, ItemSurface, ResolvedTerminal};
+use crate::terminal::{
+    launch_agent_in_surface, launch_agent_window, ItemSurface, ResolvedTerminal,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessKind {
@@ -451,22 +453,11 @@ pub fn run_headless(
 
     match client.client.as_str() {
         "cursor" => {
-            cmd.arg("-p")
-                .arg("--trust")
-                .arg("--output-format")
-                .arg("json")
-                .arg("--model")
-                .arg(model)
-                .arg("--workspace")
-                .arg(cwd);
-            match kind {
-                HeadlessKind::Isolated
-                | HeadlessKind::Consolidate
-                | HeadlessKind::Ask
-                | HeadlessKind::Text => {
-                    cmd.arg("--mode").arg("ask");
-                }
-                HeadlessKind::TeamLead | HeadlessKind::Forge | HeadlessKind::Parley => {}
+            if model.eq_ignore_ascii_case("auto") {
+                eprintln!("scrutiny: cursor model auto — omitting --model (CLI default)");
+            }
+            for arg in cursor_headless_flags(model, cwd, kind) {
+                cmd.arg(arg);
             }
             cmd.arg(prompt);
         }
@@ -576,12 +567,14 @@ pub fn run_headless(
         match child.try_wait().context("wait agent child")? {
             Some(status) => break status.code().unwrap_or(1),
             None => {
-                if should_kill_for_no_stdout(
-                    got_stdout.load(Ordering::Relaxed),
-                    started.elapsed(),
-                    first_output_secs,
-                    wall,
-                ) {
+                if applies_first_output_kill(&client.client)
+                    && should_kill_for_no_stdout(
+                        got_stdout.load(Ordering::Relaxed),
+                        started.elapsed(),
+                        first_output_secs,
+                        wall,
+                    )
+                {
                     eprintln!(
                         "scrutiny: timeout {label} after {}s — no stdout from model `{model}` \
                          (headless likely hung / unsupported); killing",
@@ -676,8 +669,8 @@ pub fn run_headless(
     })
 }
 
-/// Launch a claude agent in a visible terminal window (auto permission mode) and
-/// return the completion-sentinel path the host should poll. Claude only.
+/// Launch a claude/cursor agent in a visible terminal window and return the
+/// completion-sentinel path the host should poll.
 ///
 /// The agent writes its results to disk (parley-fixes.json) as usual; the host
 /// collects from disk after the sentinel appears. The window stays open for the
@@ -737,12 +730,6 @@ fn build_agent_script(
     prompt: &str,
     label: &str,
 ) -> Result<(PathBuf, PathBuf)> {
-    if client.client != "claude" {
-        bail!(
-            "non-headless mode supports claude only (got {})",
-            client.client
-        );
-    }
     let sentinel = artifact_path_unique("agent-done");
     let _ = fs::remove_file(&sentinel); // clear any stale marker
 
@@ -757,31 +744,82 @@ fn build_agent_script(
     fs::write(&prompt_path, full_prompt.as_bytes())
         .with_context(|| format!("write {}", prompt_path.display()))?;
 
-    // Auto mode where the model supports it; otherwise fall back to interactive
-    // (the visible pane lets the user approve) and warn once.
-    let perm_flag = if model_supports_auto(model) {
-        "--permission-mode auto"
-    } else {
-        disclose_no_auto_once(model, false);
-        "--permission-mode default"
-    };
+    let invoke = nonheadless_invoke_line(&client.client, &client.binary, model, cwd, &prompt_path)?;
 
     let script_path = artifact_path_unique("agent-script");
     let script = format!(
         "#!/usr/bin/env bash\ncd '{cwd}'\n\
-         '{binary}' {perm_flag} --model '{model}' \"$(cat '{prompt}')\"\n\
+         {invoke}\n\
          code=$?\n\
          if [ \"$code\" -eq 0 ]; then exit 0; fi\n\
          echo \"scrutiny: agent '{label}' failed (exit $code); pane kept open for inspection\"\n\
          exec bash\n",
         cwd = cwd.display(),
-        binary = client.binary.display(),
-        prompt = prompt_path.display(),
         label = label,
     );
     fs::write(&script_path, script.as_bytes())
         .with_context(|| format!("write {}", script_path.display()))?;
     Ok((sentinel, script_path))
+}
+
+/// Shell command that starts the agent in a visible pane (no shebang).
+pub(crate) fn nonheadless_invoke_line(
+    client: &str,
+    binary: &Path,
+    model: &str,
+    cwd: &Path,
+    prompt_path: &Path,
+) -> Result<String> {
+    let binary = binary.display();
+    let prompt = prompt_path.display();
+    match client {
+        "claude" => {
+            let perm_flag = if model_supports_auto(model) {
+                "--permission-mode auto"
+            } else {
+                disclose_no_auto_once(model, false);
+                "--permission-mode default"
+            };
+            Ok(format!(
+                "'{binary}' {perm_flag} --model '{model}' \"$(cat '{prompt}')\""
+            ))
+        }
+        "cursor" => {
+            let cwd = cwd.display();
+            Ok(format!(
+                "'{binary}' --trust --force --model '{model}' --workspace '{cwd}' \"$(cat '{prompt}')\""
+            ))
+        }
+        other => bail!("non-headless mode supports claude and cursor only (got {other})"),
+    }
+}
+
+/// Headless Cursor flags after the binary (prompt is appended by the caller).
+/// `--model auto` is omitted: Cursor `-p` has no documented Auto picker.
+pub(crate) fn cursor_headless_flags(model: &str, cwd: &Path, kind: HeadlessKind) -> Vec<String> {
+    let mut args = vec![
+        "-p".into(),
+        "--trust".into(),
+        "--output-format".into(),
+        "json".into(),
+    ];
+    if !model.eq_ignore_ascii_case("auto") {
+        args.push("--model".into());
+        args.push(model.to_string());
+    }
+    args.push("--workspace".into());
+    args.push(cwd.display().to_string());
+    match kind {
+        HeadlessKind::Isolated
+        | HeadlessKind::Consolidate
+        | HeadlessKind::Ask
+        | HeadlessKind::Text => {
+            args.push("--mode".into());
+            args.push("ask".into());
+        }
+        HeadlessKind::TeamLead | HeadlessKind::Forge | HeadlessKind::Parley => {}
+    }
+    args
 }
 
 /// Poll until every sentinel file exists or the wall clock elapses.
@@ -802,11 +840,7 @@ pub fn wait_for_sentinels_cancellable(
     let start = std::time::Instant::now();
     let mut last_tick = start;
     loop {
-        let missing: Vec<PathBuf> = sentinels
-            .iter()
-            .filter(|s| !s.exists())
-            .cloned()
-            .collect();
+        let missing: Vec<PathBuf> = sentinels.iter().filter(|s| !s.exists()).cloned().collect();
         if missing.is_empty() {
             return Vec::new();
         }
@@ -828,9 +862,9 @@ pub fn wait_for_sentinels_cancellable(
     }
 }
 
-/// Extract human-readable error from Claude `--output-format json` envelope.
 /// Whether to kill a headless child that has produced no stdout yet.
 /// `first_output_secs == 0` disables. Cap at `wall` so wall timeout still wins.
+/// Cursor skips this kill at the spawn loop (JSON is buffered until done).
 pub fn should_kill_for_no_stdout(
     got_stdout: bool,
     elapsed: Duration,
@@ -842,6 +876,24 @@ pub fn should_kill_for_no_stdout(
     }
     let limit = Duration::from_secs(first_output_secs).min(wall);
     elapsed >= limit
+}
+
+/// Cursor `--output-format json` buffers until done — empty stdout is normal.
+/// Wall timeout still applies.
+pub(crate) fn applies_first_output_kill(client: &str) -> bool {
+    client != "cursor"
+}
+
+/// Client-specific login hint when every isolated headless agent fails.
+pub(crate) fn isolated_all_failed_hint(client: &str) -> &'static str {
+    match client {
+        "cursor" => "Hint (cursor): run `agent login`, or set CURSOR_API_KEY.",
+        "codex" => "Hint (codex): run `codex login` or check Codex auth.",
+        _ => {
+            "Hint (claude): run `claude` once and /login, or set ANTHROPIC_API_KEY. \
+             Do not use SCRUTINY_CLAUDE_BARE without an API key."
+        }
+    }
 }
 
 pub(crate) fn claude_error_message(stdout: &str) -> Option<String> {
@@ -1012,11 +1064,7 @@ pub fn build_isolated_prompt(
     };
     let header = format!("Scrutiny {role} specialist. ISOLATED mode. No subagents.");
     let body = crate::caveman::dialect(
-        r#"Pack: `{pack}`
-Prefer pack.md sibling if present (same stem). Paths:
-{paths_list}
-
-## Context policy (save tokens)
+        r#"## Context policy (save tokens)
 
 Tier 0 (default): pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
 Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path (or exact fetch_cmd). Prefer Read over Bash.
@@ -1041,12 +1089,13 @@ Rules:
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
 {policy}
-"#,
-        r#"Pack: `{pack}`
+
+## Pack (your data)
+Pack: `{pack}`
 Prefer pack.md sibling if present (same stem). Paths:
 {paths_list}
-
-## Context policy (graduated — save tokens)
+"#,
+        r#"## Context policy (graduated — save tokens)
 
 Tier 0 (default): use pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
 Tier 1: if pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths`, you MAY Read that path (or run that exact fetch_cmd). Prefer Read over Bash.
@@ -1071,6 +1120,11 @@ Rules:
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
 {policy}
+
+## Pack (your data)
+Pack: `{pack}`
+Prefer pack.md sibling if present (same stem). Paths:
+{paths_list}
 "#,
     );
     // Templates use `{…}` placeholders; double-brace JSON stays as `{{` until one replace pass.
@@ -1106,9 +1160,7 @@ pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String 
         let n = plan.reviewers;
         let brief = build_isolated_prompt("reviewer", pack_path, &[], plan);
         let howto = spawn_reviewers.replace("{n}", &n.to_string());
-        member_briefs.push_str(&format!(
-            "\n### reviewer × {n}\n{howto}```\n{brief}\n```\n"
-        ));
+        member_briefs.push_str(&format!("\n### reviewer × {n}\n{howto}```\n{brief}\n```\n"));
     }
 
     if plan.evangelists > 0 {
@@ -1174,6 +1226,14 @@ pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String 
     format!(
         r#"{header}
 
+{ops}
+
+Output: JSON ONLY.
+{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
+
+Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
+{policy}
+
 Pack: `{pack}`
 Team size (effective counts — honor exactly):
 - reviewers: {}
@@ -1187,14 +1247,6 @@ Team size (effective counts — honor exactly):
 Do **NOT** invent alternate system prompts for teammates.
 When you spawn each member, the spawn message body MUST be the matching template below (verbatim), only adjusting the Paths section for reviewers as noted.
 {member_briefs}
-
-{ops}
-
-Output: JSON ONLY.
-{{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
-
-Every finding: path + line on pack unified diff. Clean: {{"findings":[]}}.
-{policy}
 "#,
         plan.reviewers,
         plan.evangelists,
@@ -1235,12 +1287,7 @@ pub fn build_consolidation_prompt(findings_json: &str, pack_path: &Path) -> Stri
     format!(
         r#"{header}
 
-Pack (reference only — Read to disambiguate a duplicate if needed): `{pack}`
-
 {rules}
-
-## Input findings
-{findings}
 
 ## Output
 JSON ONLY (no prose outside JSON):
@@ -1248,6 +1295,11 @@ JSON ONLY (no prose outside JSON):
 
 Nothing to merge → return the input findings unchanged. Empty input → {{"findings":[]}}.
 {policy}
+
+Pack (reference only — Read to disambiguate a duplicate if needed): `{pack}`
+
+## Input findings
+{findings}
 "#,
         header = header,
         pack = pack_path.display(),
@@ -1284,14 +1336,14 @@ pub fn build_ask_revise_prompt(context: &str, question: &str) -> String {
     );
     format!(
         "{intro}\n\n\
-         Context (includes file diff and code window — answer from it; Read only if strictly necessary):\n\
-         {context}\n\n\
-         Question:\n{question}\n\n\
          Output: JSON ONLY (no prose outside JSON):\n\
          {{\"answer\":\"...\",\"title\":\"...\",\"explanation\":\"...\",\"proposed_fix\":\"...\",\"fix_options\":[],\
 \"path\":\"rel/path\",\"line\":1}}\n\
          {rules}\
-         {policy}\n",
+         {policy}\n\n\
+         Context (includes file diff and code window — answer from it; Read only if strictly necessary):\n\
+         {context}\n\n\
+         Question:\n{question}\n",
         intro = intro,
         context = context,
         question = question,
@@ -1371,7 +1423,9 @@ fn consolidate_findings(
     let findings_json = match serde_json::to_string(&serde_json::json!({ "findings": &findings })) {
         Ok(j) => j,
         Err(e) => {
-            eprintln!("scrutiny: consolidate: serialize failed ({e}) — using Rust-deduped findings");
+            eprintln!(
+                "scrutiny: consolidate: serialize failed ({e}) — using Rust-deduped findings"
+            );
             return findings;
         }
     };
@@ -1388,12 +1442,18 @@ fn consolidate_findings(
     ) {
         Ok(out) => {
             if let Some(err) = claude_error_message(&out.stdout) {
-                eprintln!("scrutiny: consolidate: agent error ({err}) — using Rust-deduped findings");
+                eprintln!(
+                    "scrutiny: consolidate: agent error ({err}) — using Rust-deduped findings"
+                );
                 return findings;
             }
             match parse_findings_json(&out.stdout, "consolidator") {
                 Ok(f) if !f.is_empty() => {
-                    eprintln!("scrutiny: consolidated {} → {} findings", findings.len(), f.len());
+                    eprintln!(
+                        "scrutiny: consolidated {} → {} findings",
+                        findings.len(),
+                        f.len()
+                    );
                     f
                 }
                 _ => {
@@ -1453,13 +1513,15 @@ pub fn run_isolated_review(
         let mut entries: Vec<(PathBuf, PathBuf, String, u32, Vec<String>)> = Vec::new();
         for (role, index, paths) in &jobs {
             let label = format!("{role}#{index}");
-            let findings_path = artifact_path_unique("review-agent-findings");
+            let findings_path =
+                artifact_path(&format!("review-agent-findings-{role}-{index}"));
             let prompt = build_isolated_prompt(role, pack_path, paths, plan)
                 + &nonheadless_findings_suffix(&findings_path);
             let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, &label, ctx)?;
             entries.push((sentinel, findings_path, role.clone(), *index, paths.clone()));
         }
-        let sentinel_paths: Vec<PathBuf> = entries.iter().map(|(s, _, _, _, _)| s.clone()).collect();
+        let sentinel_paths: Vec<PathBuf> =
+            entries.iter().map(|(s, _, _, _, _)| s.clone()).collect();
         let missing = wait_for_sentinels(&sentinel_paths, wall);
         if !missing.is_empty() {
             eprintln!(
@@ -1476,12 +1538,14 @@ pub fn run_isolated_review(
                     let ok = !f.is_empty();
                     (f, ok, String::new())
                 }
-                Err(e) => (Vec::new(), false, format!("could not read findings file: {e}")),
+                Err(e) => (
+                    Vec::new(),
+                    false,
+                    format!("could not read findings file: {e}"),
+                ),
             };
             if !ok {
-                eprintln!(
-                    "scrutiny: agent {role}#{index} non-headless: no findings or read error"
-                );
+                eprintln!("scrutiny: agent {role}#{index} non-headless: no findings or read error");
             }
             agents.push(AgentRunResult {
                 role,
@@ -1500,21 +1564,15 @@ pub fn run_isolated_review(
     }
 
     let wall = crate::timeouts::probe_isolated();
-    let pending: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(
-            jobs.iter()
-                .map(|(r, i, _)| format!("{r}#{i}"))
-                .collect(),
-        ));
+    let pending: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::new(
+        std::sync::Mutex::new(jobs.iter().map(|(r, i, _)| format!("{r}#{i}")).collect()),
+    );
 
     eprintln!(
         "scrutiny: spawning {} isolated agents (wall {}m): {}",
         jobs.len(),
         wall.as_secs() / 60,
-        pending
-            .lock()
-            .map(|p| p.join(", "))
-            .unwrap_or_default()
+        pending.lock().map(|p| p.join(", ")).unwrap_or_default()
     );
 
     let (tx, rx) = mpsc::channel();
@@ -1631,7 +1689,10 @@ pub fn run_isolated_review(
                     last_progress = std::time::Instant::now();
                 }
                 if batch_start.elapsed() > wall + grace {
-                    eprintln!("scrutiny: batch wall exceeded — using {} finished agents", agents.len());
+                    eprintln!(
+                        "scrutiny: batch wall exceeded — using {} finished agents",
+                        agents.len()
+                    );
                     break;
                 }
             }
@@ -1672,9 +1733,8 @@ pub fn run_isolated_review(
             })
             .unwrap_or_else(|| "all headless agents failed with empty stderr".into());
         bail!(
-            "isolated review: every agent failed. First error: {sample}\n\
-             Hint (claude): run `claude` once and /login, or set ANTHROPIC_API_KEY. \
-             Do not use SCRUTINY_CLAUDE_BARE without an API key."
+            "isolated review: every agent failed. First error: {sample}\n{}",
+            isolated_all_failed_hint(&client.client)
         );
     }
 
@@ -1691,7 +1751,7 @@ pub fn run_team_review(
     let prompt_base = build_team_lead_prompt(pack_path, plan);
 
     if let Some(ctx) = term {
-        let findings_path = artifact_path_unique("review-lead-findings");
+        let findings_path = artifact_path("review-lead-findings");
         let prompt = prompt_base + &nonheadless_findings_suffix(&findings_path);
         let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, "lead#1", ctx)?;
         let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
@@ -1707,7 +1767,11 @@ pub fn run_team_review(
                 let ok = !f.is_empty();
                 (f, ok, String::new())
             }
-            Err(e) => (Vec::new(), false, format!("could not read findings file: {e}")),
+            Err(e) => (
+                Vec::new(),
+                false,
+                format!("could not read findings file: {e}"),
+            ),
         };
         let agent = AgentRunResult {
             role: "lead".into(),
@@ -1808,8 +1872,7 @@ pub struct AgentPromptInput {
 /// Applies the same [`inject_overrides`] path as real spawns (caveman + [prompts]).
 pub fn run_agent_prompt(input: AgentPromptInput) -> Result<String> {
     let plan = if let Some(p) = &input.plan_path {
-        let text = fs::read_to_string(p)
-            .with_context(|| format!("read plan {}", p.display()))?;
+        let text = fs::read_to_string(p).with_context(|| format!("read plan {}", p.display()))?;
         serde_json::from_str(&text).context("parse ConfirmedPlan")?
     } else {
         minimal_plan_for_prompt(&input.pack_path)
@@ -1973,7 +2036,13 @@ mod tests {
 
     #[test]
     fn auto_support_by_model() {
-        for m in ["opus", "sonnet", "fable", "claude-opus-4-8", "claude-sonnet-4-6"] {
+        for m in [
+            "opus",
+            "sonnet",
+            "fable",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+        ] {
             assert!(model_supports_auto(m), "{m} should support auto");
         }
         for m in [
@@ -1989,7 +2058,8 @@ mod tests {
 
     #[test]
     fn claude_error_from_stdout() {
-        let raw = r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
+        let raw =
+            r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
         let msg = claude_error_message(raw).unwrap();
         assert!(msg.contains("Not logged in"));
     }
@@ -2010,10 +2080,30 @@ mod tests {
     #[test]
     fn no_stdout_early_kill_decision() {
         let wall = Duration::from_secs(600);
-        assert!(!should_kill_for_no_stdout(false, Duration::from_secs(30), 90, wall));
-        assert!(should_kill_for_no_stdout(false, Duration::from_secs(90), 90, wall));
-        assert!(!should_kill_for_no_stdout(true, Duration::from_secs(200), 90, wall));
-        assert!(!should_kill_for_no_stdout(false, Duration::from_secs(200), 0, wall));
+        assert!(!should_kill_for_no_stdout(
+            false,
+            Duration::from_secs(30),
+            90,
+            wall
+        ));
+        assert!(should_kill_for_no_stdout(
+            false,
+            Duration::from_secs(90),
+            90,
+            wall
+        ));
+        assert!(!should_kill_for_no_stdout(
+            true,
+            Duration::from_secs(200),
+            90,
+            wall
+        ));
+        assert!(!should_kill_for_no_stdout(
+            false,
+            Duration::from_secs(200),
+            0,
+            wall
+        ));
         // Cap at wall when first-output > wall.
         assert!(should_kill_for_no_stdout(
             false,
@@ -2104,5 +2194,108 @@ mod tests {
         assert!(p.contains("critical > warning > suggestion"));
         assert!(p.contains(r#""findings":["#));
         assert!(p.contains(raw));
+    }
+
+    #[test]
+    fn nonheadless_invoke_cursor_tui_flags() {
+        let line = nonheadless_invoke_line(
+            "cursor",
+            Path::new("/bin/agent"),
+            "auto",
+            Path::new("/tmp/ws"),
+            Path::new("/tmp/prompt.txt"),
+        )
+        .unwrap();
+        assert!(line.contains("--trust"), "{line}");
+        assert!(line.contains("--force"), "{line}");
+        assert!(line.contains("--workspace '/tmp/ws'"), "{line}");
+        assert!(line.contains("--model 'auto'"), "{line}");
+        assert!(
+            !line.contains(" -p ") && !line.contains("'-p'") && !line.contains(" --print"),
+            "{line}"
+        );
+        assert!(!line.contains("--mode "), "{line}");
+        assert!(line.contains("$(cat '/tmp/prompt.txt')"), "{line}");
+    }
+
+    #[test]
+    fn nonheadless_invoke_claude_unchanged() {
+        let line = nonheadless_invoke_line(
+            "claude",
+            Path::new("/bin/claude"),
+            "sonnet",
+            Path::new("/tmp/ws"),
+            Path::new("/tmp/prompt.txt"),
+        )
+        .unwrap();
+        assert!(line.contains("--permission-mode auto"), "{line}");
+        assert!(line.contains("--model 'sonnet'"), "{line}");
+        assert!(!line.contains("--trust"), "{line}");
+        assert!(!line.contains("--force"), "{line}");
+        assert!(!line.contains("--workspace"), "{line}");
+    }
+
+    #[test]
+    fn nonheadless_invoke_codex_rejected() {
+        let err = nonheadless_invoke_line(
+            "codex",
+            Path::new("/bin/codex"),
+            "gpt-5.5-medium",
+            Path::new("/tmp/ws"),
+            Path::new("/tmp/p"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("claude and cursor only"), "{err}");
+        assert!(err.contains("codex"), "{err}");
+    }
+
+    #[test]
+    fn cursor_headless_omits_model_auto() {
+        let args = cursor_headless_flags("auto", Path::new("/tmp/ws"), HeadlessKind::Isolated);
+        assert!(!args.iter().any(|a| a == "--model"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "auto"), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--mode", "ask"]), "{args:?}");
+        assert!(args.contains(&"-p".into()), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w == ["--workspace", "/tmp/ws"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_headless_keeps_concrete_model() {
+        let args =
+            cursor_headless_flags("composer-2-fast", Path::new("/tmp/ws"), HeadlessKind::Forge);
+        assert!(
+            args.windows(2).any(|w| w == ["--model", "composer-2-fast"]),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "--mode"), "{args:?}");
+    }
+
+    #[test]
+    fn first_output_kill_skipped_for_cursor_only() {
+        assert!(applies_first_output_kill("claude"));
+        assert!(applies_first_output_kill("codex"));
+        assert!(!applies_first_output_kill("cursor"));
+        let wall = Duration::from_secs(600);
+        assert!(should_kill_for_no_stdout(
+            false,
+            Duration::from_secs(90),
+            90,
+            wall
+        ));
+    }
+
+    #[test]
+    fn isolated_fail_hint_is_client_specific() {
+        let cursor = isolated_all_failed_hint("cursor");
+        assert!(cursor.contains("agent login"), "{cursor}");
+        assert!(cursor.contains("CURSOR_API_KEY"), "{cursor}");
+        assert!(!cursor.contains("ANTHROPIC_API_KEY"), "{cursor}");
+        let claude = isolated_all_failed_hint("claude");
+        assert!(claude.contains("/login"), "{claude}");
+        assert!(claude.contains("ANTHROPIC_API_KEY"), "{claude}");
     }
 }

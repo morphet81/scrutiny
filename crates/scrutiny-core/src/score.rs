@@ -195,12 +195,7 @@ mod tests {
             scatter: 0.9,
             blast_stub: 30,
             risk_path_hits: 3,
-            layers_touched: vec![
-                "domain".into(),
-                "data".into(),
-                "ui".into(),
-                "routes".into(),
-            ],
+            layers_touched: vec!["domain".into(), "data".into(), "ui".into(), "routes".into()],
             change_class: "source".into(),
         };
         let (tier, score) = score_tier(&s);

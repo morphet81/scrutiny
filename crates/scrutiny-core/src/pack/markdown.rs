@@ -43,7 +43,10 @@ pub(crate) fn render_pack_markdown(pack: &PackReport) -> String {
         if let Some(s) = pack.slices.iter().find(|s| s.path == m.path) {
             md.push_str(&format!("```diff\n{}\n```\n\n", s.unified_diff));
             for sym in &s.symbol_slices {
-                md.push_str(&format!("### {}\n\n```\n{}\n```\n\n", sym.label, sym.content));
+                md.push_str(&format!(
+                    "### {}\n\n```\n{}\n```\n\n",
+                    sym.label, sym.content
+                ));
             }
         }
         if !m.dropped_regions.is_empty() {

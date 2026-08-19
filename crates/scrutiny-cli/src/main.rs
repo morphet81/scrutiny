@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_bench,
     run_eval, run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate,
@@ -12,7 +13,6 @@ use scrutiny_core::{
     ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput,
     PostCommentsInput, PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
-use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -866,13 +866,12 @@ fn run() -> Result<()> {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[comments.as_path()])?;
-            let shipped = find_shipped_default(
-                &std::env::current_exe().unwrap_or_else(|_| cwd.clone()),
-            );
+            let shipped =
+                find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
             let cfg_path = ensure_config(&shipped)?;
             let cfg = load_config(&cfg_path)?;
-            let answers: ParleyAnswers =
-                serde_json::from_str(&from_json).context("parse --from-json for parley-plan-write")?;
+            let answers: ParleyAnswers = serde_json::from_str(&from_json)
+                .context("parse --from-json for parley-plan-write")?;
             let text = std::fs::read_to_string(&comments)
                 .with_context(|| format!("read {}", comments.display()))?;
             let comments_file: scrutiny_core::parley::ParleyCommentsFile =
@@ -1061,8 +1060,7 @@ fn run() -> Result<()> {
                 hints.push(p.as_path());
             }
             prepare_artifacts(&cwd, None, &hints)?;
-            let (_report, path) =
-                run_forge_brief(&ticket, session.as_deref(), context.as_deref())?;
+            let (_report, path) = run_forge_brief(&ticket, session.as_deref(), context.as_deref())?;
             println!("{}", path.display());
         }
         Commands::FindingsInit {
@@ -1225,7 +1223,8 @@ fn resolve_plan_write_input(
     Ok(PlanWriteInput {
         client: client.context("plan-write requires --client (or --answers / --from-json)")?,
         model: model.context("plan-write requires --model (or --answers / --from-json)")?,
-        security: security.context("plan-write requires --security (or --answers / --from-json)")?,
+        security: security
+            .context("plan-write requires --security (or --answers / --from-json)")?,
         performance: performance
             .context("plan-write requires --performance (or --answers / --from-json)")?,
         error_handling: error_handling

@@ -145,7 +145,12 @@ pub fn guess_pr_title(ticket: &TicketReport, prefix: &str) -> String {
 /// reference. `Fixes [KEY](url)` for bugs, `Addresses [KEY](url)` otherwise.
 pub fn guess_pr_body(ticket: &TicketReport) -> String {
     let mut body = ticket.description.trim().to_string();
-    if let Some(url) = ticket.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+    if let Some(url) = ticket
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
         if !body.is_empty() {
             body.push_str("\n\n");
         }
@@ -187,7 +192,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn ticket(source: &str, id: &str, title: &str, labels: &[&str], fields: serde_json::Value) -> TicketReport {
+    fn ticket(
+        source: &str,
+        id: &str,
+        title: &str,
+        labels: &[&str],
+        fields: serde_json::Value,
+    ) -> TicketReport {
         TicketReport {
             version: 1,
             source: source.into(),
@@ -292,8 +303,17 @@ mod tests {
 
     #[test]
     fn branch_name_with_id() {
-        let t = ticket("jira", "PROJ-123", "Add a widget to the panel now please", &[], json!({}));
-        assert_eq!(branch_name(&t, "feat"), "feat/proj-123-add-a-widget-to-the-panel");
+        let t = ticket(
+            "jira",
+            "PROJ-123",
+            "Add a widget to the panel now please",
+            &[],
+            json!({}),
+        );
+        assert_eq!(
+            branch_name(&t, "feat"),
+            "feat/proj-123-add-a-widget-to-the-panel"
+        );
     }
 
     #[test]

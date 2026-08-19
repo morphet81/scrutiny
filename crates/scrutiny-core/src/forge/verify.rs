@@ -125,10 +125,7 @@ pub fn build_verify_plan(
     commands.extend(derive_lint_build(cwd));
 
     let cov_probe = if coverage {
-        harness
-            .unit_framework
-            .as_deref()
-            .and_then(coverage_probe)
+        harness.unit_framework.as_deref().and_then(coverage_probe)
     } else {
         None
     };
@@ -258,7 +255,11 @@ pub fn run_command(cwd: &Path, cmd: &str) -> (i32, String, String) {
 /// Parse test-runner output into a minimal list of failures. Empty vec + a
 /// `raw_tail` fallback (via the caller) when the framework is unknown or JSON
 /// parsing fails.
-pub fn parse_test_failures(framework: Option<&str>, stdout: &str, stderr: &str) -> Vec<TestFailure> {
+pub fn parse_test_failures(
+    framework: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+) -> Vec<TestFailure> {
     match framework {
         Some("vitest") | Some("jest") => parse_jest_json(stdout),
         Some("playwright") => parse_playwright_json(stdout),
@@ -394,7 +395,10 @@ fn parse_playwright_json(stdout: &str) -> Vec<TestFailure> {
                 if ok {
                     continue;
                 }
-                let title = spec.get("title").and_then(|x| x.as_str()).unwrap_or("<spec>");
+                let title = spec
+                    .get("title")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("<spec>");
                 let file = spec
                     .get("file")
                     .and_then(|x| x.as_str())
@@ -433,10 +437,7 @@ fn parse_pytest(stdout: &str, stderr: &str) -> Vec<TestFailure> {
         let path = it.next().unwrap_or("").trim();
         let lineno = it.next().unwrap_or("").trim();
         let rest = it.next().unwrap_or("").trim();
-        if lineno.parse::<u32>().is_ok()
-            && (path.ends_with(".py"))
-            && !rest.is_empty()
-        {
+        if lineno.parse::<u32>().is_ok() && (path.ends_with(".py")) && !rest.is_empty() {
             out.push(TestFailure {
                 name: format!("{path}:{lineno}"),
                 file: Some(path.to_string()),
@@ -464,7 +465,9 @@ fn parse_cargo(stdout: &str, stderr: &str) -> Vec<TestFailure> {
                 let name = &rest[..end];
                 let after = &rest[end..];
                 if let Some(at) = after.find("panicked at ") {
-                    let loc = after[at + "panicked at ".len()..].trim_end_matches(':').trim();
+                    let loc = after[at + "panicked at ".len()..]
+                        .trim_end_matches(':')
+                        .trim();
                     let (f, l) = split_file_line(loc);
                     let msg = lines
                         .get(i + 1)
@@ -497,10 +500,11 @@ fn parse_cargo(stdout: &str, stderr: &str) -> Vec<TestFailure> {
                 continue;
             }
             let name = t.to_string();
-            let (file, line_no, message) = panics
-                .get(&name)
-                .cloned()
-                .unwrap_or((None, None, "test failed".into()));
+            let (file, line_no, message) =
+                panics
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or((None, None, "test failed".into()));
             out.push(TestFailure {
                 name,
                 file,
@@ -575,9 +579,7 @@ pub fn measure_coverage(cwd: &Path, probe: &CoverageProbe) -> Option<f64> {
     let text = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     match probe.framework.as_str() {
-        "vitest" | "jest" => v
-            .pointer("/total/lines/pct")
-            .and_then(|x| x.as_f64()),
+        "vitest" | "jest" => v.pointer("/total/lines/pct").and_then(|x| x.as_f64()),
         "pytest" => v
             .pointer("/totals/percent_covered")
             .and_then(|x| x.as_f64()),
@@ -767,7 +769,11 @@ pub fn filter_playwright_cmd(cwd: &Path, cmd: &VerifyCmd) -> String {
 
 /// Truncated stderr-else-stdout tail for the fallback case (parse failed).
 pub fn raw_tail(stdout: &str, stderr: &str) -> String {
-    let src = if !stderr.trim().is_empty() { stderr } else { stdout };
+    let src = if !stderr.trim().is_empty() {
+        stderr
+    } else {
+        stdout
+    };
     let stripped = strip_ansi(src);
     let trimmed = stripped.trim();
     let count = trimmed.chars().count();
@@ -937,7 +943,10 @@ test result: FAILED. 1 passed; 1 failed";
 
     #[test]
     fn range_compression() {
-        assert_eq!(compress_ranges(vec![12, 13, 14, 15, 40, 88, 89, 90]), "12-15,40,88-90");
+        assert_eq!(
+            compress_ranges(vec![12, 13, 14, 15, 40, 88, 89, 90]),
+            "12-15,40,88-90"
+        );
         assert_eq!(compress_ranges(vec![5, 5, 3]), "3,5");
     }
 
@@ -969,7 +978,10 @@ test result: FAILED. 1 passed; 1 failed";
     fn inject_spec_files_inserts_before_reporter() {
         let files = vec!["tests/foo.spec.ts".into(), "tests/bar.spec.ts".into()];
         let result = inject_spec_files("npx playwright test --reporter=json", &files);
-        assert_eq!(result, "npx playwright test tests/foo.spec.ts tests/bar.spec.ts --reporter=json");
+        assert_eq!(
+            result,
+            "npx playwright test tests/foo.spec.ts tests/bar.spec.ts --reporter=json"
+        );
     }
 
     #[test]

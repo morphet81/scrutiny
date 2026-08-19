@@ -77,11 +77,7 @@ impl ForgeLocRules {
 pub fn path_excluded_from_loc(path: &str, rules: &ForgeLocRules) -> bool {
     let lower = path.replace('\\', "/").to_ascii_lowercase();
     if let Some(ext) = file_extension(&lower) {
-        if rules
-            .exclude_extensions
-            .iter()
-            .any(|e| e == ext)
-        {
+        if rules.exclude_extensions.iter().any(|e| e == ext) {
             return true;
         }
     }
@@ -184,7 +180,8 @@ pub fn decide_loc_gate(estimated: u32, max_loc: u32, interactive: bool) -> LocGa
 /// Parse estimate JSON from file contents or agent stdout.
 pub fn parse_loc_estimate(raw: &str) -> Result<LocEstimate> {
     let text = extract_json_payload(raw)?;
-    let mut v: serde_json::Value = serde_json::from_str(&text).context("parse loc-estimate JSON")?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&text).context("parse loc-estimate JSON")?;
     if v.get("estimated_loc").is_none() {
         if let Some(r) = v.get("result").and_then(|x| x.as_str()) {
             return parse_loc_estimate(r);
@@ -194,8 +191,7 @@ pub fn parse_loc_estimate(raw: &str) -> Result<LocEstimate> {
         }
     }
     normalize_confidence_field(&mut v);
-    let mut est: LocEstimate =
-        serde_json::from_value(v).context("deserialize LocEstimate")?;
+    let mut est: LocEstimate = serde_json::from_value(v).context("deserialize LocEstimate")?;
     if est.confidence.is_none() {
         if let Some(label) = est.confidence_label.as_deref() {
             if let Some(score) = label_to_confidence(label) {
@@ -332,10 +328,7 @@ mod tests {
 
     #[test]
     fn decide_gate() {
-        assert_eq!(
-            decide_loc_gate(100, 200, true),
-            LocGateDecision::Proceed
-        );
+        assert_eq!(decide_loc_gate(100, 200, true), LocGateDecision::Proceed);
         assert_eq!(decide_loc_gate(200, 200, false), LocGateDecision::Proceed);
         assert_eq!(decide_loc_gate(201, 200, true), LocGateDecision::Ask);
         assert_eq!(decide_loc_gate(201, 200, false), LocGateDecision::Abort);

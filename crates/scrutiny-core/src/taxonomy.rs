@@ -161,7 +161,8 @@ pub fn is_risk_path(path: &str) -> bool {
         || p.contains("migrat")
         || p.contains("crypto")
         || p.contains("secret")
-        || (p.contains("token") && (p.contains("auth") || p.contains("jwt") || p.contains("session")))
+        || (p.contains("token")
+            && (p.contains("auth") || p.contains("jwt") || p.contains("session")))
 }
 
 pub fn change_class(kinds: &[PathKind]) -> String {
@@ -174,7 +175,11 @@ pub fn change_class(kinds: &[PathKind]) -> String {
             .iter()
             .all(|k| matches!(k, PathKind::I18n | PathKind::Doc));
     if only_i18n && !has_source {
-        return if has_doc { "docs".into() } else { "i18n".into() };
+        return if has_doc {
+            "docs".into()
+        } else {
+            "i18n".into()
+        };
     }
     match (has_source, has_doc) {
         (false, true) => "docs".into(),
@@ -224,7 +229,10 @@ pub fn blast_stub_for_path(path: &str) -> u32 {
     if p.contains("/domain/") || p.contains("/data/schemas/") || p.contains("/stores/") {
         score += 8;
     }
-    if p.contains("/utils/") || p.contains("/lib/") || p.ends_with("/mod.rs") || p.ends_with("/index.ts")
+    if p.contains("/utils/")
+        || p.contains("/lib/")
+        || p.ends_with("/mod.rs")
+        || p.ends_with("/index.ts")
     {
         score += 4;
     }
@@ -244,7 +252,8 @@ pub fn blast_stub_for_path(path: &str) -> u32 {
 pub fn aggregate_blast(per_file: &[u32]) -> u32 {
     let max = per_file.iter().copied().max().unwrap_or(0);
     let boosted = per_file.iter().filter(|&&b| b > 0).count() as u32;
-    max.saturating_add(boosted.saturating_sub(1).saturating_mul(2)).min(40)
+    max.saturating_add(boosted.saturating_sub(1).saturating_mul(2))
+        .min(40)
 }
 
 #[cfg(test)]
@@ -253,10 +262,7 @@ mod tests {
 
     #[test]
     fn classifies_meta_as_doc() {
-        assert_eq!(
-            classify_path("src/components/Toast/META.md"),
-            PathKind::Doc
-        );
+        assert_eq!(classify_path("src/components/Toast/META.md"), PathKind::Doc);
     }
 
     #[test]
@@ -269,14 +275,8 @@ mod tests {
 
     #[test]
     fn classifies_locale_json_as_i18n() {
-        assert_eq!(
-            classify_path("src/i18n/locales/en.json"),
-            PathKind::I18n
-        );
-        assert_eq!(
-            classify_path("src/locales/ja.json"),
-            PathKind::I18n
-        );
+        assert_eq!(classify_path("src/i18n/locales/en.json"), PathKind::I18n);
+        assert_eq!(classify_path("src/locales/ja.json"), PathKind::I18n);
     }
 
     #[test]
