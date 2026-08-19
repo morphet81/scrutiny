@@ -1204,21 +1204,23 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     // Scrutiny owns the checks: run the pre-push hook quietly before pushing,
-    // fixing via plan+chunk agents up to N times. On green, push (optionally with
-    // --no-verify via [parley] push_no_verify to skip the hook re-run).
-    run_parley_prepush_gate(
-        cwd,
-        session_root,
-        input.client,
-        &input.plan_model,
-        &input.fix_model,
-        input.prepush_cmd.as_deref(),
-        input.prepush_fix_max_loops,
-        input.prepush_fix_max_chunks,
-        input.prepush_fix_wall_secs,
-        input.prepush_plan_wall_secs,
-        input.artifact_globs,
-    )?;
+    // fixing via plan+chunk agents up to N times. Skipped entirely when
+    // push_no_verify is set — caller opts out of all pre-push checks.
+    if !input.push_no_verify {
+        run_parley_prepush_gate(
+            cwd,
+            session_root,
+            input.client,
+            &input.plan_model,
+            &input.fix_model,
+            input.prepush_cmd.as_deref(),
+            input.prepush_fix_max_loops,
+            input.prepush_fix_max_chunks,
+            input.prepush_fix_wall_secs,
+            input.prepush_plan_wall_secs,
+            input.artifact_globs,
+        )?;
+    }
 
     // Wipe anything scrutiny's run left dirty but did not commit — coverage dirs
     // and pre-push-gate regenerated files — while leaving the user's pre-existing
