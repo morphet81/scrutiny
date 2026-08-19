@@ -150,19 +150,23 @@ pub fn confirm_pr_meta(
 /// Push the current branch to origin: `push -u origin HEAD` when it has no
 /// upstream, else a plain `git push`. Pre-push hook output stays behind a
 /// spinner and in the on-disk log, not on the terminal.
-pub fn push_current_branch(cwd: &Path) -> Result<()> {
+pub fn push_current_branch(cwd: &Path, no_verify: bool) -> Result<()> {
     let has_upstream = git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
-    let (args, label): (&[&str], &str) = if has_upstream {
-        (&["push"], "git push — running pre-push hooks")
+    let mut args: Vec<&str> = if has_upstream {
+        vec!["push"]
     } else {
-        (
-            &["push", "-u", "origin", "HEAD"],
-            "git push -u origin HEAD — running pre-push hooks",
-        )
+        vec!["push", "-u", "origin", "HEAD"]
     };
-    let sp = crate::spinner::Spinner::start(label);
+    if no_verify {
+        args.insert(1, "--no-verify");
+    }
+    let label = format!(
+        "git {} — running pre-push hooks",
+        args.join(" ")
+    );
+    let sp = crate::spinner::Spinner::start(&label);
     let push = Command::new("git")
-        .args(args)
+        .args(&args)
         .current_dir(cwd)
         .output()
         .with_context(|| format!("git {}", args.join(" ")))?;
@@ -187,9 +191,10 @@ pub fn create_pr(
     title: &str,
     body: &str,
     draft: bool,
+    no_verify: bool,
 ) -> Result<String> {
     if !git_ok(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]) {
-        push_current_branch(cwd)?;
+        push_current_branch(cwd, no_verify)?;
     }
 
     let body_path = dir.join("pr-body.md");

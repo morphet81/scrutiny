@@ -240,6 +240,8 @@ prepush_fix_max_chunks = 8
 # Re-implement threads left as stubs or rejected by a verifier so failures
 # never post as PR replies. Runs after verifiers, before evangelists.
 repair = true
+# Pass --no-verify to git push in `scrutiny parley`. Default false.
+# push_no_verify = false
 
 # Agent wall-clock limits, in seconds. Every key is optional.
 # `agent_wall_secs` is the base; a stage with no explicit value derives from it
@@ -312,6 +314,8 @@ artifact_globs = [
   "*.tsbuildinfo",
   "*.log",
 ]
+# Pass --no-verify to git push in `scrutiny pr` and `scrutiny forge`. Default false.
+# push_no_verify = false
 
 # Custom prompt injection. Text here is prepended to spawned-agent prompts.
 # Order: global → per-agent → scrutiny's own prompt.

@@ -1700,6 +1700,7 @@ pub(crate) fn run_forge_ship(
                 &choice.title,
                 &choice.body,
                 /* draft */ true,
+                cfg.git.push_no_verify,
             )?;
             eprintln!("scrutiny forge: draft PR → {url}");
         } else {
@@ -1737,6 +1738,7 @@ pub(crate) fn run_forge_ship(
         &choice.title,
         &choice.body,
         /* draft */ true,
+        cfg.git.push_no_verify,
     )?;
     eprintln!("scrutiny forge: draft PR → {url}");
     Ok(())

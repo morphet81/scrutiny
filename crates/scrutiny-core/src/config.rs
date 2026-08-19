@@ -206,6 +206,10 @@ pub struct ParleyConfig {
     /// a verifier, so failures never post as PR replies.
     #[serde(default = "default_parley_repair")]
     pub repair: bool,
+    /// Pass `--no-verify` to `git push` in `scrutiny parley`. Skips pre-push
+    /// hooks. Default false.
+    #[serde(default)]
+    pub push_no_verify: bool,
 }
 
 fn default_parley_members() -> u32 {
@@ -243,6 +247,7 @@ impl Default for ParleyConfig {
             prepush_fix_wall_secs: None,
             agent_wall_secs: None,
             repair: default_parley_repair(),
+            push_no_verify: false,
         }
     }
 }
@@ -716,6 +721,10 @@ pub struct GitConfig {
     /// coverage dirs and similar leftovers that are not gitignored.
     #[serde(default = "default_artifact_globs")]
     pub artifact_globs: Vec<String>,
+    /// Pass `--no-verify` to `git push` in `scrutiny pr` and `scrutiny forge`.
+    /// Skips pre-push hooks. Default false.
+    #[serde(default)]
+    pub push_no_verify: bool,
 }
 
 fn default_artifact_globs() -> Vec<String> {

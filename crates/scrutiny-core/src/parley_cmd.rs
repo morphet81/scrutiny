@@ -268,6 +268,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             prepush_plan_wall_secs: crate::timeouts::get().parley_prepush_plan,
             base: &base_pre_agents,
             artifact_globs: &cfg.git.artifact_globs,
+            push_no_verify: cfg.parley.push_no_verify,
         })?;
         eprintln!("scrutiny parley: post thread replies…");
         let (result, reply_path) = run_parley_reply(ParleyReplyInput {
@@ -1044,6 +1045,7 @@ struct ParleyShipInput<'a> {
     /// that changed since (excluding artifacts), leaving pre-existing WIP alone.
     base: &'a WorktreeSnapshot,
     artifact_globs: &'a [String],
+    push_no_verify: bool,
 }
 
 struct PushAttempt {
@@ -1202,8 +1204,8 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     // Scrutiny owns the checks: run the pre-push hook quietly before pushing,
-    // fixing via plan+chunk agents up to N times. On green, push with --no-verify
-    // so the hook does not re-run (no redundant multi-minute rerun, no terminal flood).
+    // fixing via plan+chunk agents up to N times. On green, push (optionally with
+    // --no-verify via [parley] push_no_verify to skip the hook re-run).
     run_parley_prepush_gate(
         cwd,
         session_root,
@@ -1232,9 +1234,15 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
     }
 
     let push_args: Vec<&str> = if upstream.is_some() {
-        vec!["push", "--no-verify"]
-    } else {
+        if input.push_no_verify {
+            vec!["push", "--no-verify"]
+        } else {
+            vec!["push"]
+        }
+    } else if input.push_no_verify {
         vec!["push", "--no-verify", "-u", "origin", "HEAD"]
+    } else {
+        vec!["push", "-u", "origin", "HEAD"]
     };
     let dest = match upstream {
         Some(ref up) => up.clone(),

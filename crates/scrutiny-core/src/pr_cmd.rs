@@ -76,7 +76,7 @@ pub fn run_pr(input: PrCmdInput) -> Result<PathBuf> {
     )?;
 
     let draft = !input.ready;
-    let url = pr::create_pr(&cwd, &dir, &choice.base, &choice.title, &choice.body, draft)?;
+    let url = pr::create_pr(&cwd, &dir, &choice.base, &choice.title, &choice.body, draft, cfg.git.push_no_verify)?;
     eprintln!(
         "scrutiny pr: {} PR → {url}",
         if draft { "draft" } else { "ready" }
@@ -181,7 +181,7 @@ fn preflight_branch(cwd: &Path, cfg: &Config, non_interactive: bool) -> Result<(
                     bail!("aborted: push your commits first");
                 }
             }
-            pr::push_current_branch(cwd)?;
+            pr::push_current_branch(cwd, cfg.git.push_no_verify)?;
         }
     }
 
