@@ -11,8 +11,10 @@ use scrutiny_core::{
     BenchArm, BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeBulkInput,
     ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput,
     ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput,
-    PostCommentsInput, PrCmdInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
+    PostCommentsInput, PrCmdInput, ProbeStackInput, ReviewCmdInput, ReviewSessionWriteInput,
+    SkillsInstallInput,
 };
+use scrutiny_core::run_probe_stack;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -637,6 +639,25 @@ fn run() -> Result<()> {
             scan,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            // scrutiny probe stack [number]
+            if pr.is_none() && rest.first().map(String::as_str) == Some("stack") {
+                let stack_number = rest.get(1).and_then(|s| s.parse::<u64>().ok());
+                ensure_git_repo(&cwd)?;
+                let paths = run_probe_stack(ProbeStackInput {
+                    cwd,
+                    stack_number,
+                    client,
+                    spawn_mode,
+                    from_json,
+                    skip_agents,
+                    event,
+                    non_interactive: yes,
+                })?;
+                for p in paths {
+                    println!("{}", p.display());
+                }
+                return Ok(());
+            }
             let pr = pr.or_else(|| {
                 if rest.is_empty() {
                     None

@@ -18,6 +18,7 @@ pub mod pack;
 pub mod parley;
 pub mod parley_cmd;
 pub mod paths;
+pub mod probe_stack;
 pub mod plan;
 pub mod pr;
 pub mod pr_cmd;
@@ -70,6 +71,7 @@ pub use plan::{
     PlanConfirmInput, PlanWriteInput,
 };
 pub use pr_cmd::{run_pr, PrCmdInput};
+pub use probe_stack::{run_probe_stack, ProbeStackInput};
 pub use review_cmd::{run_review, run_review_from_report, ReportResumeInput, ReviewCmdInput};
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
