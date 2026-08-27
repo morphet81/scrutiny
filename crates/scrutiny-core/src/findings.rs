@@ -478,6 +478,7 @@ enum TriagePick {
     Option(usize),
     Ignore,
     Ask(String),
+    Custom(String),
 }
 
 /// Interactive triage: Post/Ignore/Ask per finding.
@@ -525,7 +526,7 @@ pub fn run_findings_triage(
         n_warn,
         n_sug
     );
-    eprintln!("↑/↓ select Post / Ignore / Ask (or a fix option), Enter confirm.\n");
+    eprintln!("↑/↓ select Post / Ignore / Ask / Custom (or a fix option), Enter confirm.\n");
 
     let color = want_color();
     let mut last_sev = String::new();
@@ -610,6 +611,12 @@ pub fn run_findings_triage(
                         "**{}**\n\n{}\n\n**Fix:** {}\n\n{}",
                         f.title, f.explanation, text, AI_AGENT_TAG
                     ));
+                    f.status = "ready".into();
+                    break;
+                }
+                TriagePick::Custom(comment) => {
+                    f.include = Some(true);
+                    f.comment_body = Some(comment);
                     f.status = "ready".into();
                     break;
                 }
@@ -741,6 +748,9 @@ fn prompt_finding_decision_menu(f: &TriageFinding) -> Result<TriagePick> {
     labels.push("Ask a question…".into());
     kinds.push("ask");
     option_idxs.push(0);
+    labels.push("Custom comment…".into());
+    kinds.push("custom");
+    option_idxs.push(0);
 
     let sel = Select::with_theme(&ColorfulTheme::default())
         .with_prompt("Decision")
@@ -765,6 +775,18 @@ fn prompt_finding_decision_menu(f: &TriageFinding) -> Result<TriagePick> {
             }
             Ok(TriagePick::Ask(q))
         }
+        "custom" => {
+            let c: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Your comment (posted as-is)")
+                .allow_empty(false)
+                .interact_text()
+                .context("triage custom input")?;
+            let c = c.trim().to_string();
+            if c.is_empty() {
+                bail!("empty comment");
+            }
+            Ok(TriagePick::Custom(c))
+        }
         _ => bail!("internal menu kind"),
     }
 }
@@ -777,13 +799,13 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
     eprintln!();
     if !f.fix_options.is_empty() {
         eprint!(
-            "{}Option letter / I=Ignore / ask <question>:{} ",
+            "{}Option letter / I=Ignore / C=Custom / ask <question>:{} ",
             style_bold(),
             style_reset()
         );
     } else {
         eprint!(
-            "{}P=Post / I=Ignore / ask <question>:{} ",
+            "{}P=Post / I=Ignore / C=Custom / ask <question>:{} ",
             style_bold(),
             style_reset()
         );
@@ -802,6 +824,35 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
         return Ok(TriagePick::Ignore);
     }
 
+    // Custom: `C`, `custom`, or `custom <text>`.
+    if let Some(rest) = choice
+        .strip_prefix("custom ")
+        .or_else(|| choice.strip_prefix("custom:"))
+        .or_else(|| {
+            if choice.eq_ignore_ascii_case("custom") || choice.eq_ignore_ascii_case("c") {
+                Some("")
+            } else {
+                None
+            }
+        })
+    {
+        let rest = rest.trim();
+        let comment = if rest.is_empty() {
+            eprint!("  comment: ");
+            let _ = io::stderr().flush();
+            let mut c = String::new();
+            io::stdin().read_line(&mut c).context("read custom comment")?;
+            c.trim().to_string()
+        } else {
+            rest.to_string()
+        };
+        if comment.is_empty() {
+            eprintln!("  empty comment — try again");
+            return prompt_finding_decision_line(f);
+        }
+        return Ok(TriagePick::Custom(comment));
+    }
+
     if !f.fix_options.is_empty() {
         if choice.len() == 1 {
             let c = choice.chars().next().unwrap().to_ascii_uppercase();
@@ -809,10 +860,10 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
                 return Ok(TriagePick::Option((c as u8 - b'A') as usize));
             }
             if c == 'P' || c == 'Y' {
-                eprintln!("  pick option letter A…, Ignore, or: ask <question>");
+                eprintln!("  pick option letter A…, I=Ignore, C=Custom, or: ask <question>");
                 return prompt_finding_decision_line(f);
             }
-            eprintln!("  unknown letter — pick A…, I, or: ask <question>");
+            eprintln!("  unknown letter — pick A…, I, C, or: ask <question>");
             return prompt_finding_decision_line(f);
         }
     } else if choice.eq_ignore_ascii_case("p")
@@ -848,7 +899,7 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
     {
         choice.to_string()
     } else {
-        eprintln!("  use P/I (or option letter), or: ask <question>");
+        eprintln!("  use P/I/C (or option letter), or: ask <question>");
         return prompt_finding_decision_line(f);
     };
 

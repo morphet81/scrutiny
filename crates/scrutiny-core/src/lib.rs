@@ -72,7 +72,10 @@ pub use plan::{
 };
 pub use pr_cmd::{run_pr, PrCmdInput};
 pub use probe_stack::{run_probe_stack, ProbeStackInput};
-pub use review_cmd::{run_review, run_review_from_report, ReportResumeInput, ReviewCmdInput};
+pub use review_cmd::{
+    run_pending_triage, run_review, run_review_from_report, PendingTriage, ReportResumeInput,
+    ReviewCmdInput, ReviewResult,
+};
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
 };

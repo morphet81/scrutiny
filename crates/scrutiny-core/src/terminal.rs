@@ -720,6 +720,26 @@ pub fn launch_agent_in_surface(
     }
 }
 
+/// Shell command that closes the current pane/window from inside the agent script.
+/// Embedded in the success branch so the terminal closes when the agent finishes.
+///
+/// Tmux: `kill-pane` targets `$TMUX_PANE` (inherited by all processes in the pane).
+/// Zellij: `:` no-op — the pane is launched with `--close-on-exit` so it closes
+///         automatically when bash exits; no explicit close command needed.
+/// iTerm2/Terminal.app: osascript closes the window the script is running in.
+pub fn kill_cmd_for_terminal(ctx: &ResolvedTerminal) -> String {
+    match ctx.kind {
+        TerminalContext::Tmux => "tmux kill-pane".into(),
+        TerminalContext::Zellij => ":".into(),
+        TerminalContext::ITerm2 => {
+            "osascript -e 'tell application \"iTerm\" to close (current window)'".into()
+        }
+        TerminalContext::AppleTerminal => {
+            "osascript -e 'tell application \"Terminal\" to close front window'".into()
+        }
+    }
+}
+
 /// Tear down an item container and everything running in it (the agents). Called
 /// on `q` abort. Best-effort per surface — the caller logs and continues.
 pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {

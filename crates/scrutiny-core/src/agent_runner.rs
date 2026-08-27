@@ -19,7 +19,8 @@ use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
 use crate::terminal::{
-    launch_agent_in_surface, launch_agent_window, ItemSurface, ResolvedTerminal,
+    kill_cmd_for_terminal, launch_agent_in_surface, launch_agent_window, ItemSurface,
+    ResolvedTerminal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,7 +684,9 @@ pub fn run_nonheadless(
     label: &str,
     ctx: &ResolvedTerminal,
 ) -> Result<PathBuf> {
-    let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, label)?;
+    let kill_cmd = kill_cmd_for_terminal(ctx);
+    let (sentinel, script_path) =
+        build_agent_script(client, model, cwd, prompt, label, Some(&kill_cmd))?;
     eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
     launch_agent_window(ctx, label, &script_path)?;
     Ok(sentinel)
@@ -701,7 +704,7 @@ pub fn run_nonheadless_in(
     surface: &ItemSurface,
     close_on_exit: bool,
 ) -> Result<PathBuf> {
-    let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, role)?;
+    let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, role, None)?;
     eprintln!("scrutiny: launch {role} into item surface (auto mode)");
     launch_agent_in_surface(surface, role, &script_path, close_on_exit)?;
     Ok(sentinel)
@@ -723,12 +726,18 @@ pub fn run_dry_placeholder_in(cwd: &Path, role: &str, surface: &ItemSurface) -> 
 }
 
 /// Write the agent prompt + launcher script; return `(sentinel, script_path)`.
+///
+/// `kill_cmd`: optional shell command to run when sentinel exists (non-headless mode).
+/// Close decision is based on sentinel presence, not exit code — the agent may exit
+/// non-zero even after successfully running the sentinel touch, and we must close the
+/// pane in that case too. Failures (no sentinel) always keep the pane open.
 fn build_agent_script(
     client: &DetectedClient,
     model: &str,
     cwd: &Path,
     prompt: &str,
     label: &str,
+    kill_cmd: Option<&str>,
 ) -> Result<(PathBuf, PathBuf)> {
     let sentinel = artifact_path_unique("agent-done");
     let _ = fs::remove_file(&sentinel); // clear any stale marker
@@ -746,17 +755,31 @@ fn build_agent_script(
 
     let invoke = nonheadless_invoke_line(&client.client, &client.binary, model, cwd, &prompt_path)?;
 
+    let sentinel_str = sentinel.display().to_string();
     let script_path = artifact_path_unique("agent-script");
-    let script = format!(
-        "#!/usr/bin/env bash\ncd '{cwd}'\n\
-         {invoke}\n\
-         code=$?\n\
-         if [ \"$code\" -eq 0 ]; then exit 0; fi\n\
-         echo \"scrutiny: agent '{label}' failed (exit $code); pane kept open for inspection\"\n\
-         exec bash\n",
-        cwd = cwd.display(),
-        label = label,
-    );
+    let script = if let Some(kill) = kill_cmd {
+        format!(
+            "#!/usr/bin/env bash\ncd '{cwd}'\n\
+             {invoke}\n\
+             if [ -f '{sentinel}' ]; then {kill}; exit 0; fi\n\
+             echo \"scrutiny: agent '{label}' did not complete — pane kept open for inspection\"\n\
+             exec bash\n",
+            cwd = cwd.display(),
+            sentinel = sentinel_str,
+            label = label,
+        )
+    } else {
+        format!(
+            "#!/usr/bin/env bash\ncd '{cwd}'\n\
+             {invoke}\n\
+             code=$?\n\
+             if [ \"$code\" -eq 0 ]; then exit 0; fi\n\
+             echo \"scrutiny: agent '{label}' failed (exit $code); pane kept open for inspection\"\n\
+             exec bash\n",
+            cwd = cwd.display(),
+            label = label,
+        )
+    };
     fs::write(&script_path, script.as_bytes())
         .with_context(|| format!("write {}", script_path.display()))?;
     Ok((sentinel, script_path))

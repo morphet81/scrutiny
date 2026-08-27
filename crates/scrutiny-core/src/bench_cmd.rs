@@ -254,6 +254,7 @@ fn run_probe_arm(input: &BenchCmdInput, _arm: BenchArm, cwd: &Path, model: &str)
         non_interactive: true,
         from_report: None,
         scan_path: None,
+        skip_triage: false,
     });
 
     if input.use_fixtures {

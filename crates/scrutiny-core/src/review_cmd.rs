@@ -19,7 +19,7 @@ use crate::map::run_map;
 use crate::pack::run_pack;
 use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteInput};
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
-use crate::runtime::{resolve_client, resolve_spawn_mode, ResolveClientInput};
+use crate::runtime::{resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput};
 use crate::scan::run_scan;
 use crate::terminal::resolve_terminal;
 
@@ -38,6 +38,43 @@ pub struct ReviewCmdInput {
     pub from_report: Option<PathBuf>,
     /// Optional scan JSON when using `--from-report` (else empty findings shell).
     pub scan_path: Option<PathBuf>,
+    /// Skip `finish_triage_and_post`; caller is responsible for calling `run_pending_triage`.
+    pub skip_triage: bool,
+}
+
+/// All context needed to run triage+post after a deferred (skip_triage) review.
+#[derive(Debug, Clone)]
+pub struct PendingTriage {
+    pub findings_path: PathBuf,
+    pub cwd: PathBuf,
+    pub client: Option<DetectedClient>,
+    pub model: String,
+    pub event: Option<String>,
+    pub non_interactive: bool,
+    pub pack_path: PathBuf,
+    pub client_override: Option<String>,
+}
+
+pub struct ReviewResult {
+    pub findings_path: PathBuf,
+    pub report_path: Option<PathBuf>,
+    pub answers_json: Option<String>,
+    /// Populated when `skip_triage = true`; call `run_pending_triage` to complete.
+    pub pending_triage: Option<PendingTriage>,
+}
+
+/// Run the triage+post phase deferred from a `skip_triage` review.
+pub fn run_pending_triage(t: PendingTriage) -> Result<()> {
+    finish_triage_and_post(
+        &t.findings_path,
+        &t.cwd,
+        t.client.as_ref(),
+        &t.model,
+        t.event,
+        t.non_interactive,
+        &t.pack_path,
+        t.client_override,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -51,7 +88,7 @@ pub struct ReportResumeInput {
     pub client: Option<String>,
 }
 
-pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
+pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
     let cwd = input.cwd.clone();
     let hints: Vec<&Path> = input
         .from_report
@@ -62,7 +99,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
     crate::paths::prepare_artifacts(&cwd, input.pr.as_deref(), &hints)?;
 
     if let Some(report_path) = input.from_report.clone() {
-        return run_review_from_report(ReportResumeInput {
+        let (fp, rp) = run_review_from_report(ReportResumeInput {
             report_path,
             cwd: input.cwd,
             pr: input.pr,
@@ -70,6 +107,12 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
             non_interactive: input.non_interactive,
             scan_path: input.scan_path,
             client: input.client,
+        })?;
+        return Ok(ReviewResult {
+            findings_path: fp,
+            report_path: rp,
+            answers_json: None,
+            pending_triage: None,
         });
     }
 
@@ -141,6 +184,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         from_json: input.from_json.clone(),
     })?;
     eprintln!("  {}", answers_path.display());
+    let answers_json = serde_json::to_string(&answers).ok();
 
     let (plan, plan_path) = run_plan_write(PlanWriteInput {
         client: answers.client.clone(),
@@ -202,6 +246,24 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
             report.findings.len(),
             findings_path.display()
         );
+        if input.skip_triage {
+            let pending = PendingTriage {
+                findings_path: findings_path.clone(),
+                cwd: cwd.clone(),
+                client: Some(detected.clone()),
+                model: plan.model.clone(),
+                event: input.event.clone(),
+                non_interactive: input.non_interactive,
+                pack_path: pack_path.clone(),
+                client_override: None,
+            };
+            return Ok(ReviewResult {
+                findings_path,
+                report_path,
+                answers_json,
+                pending_triage: Some(pending),
+            });
+        }
         finish_triage_and_post(
             &findings_path,
             &cwd,
@@ -212,7 +274,12 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
             &pack_path,
             None,
         )?;
-        return Ok((findings_path, report_path));
+        return Ok(ReviewResult {
+            findings_path,
+            report_path,
+            answers_json,
+            pending_triage: None,
+        });
     }
 
     eprintln!("scrutiny probe: skip AI — findings-init from scan");
@@ -224,6 +291,25 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         plan_path: Some(plan_path.clone()),
         pr: pr_for_init,
     })?;
+    if input.skip_triage {
+        let pending = PendingTriage {
+            findings_path: findings_path.clone(),
+            cwd: cwd.clone(),
+            client: Some(detected.clone()),
+            model: plan.model.clone(),
+            event: input.event.clone(),
+            non_interactive: input.non_interactive,
+            pack_path: pack_path.clone(),
+            client_override: None,
+        };
+        let _ = eval;
+        return Ok(ReviewResult {
+            findings_path,
+            report_path,
+            answers_json,
+            pending_triage: Some(pending),
+        });
+    }
     finish_triage_and_post(
         &findings_path,
         &cwd,
@@ -235,7 +321,12 @@ pub fn run_review(input: ReviewCmdInput) -> Result<(PathBuf, Option<PathBuf>)> {
         None,
     )?;
     let _ = eval;
-    Ok((findings_path, report_path))
+    Ok(ReviewResult {
+        findings_path,
+        report_path,
+        answers_json,
+        pending_triage: None,
+    })
 }
 
 /// Resume from an AI `review-report.json`: init findings → merge → triage → post.

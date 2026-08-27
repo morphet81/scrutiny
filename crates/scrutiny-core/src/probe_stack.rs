@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::gh::gh_output_retry;
 use crate::git::git_stdout;
-use crate::review_cmd::{run_review, ReviewCmdInput};
+use crate::review_cmd::{run_pending_triage, run_review, ReviewCmdInput};
 
 pub struct ProbeStackInput {
     pub cwd: PathBuf,
@@ -93,29 +93,50 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
 
     eprintln!("scrutiny probe stack: {} open PR(s)", open.len());
 
+    // Phase 1: run all reviews unattended (settings prompted once from PR #1).
+    let mut reuse_answers = input.from_json.clone();
     let mut paths = Vec::new();
+    let mut pending_triages = Vec::new();
     for (i, branch) in open.iter().enumerate() {
         let pr_number = branch.pr.as_ref().unwrap().number;
         eprintln!(
-            "scrutiny probe stack [{}/{}]: PR #{} ({})",
+            "scrutiny probe stack [{}/{}]: review PR #{} ({}) …",
             i + 1,
             open.len(),
             pr_number,
             branch.name
         );
-        let (findings_path, _) = run_review(ReviewCmdInput {
+        let result = run_review(ReviewCmdInput {
             cwd: input.cwd.clone(),
             pr: Some(pr_number.to_string()),
             client: input.client.clone(),
             spawn_mode: input.spawn_mode.clone(),
-            from_json: input.from_json.clone(),
+            from_json: reuse_answers.clone(),
             skip_agents: input.skip_agents,
             event: input.event.clone(),
             non_interactive: input.non_interactive,
             from_report: None,
             scan_path: None,
+            skip_triage: true,
         })?;
-        paths.push(findings_path);
+        if reuse_answers.is_none() {
+            reuse_answers = result.answers_json;
+        }
+        paths.push(result.findings_path);
+        if let Some(t) = result.pending_triage {
+            pending_triages.push(t);
+        }
+    }
+
+    // Phase 2: triage findings one PR at a time.
+    let total = pending_triages.len();
+    for (i, triage) in pending_triages.into_iter().enumerate() {
+        eprintln!(
+            "scrutiny probe stack [{}/{}]: triage findings …",
+            i + 1,
+            total,
+        );
+        run_pending_triage(triage)?;
     }
 
     Ok(paths)

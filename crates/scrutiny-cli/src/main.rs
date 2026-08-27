@@ -666,7 +666,7 @@ fn run() -> Result<()> {
                 }
             });
             ensure_git_repo(&cwd)?;
-            let (findings, _report) = run_review(ReviewCmdInput {
+            let result = run_review(ReviewCmdInput {
                 cwd,
                 pr,
                 client,
@@ -677,8 +677,9 @@ fn run() -> Result<()> {
                 non_interactive: yes,
                 from_report,
                 scan_path: scan,
+                skip_triage: false,
             })?;
-            println!("{}", findings.display());
+            println!("{}", result.findings_path.display());
         }
         Commands::Bench {
             workload,
