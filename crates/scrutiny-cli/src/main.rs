@@ -249,8 +249,11 @@ enum Commands {
     },
     /// Interactive Post/Ignore triage for findings JSON; print path
     FindingsTriage {
+        /// Findings JSON path (positional shorthand for --findings).
+        #[arg(index = 1)]
+        findings_pos: Option<PathBuf>,
         #[arg(long)]
-        findings: PathBuf,
+        findings: Option<PathBuf>,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -801,7 +804,10 @@ fn run() -> Result<()> {
             })?;
             println!("{}", path.display());
         }
-        Commands::FindingsTriage { findings, cwd } => {
+        Commands::FindingsTriage { findings, findings_pos, cwd } => {
+            let findings = findings
+                .or(findings_pos)
+                .context("--findings <PATH> or positional path required")?;
             let cwd = cwd.or_else(|| std::env::current_dir().ok());
             if let Some(ref c) = cwd {
                 prepare_artifacts(c, None, &[findings.as_path()])?;
