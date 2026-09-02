@@ -286,10 +286,14 @@ headless_first_output_secs = 90
 
 # Per-role model overrides. Key = agent label prefix with "-" → "_".
 # Value = tier xs|s|m|l|xl (resolved via [models.<client>]) OR a raw model id.
-# Unset → session model. Special: parley_prepush_plan defaults to xs when unset;
-# forge_loc_estimate defaults to m when unset.
+# Unset → session model.
+# Prefix catch-all: `parley = "l"` covers every parley_* role (member, lead,
+# verifier, evangelist, repair, push_fix, prepush_plan). Exact role still wins.
+# Special defaults when neither family nor role is set:
+#   parley_prepush_plan → xs; forge_loc_estimate → m.
 [agent_models]
-parley_prepush_plan = "xs"
+# parley = "l"
+# parley_prepush_plan = "xs"
 # forge_loc_estimate = "m"
 # parley_push_fix = "m"
 

@@ -350,12 +350,14 @@ Also scored (not configurable lists): AC count, description size, issue type, Fi
 
 ### `[agent_models]`
 
-Per-role model override. Key = agent label with `-` → `_` (same as `[prompts.agents]`). Value = tier `xs` \| `s` \| `m` \| `l` \| `xl` (resolved via `[models.<client>]`) **or** a raw model id. Unset → session model. Special: `parley_prepush_plan` defaults to client `xs` when unset.
+Per-role model override. Key = agent label with `-` → `_` (same as `[prompts.agents]`). Value = tier `xs` \| `s` \| `m` \| `l` \| `xl` (resolved via `[models.<client>]`) **or** a raw model id. Unset → session model.
+
+Prefix catch-all: `parley = "l"` covers every `parley_*` role. Exact role still wins (`parley_prepush_plan = "xs"` after `parley = "l"` keeps the plan agent cheap). Special defaults when neither family nor role is set: `parley_prepush_plan` → client `xs`; `forge_loc_estimate` → `m`. Same prefix pattern works for `forge`.
 
 ```toml
 [agent_models]
-parley_prepush_plan = "xs"
-# parley_member = "l"
+parley = "l"
+# parley_prepush_plan = "xs"
 # parley_push_fix = "m"
 ```
 

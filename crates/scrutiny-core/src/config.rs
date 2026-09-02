@@ -60,8 +60,10 @@ pub struct Config {
     pub prompts: PromptsConfig,
     /// Per-role model overrides. Key = agent label prefix with `-` → `_`
     /// (same as `[prompts.agents]`). Value = tier `xs|s|m|l|xl` resolved via
-    /// `[models.<client>]`, or a raw model id. Unset → session model; special
-    /// default: `parley_prepush_plan` → client `xs` when unset.
+    /// `[models.<client>]`, or a raw model id. Unset → session model.
+    /// Prefix keys apply to a family: `parley = "l"` covers every `parley_*`
+    /// role. Exact role still wins. Special defaults when neither is set:
+    /// `parley_prepush_plan` → client `xs`; `forge_loc_estimate` → `m`.
     #[serde(default)]
     pub agent_models: BTreeMap<String, String>,
 }
@@ -1018,16 +1020,19 @@ impl Config {
     /// Resolve the model for an agent role.
     ///
     /// - Explicit `[agent_models.<role>]` wins (tier name or raw model id).
-    /// - `parley_prepush_plan` with no entry defaults to tier `xs`.
-    /// - `forge_loc_estimate` with no entry defaults to tier `m`.
+    /// - Else prefix catch-all: `parley_member` reads `[agent_models.parley]`.
+    /// - `parley_prepush_plan` with neither entry defaults to tier `xs`.
+    /// - `forge_loc_estimate` with neither entry defaults to tier `m`.
     /// - Otherwise → `session_model`.
     pub fn resolve_agent_model(&self, client: &str, role: &str, session_model: &str) -> String {
-        let entry = self
-            .agent_models
-            .get(role)
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty());
-        let raw = match entry {
+        let lookup = |key: &str| {
+            self.agent_models
+                .get(key)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+        };
+        let family = role.split_once('_').map(|(p, _)| p);
+        let raw = match lookup(role).or_else(|| family.and_then(lookup)) {
             Some(v) => v,
             None if role == "parley_prepush_plan" => "xs",
             None if role == "forge_loc_estimate" => "m",
@@ -1436,11 +1441,10 @@ mod tests {
         assert_eq!(forge.tier, Tier::M);
         assert!(cfg.prompts.global.is_empty());
         assert!(cfg.prompts.agents.is_empty());
+        assert!(cfg.agent_models.is_empty());
         assert_eq!(
-            cfg.agent_models
-                .get("parley_prepush_plan")
-                .map(|s| s.as_str()),
-            Some("xs")
+            cfg.resolve_agent_model("claude", "parley_prepush_plan", "sonnet"),
+            "haiku"
         );
         assert_eq!(cfg.parley.prepush_fix_max_chunks, 8);
         assert_eq!(cfg.timeouts.parley_prepush_plan_wall_secs, Some(120));
@@ -1466,13 +1470,7 @@ mod tests {
         );
 
         let mut cfg2 = cfg.clone();
-        cfg2.agent_models.insert("parley_member".into(), "l".into());
-        cfg2.agent_models.insert("parley_lead".into(), "l".into());
-        cfg2.agent_models
-            .insert("parley_verifier".into(), "l".into());
-        cfg2.agent_models
-            .insert("parley_evangelist".into(), "l".into());
-        cfg2.agent_models.insert("parley_repair".into(), "l".into());
+        cfg2.agent_models.insert("parley".into(), "l".into());
         let expected_l = cfg2
             .models
             .get("claude")
@@ -1484,6 +1482,8 @@ mod tests {
             "parley_verifier",
             "parley_evangelist",
             "parley_repair",
+            "parley_push_fix",
+            "parley_prepush_plan",
         ] {
             assert_eq!(
                 cfg2.resolve_agent_model("claude", role, "sonnet"),
@@ -1491,6 +1491,17 @@ mod tests {
                 "{role}"
             );
         }
+        // Exact role still beats family catch-all.
+        cfg2.agent_models
+            .insert("parley_prepush_plan".into(), "xs".into());
+        assert_eq!(
+            cfg2.resolve_agent_model("claude", "parley_prepush_plan", "sonnet"),
+            "haiku"
+        );
+        assert_eq!(
+            cfg2.resolve_agent_model("claude", "parley_member", "sonnet"),
+            expected_l
+        );
         // Explicit raw model id.
         let mut cfg2 = cfg.clone();
         cfg2.agent_models
