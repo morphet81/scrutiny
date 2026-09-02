@@ -6,7 +6,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use crate::findings::AI_AGENT_TAG;
-use crate::gh::{ensure_ai_tag, ensure_gh, gh_graphql};
+use crate::gh::{ensure_ai_tag, ensure_gh, gh_graphql, resolve_pr_refs};
 use crate::parley::fixes::{compose_reply_body, load_fixes, FixEntry};
 use crate::paths::{artifact_path, write_json_pretty};
 
@@ -25,6 +25,47 @@ mutation($input: AddPullRequestReviewThreadReplyInput!) {
 pub struct ParleyReplyInput {
     pub fixes_path: PathBuf,
     pub cwd: PathBuf,
+}
+
+/// `.scrutiny/<pr>/parley-fixes.json` for a known PR number.
+pub fn parley_fixes_artifact(cwd: &Path, pr_number: &str) -> PathBuf {
+    cwd.join(".scrutiny")
+        .join(pr_number)
+        .join("parley-fixes.json")
+}
+
+/// Current-branch PR via `gh pr view` → `.scrutiny/<pr>/parley-fixes.json`.
+pub fn discover_parley_fixes(cwd: &Path) -> Result<PathBuf> {
+    let refs = resolve_pr_refs(cwd, None)?;
+    let number = refs
+        .number
+        .as_deref()
+        .context("no open PR for current branch (gh pr view). Pass --fixes <path>.")?;
+    let path = parley_fixes_artifact(cwd, number);
+    if !path.is_file() {
+        bail!(
+            "parley-fixes not found at {} — run scrutiny parley first or pass --fixes",
+            path.display()
+        );
+    }
+    eprintln!("scrutiny parley-reply: PR #{number} → {}", path.display());
+    Ok(path)
+}
+
+/// Explicit `--fixes` wins; else discover from current-branch PR.
+pub fn resolve_parley_fixes_path(cwd: &Path, fixes: Option<PathBuf>) -> Result<PathBuf> {
+    match fixes {
+        Some(p) => {
+            if !p.is_file() {
+                bail!(
+                    "parley-fixes not found at {} — run scrutiny parley first or pass --fixes",
+                    p.display()
+                );
+            }
+            Ok(p)
+        }
+        None => discover_parley_fixes(cwd),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,5 +256,23 @@ mod tests {
         // compose handled in fixes; here we only check helper shape
         let v = reply_input_json("PRRT_x", "");
         assert_eq!(v["input"]["body"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn parley_fixes_artifact_under_pr_session() {
+        let p = parley_fixes_artifact(Path::new("/repo"), "42");
+        assert_eq!(p, PathBuf::from("/repo/.scrutiny/42/parley-fixes.json"));
+    }
+
+    #[test]
+    fn resolve_parley_fixes_errors_when_explicit_missing() {
+        let err = resolve_parley_fixes_path(
+            Path::new("/repo"),
+            Some(PathBuf::from("/repo/.scrutiny/9/parley-fixes.json")),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("parley-fixes not found"), "{msg}");
+        assert!(msg.contains("parley-fixes.json"), "{msg}");
     }
 }

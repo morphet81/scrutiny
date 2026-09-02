@@ -18,11 +18,11 @@ pub mod pack;
 pub mod parley;
 pub mod parley_cmd;
 pub mod paths;
-pub mod probe_stack;
 pub mod plan;
 pub mod pr;
 pub mod pr_cmd;
 pub mod prepush;
+pub mod probe_stack;
 pub mod review_cmd;
 pub mod review_session;
 pub mod runtime;
@@ -59,8 +59,8 @@ pub use forge_cmd::{run_forge, ForgeCmdInput};
 pub use map::{run_map, MapReport};
 pub use pack::{run_pack, PackReport};
 pub use parley::{
-    run_parley_fetch, run_parley_plan_write, run_parley_reply, ParleyAnswers, ParleyFetchInput,
-    ParleyPlanWriteInput, ParleyReplyInput,
+    resolve_parley_fixes_path, run_parley_fetch, run_parley_plan_write, run_parley_reply,
+    ParleyAnswers, ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput,
 };
 pub use parley_cmd::{run_parley, ParleyCmdInput};
 pub use paths::{

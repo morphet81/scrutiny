@@ -1,20 +1,20 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use scrutiny_core::run_probe_stack;
 use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use scrutiny_core::{
-    load_plan_answers, partition_pack_paths, prepare_artifacts, run_agent_prompt, run_bench,
-    run_eval, run_findings_init, run_findings_resolve, run_findings_triage, run_findings_validate,
-    run_forge, run_forge_brief, run_forge_bulk, run_forge_bulk_item, run_forge_context,
-    run_forge_fetch, run_forge_plan_write, run_map, run_pack, run_parley, run_parley_fetch,
-    run_parley_plan_write, run_parley_reply, run_plan_confirm, run_plan_write, run_post_comments,
-    run_pr, run_review, run_review_session_write, run_scan, run_skills_install, AgentPromptInput,
-    BenchArm, BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeBulkInput,
-    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput,
-    ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput,
-    PostCommentsInput, PrCmdInput, ProbeStackInput, ReviewCmdInput, ReviewSessionWriteInput,
-    SkillsInstallInput,
+    load_plan_answers, partition_pack_paths, prepare_artifacts, resolve_parley_fixes_path,
+    run_agent_prompt, run_bench, run_eval, run_findings_init, run_findings_resolve,
+    run_findings_triage, run_findings_validate, run_forge, run_forge_brief, run_forge_bulk,
+    run_forge_bulk_item, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map,
+    run_pack, run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply,
+    run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
+    run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
+    BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeBulkInput, ForgeCmdInput,
+    ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput,
+    ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
+    PrCmdInput, ProbeStackInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
-use scrutiny_core::run_probe_stack;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -329,9 +329,15 @@ enum Commands {
         cwd: Option<PathBuf>,
     },
     /// Post thread replies from parley-fixes.json
+    ///
+    /// No `--fixes`: `gh pr view` for current branch, then
+    /// `.scrutiny/<pr>/parley-fixes.json`. Errors if the PR or file is missing.
     ParleyReply {
+        /// parley-fixes.json (positional shorthand for --fixes)
+        #[arg(index = 1)]
+        fixes_pos: Option<PathBuf>,
         #[arg(long)]
-        fixes: PathBuf,
+        fixes: Option<PathBuf>,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -808,7 +814,11 @@ fn run() -> Result<()> {
             })?;
             println!("{}", path.display());
         }
-        Commands::FindingsTriage { findings, findings_pos, cwd } => {
+        Commands::FindingsTriage {
+            findings,
+            findings_pos,
+            cwd,
+        } => {
             let findings = findings
                 .or(findings_pos)
                 .context("--findings <PATH> or positional path required")?;
@@ -916,9 +926,14 @@ fn run() -> Result<()> {
             })?;
             println!("{}", path.display());
         }
-        Commands::ParleyReply { fixes, cwd } => {
+        Commands::ParleyReply {
+            fixes,
+            fixes_pos,
+            cwd,
+        } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             ensure_git_repo(&cwd)?;
+            let fixes = resolve_parley_fixes_path(&cwd, fixes.or(fixes_pos))?;
             prepare_artifacts(&cwd, None, &[fixes.as_path()])?;
             let (result, path) = run_parley_reply(ParleyReplyInput {
                 fixes_path: fixes,

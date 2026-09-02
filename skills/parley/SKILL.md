@@ -91,7 +91,7 @@ disjoint). Host commits `fix: repair pre-push failures`, re-checks (up to
 COMMENTS="$("$SCRUTINY_BIN" parley-fetch --cwd <repo> [--pr <n>])"
 PLAN="$("$SCRUTINY_BIN" parley-plan-write --comments "$COMMENTS" --from-json '{...}')"
 # … agents update parley-fixes.json …
-"$SCRUTINY_BIN" parley-reply --fixes <parley-fixes.json> --cwd <repo>
+"$SCRUTINY_BIN" parley-reply [--fixes <parley-fixes.json>] --cwd <repo>
 ```
 
 Prefer jump straight to `"$SCRUTINY_BIN" parley`.

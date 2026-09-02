@@ -14,4 +14,7 @@ pub use plan::{
     partition_comments, prompt_parley_answers, run_parley_plan_write, ParleyAnswers, ParleyPlan,
     ParleyPlanWriteInput,
 };
-pub use reply::{run_parley_reply, ParleyReplyInput, ParleyReplyResult};
+pub use reply::{
+    discover_parley_fixes, resolve_parley_fixes_path, run_parley_reply, ParleyReplyInput,
+    ParleyReplyResult,
+};
