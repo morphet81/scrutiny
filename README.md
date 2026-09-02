@@ -45,10 +45,12 @@ First run copies [`config/default.toml`](config/default.toml) → `~/.scrutiny/c
 ### Probe — review
 
 ```bash
-scrutiny probe
+scrutiny probe                    # open PR for current branch (gh pr view), else local diff
 scrutiny probe --pr 42
 scrutiny probe --client claude --spawn-mode isolated
 ```
+
+Without `--pr`, scrutiny runs `gh pr view` in the working directory to find the open PR for the current branch. When found, it diffs the PR base…head and writes artifacts under `.scrutiny/<pr>/`. With no open PR, it falls back to a local branch diff vs the detected base.
 
 Flow: detect agent CLI → eval / map / pack / scan → plan knobs → agents (+ parallel PR summary) → triage → post comments to the PR.
 

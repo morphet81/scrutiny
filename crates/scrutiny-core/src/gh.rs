@@ -181,9 +181,85 @@ pub fn ensure_ai_tag(body: &str, tag: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrViewRefs {
+    /// PR base (destination) branch name, e.g. `main`.
+    pub base: Option<String>,
+    /// PR head commit SHA.
+    pub head: Option<String>,
+    /// PR number as a string.
+    pub number: Option<String>,
+    /// Clone URL of the PR's own repository, derived from the PR web URL
+    /// (e.g. `https://github.com/owner/repo.git`). Used to fetch the PR's
+    /// real refs regardless of the local `origin`.
+    pub repo_url: Option<String>,
+}
+
+/// Derive a clone URL from a PR web URL by stripping the `/pull/<n>` suffix
+/// and appending `.git`. Preserves the host (works for GitHub Enterprise).
+pub fn repo_url_from_pr_url(pr_url: &str) -> Option<String> {
+    let (base, _) = pr_url.split_once("/pull/")?;
+    Some(format!("{base}.git"))
+}
+
+/// Resolve PR refs via `gh pr view`. When `pr` is omitted, uses the open PR for
+/// the current branch in `cwd` (same as bare `gh pr view`).
+pub fn resolve_pr_refs(cwd: &Path, pr: Option<&str>) -> Result<PrViewRefs> {
+    if !command_exists("gh") {
+        return Ok(PrViewRefs::default());
+    }
+    let mut args = vec![
+        "pr".into(),
+        "view".into(),
+        "--json".into(),
+        "baseRefName,headRefOid,url,number".into(),
+    ];
+    if let Some(pr) = pr {
+        args.insert(2, pr.to_string());
+    }
+    let output = Command::new("gh")
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+        .context("gh pr view")?;
+    if !output.status.success() {
+        if pr.is_some() {
+            bail!(
+                "gh pr view failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return Ok(PrViewRefs::default());
+    }
+    let v: Value = serde_json::from_slice(&output.stdout).context("parse gh pr view")?;
+    let base = v
+        .get("baseRefName")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let head = v
+        .get("headRefOid")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let number = v
+        .get("number")
+        .and_then(|x| x.as_u64())
+        .map(|n| n.to_string())
+        .or_else(|| pr.map(|s| s.to_string()));
+    let repo_url = v
+        .get("url")
+        .and_then(|x| x.as_str())
+        .and_then(repo_url_from_pr_url);
+    Ok(PrViewRefs {
+        base,
+        head,
+        number,
+        repo_url,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_transient;
+    use super::{is_transient, repo_url_from_pr_url};
 
     #[test]
     fn detects_observed_502() {
@@ -211,5 +287,26 @@ mod tests {
         assert!(!is_transient(
             "pull request review thread must be on a line in the diff"
         ));
+    }
+
+    #[test]
+    fn repo_url_strips_pull_suffix() {
+        assert_eq!(
+            repo_url_from_pr_url("https://github.com/tablecheck/manager-ember-desktop/pull/2302"),
+            Some("https://github.com/tablecheck/manager-ember-desktop.git".into())
+        );
+    }
+
+    #[test]
+    fn repo_url_preserves_enterprise_host() {
+        assert_eq!(
+            repo_url_from_pr_url("https://ghe.corp.example/team/repo/pull/7"),
+            Some("https://ghe.corp.example/team/repo.git".into())
+        );
+    }
+
+    #[test]
+    fn repo_url_none_without_pull_segment() {
+        assert_eq!(repo_url_from_pr_url("https://github.com/o/r"), None);
     }
 }

@@ -145,7 +145,7 @@ enum Commands {
     Probe {
         #[arg(long)]
         cwd: Option<PathBuf>,
-        /// PR URL or number (else local branch)
+        /// PR URL or number (else open PR for current branch via `gh pr view`, else local diff)
         #[arg(long)]
         pr: Option<String>,
         /// Positional: PR URL/number, or `stack` [N] for gh stack mode

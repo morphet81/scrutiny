@@ -1,8 +1,7 @@
 //! Orchestrate end-to-end `scrutiny probe` (script-driven).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread::{self, JoinHandle};
 
 use crate::agent_runner::{
@@ -17,6 +16,7 @@ use crate::findings::{
     run_post_comments, FindingsInitInput, PostCommentsInput, TriageAskCtx,
 };
 use crate::git;
+use crate::gh::resolve_pr_refs;
 use crate::map::run_map;
 use crate::pack::run_pack;
 use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteInput};
@@ -98,7 +98,20 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         .into_iter()
         .chain(input.scan_path.as_deref())
         .collect();
-    crate::paths::prepare_artifacts(&cwd, input.pr.as_deref(), &hints)?;
+
+    let pr_refs = resolve_pr_refs(&cwd, input.pr.as_deref())?;
+    let effective_pr = input
+        .pr
+        .as_deref()
+        .or(pr_refs.number.as_deref());
+    if input.pr.is_none() {
+        if let Some(n) = &pr_refs.number {
+            eprintln!("scrutiny probe: using PR #{n} for current branch");
+        } else {
+            eprintln!("scrutiny probe: no open PR for current branch — local diff vs base");
+        }
+    }
+    crate::paths::prepare_artifacts(&cwd, effective_pr, &hints)?;
 
     if let Some(report_path) = input.from_report.clone() {
         let (fp, rp) = run_review_from_report(ReportResumeInput {
@@ -136,13 +149,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         input.non_interactive || input.from_json.is_some(),
     )?;
 
-    let pr_refs = resolve_pr_refs(&cwd, input.pr.as_deref())?;
     let pr_for_init = pr_refs.number.clone();
-    if let Some(ref prn) = pr_refs.number {
-        if let Some(n) = crate::paths::parse_pr_number(prn) {
-            crate::paths::init_artifact_ctx(&cwd, &n.to_string())?;
-        }
-    }
 
     // PR mode: fetch the PR's real base + head from its own repo and diff those
     // exact commits, so the review is scoped to the PR regardless of local
@@ -360,11 +367,6 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
 
     let pr_refs = resolve_pr_refs(&cwd, input.pr.as_deref())?;
     let pr_arg = pr_refs.number.or(input.pr.clone());
-    if let Some(ref prn) = pr_arg {
-        if let Some(n) = crate::paths::parse_pr_number(prn) {
-            crate::paths::init_artifact_ctx(&cwd, &n.to_string())?;
-        }
-    }
 
     let findings_path = if let Some(scan_path) = &input.scan_path {
         eprintln!(
@@ -523,102 +525,4 @@ fn finish_triage_and_post(
         eprintln!("  {url}");
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Default)]
-struct PrRefs {
-    /// PR base (destination) branch name, e.g. `main`.
-    base: Option<String>,
-    /// PR head commit SHA.
-    head: Option<String>,
-    /// PR number as a string.
-    number: Option<String>,
-    /// Clone URL of the PR's own repository, derived from the PR web URL
-    /// (e.g. `https://github.com/owner/repo.git`). Used to fetch the PR's
-    /// real refs regardless of the local `origin`.
-    repo_url: Option<String>,
-}
-
-/// Derive a clone URL from a PR web URL by stripping the `/pull/<n>` suffix
-/// and appending `.git`. Preserves the host (works for GitHub Enterprise).
-fn repo_url_from_pr_url(pr_url: &str) -> Option<String> {
-    let (base, _) = pr_url.split_once("/pull/")?;
-    Some(format!("{base}.git"))
-}
-
-fn resolve_pr_refs(cwd: &Path, pr: Option<&str>) -> Result<PrRefs> {
-    let mut args = vec![
-        "pr".into(),
-        "view".into(),
-        "--json".into(),
-        "baseRefName,headRefOid,url,number".into(),
-    ];
-    if let Some(pr) = pr {
-        args.insert(2, pr.to_string());
-    }
-    let output = Command::new("gh")
-        .args(&args)
-        .current_dir(cwd)
-        .output()
-        .context("gh pr view")?;
-    if !output.status.success() {
-        if pr.is_some() {
-            bail!(
-                "gh pr view failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        // No --pr and no PR for current branch — resume can prompt later
-        return Ok(PrRefs::default());
-    }
-    let v: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let base = v
-        .get("baseRefName")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    let head = v
-        .get("headRefOid")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string());
-    let number = v
-        .get("number")
-        .and_then(|x| x.as_u64())
-        .map(|n| n.to_string())
-        .or_else(|| pr.map(|s| s.to_string()));
-    let repo_url = v
-        .get("url")
-        .and_then(|x| x.as_str())
-        .and_then(repo_url_from_pr_url);
-    Ok(PrRefs {
-        base,
-        head,
-        number,
-        repo_url,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn repo_url_strips_pull_suffix() {
-        assert_eq!(
-            repo_url_from_pr_url("https://github.com/tablecheck/manager-ember-desktop/pull/2302"),
-            Some("https://github.com/tablecheck/manager-ember-desktop.git".into())
-        );
-    }
-
-    #[test]
-    fn repo_url_preserves_enterprise_host() {
-        assert_eq!(
-            repo_url_from_pr_url("https://ghe.corp.example/team/repo/pull/7"),
-            Some("https://ghe.corp.example/team/repo.git".into())
-        );
-    }
-
-    #[test]
-    fn repo_url_none_without_pull_segment() {
-        assert_eq!(repo_url_from_pr_url("https://github.com/o/r"), None);
-    }
 }
