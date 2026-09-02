@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::eval::EvalReport;
+use crate::agent_runner::ProbePrSummary;
 use crate::gh::{gh_output_retry, is_transient};
 use crate::mdterm::{term_cols, wrap_indent};
 use crate::pack::PackReport;
@@ -30,6 +31,8 @@ pub struct FindingsReport {
     pub scan_path: Option<String>,
     pub plan_path: Option<String>,
     pub review: ReviewMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_summary: Option<ProbePrSummary>,
     pub findings: Vec<TriageFinding>,
 }
 
@@ -118,6 +121,7 @@ pub struct FindingsInitInput {
     pub pack_path: Option<PathBuf>,
     pub plan_path: Option<PathBuf>,
     pub pr: Option<String>,
+    pub pr_summary: Option<ProbePrSummary>,
 }
 
 pub fn run_findings_init(input: FindingsInitInput) -> Result<(FindingsReport, PathBuf)> {
@@ -184,6 +188,7 @@ pub fn run_findings_init(input: FindingsInitInput) -> Result<(FindingsReport, Pa
         scan_path: Some(input.scan_path.display().to_string()),
         plan_path: input.plan_path.map(|p| p.display().to_string()),
         review: ReviewMeta::default(),
+        pr_summary: input.pr_summary,
         findings,
     };
 
@@ -367,6 +372,7 @@ pub fn run_findings_init_empty(cwd: &Path, pr: Option<&str>) -> Result<(Findings
         scan_path: None,
         plan_path: None,
         review: ReviewMeta::default(),
+        pr_summary: None,
         findings: Vec::new(),
     };
 
@@ -481,6 +487,48 @@ enum TriagePick {
     Custom(String),
 }
 
+/// Print PR overview from the dedicated summary agent (before findings triage).
+pub fn print_pr_summary(summary: &ProbePrSummary) {
+    eprintln!(
+        "\n{}═══════════════════════════════════════════════════════════════",
+        style_bold()
+    );
+    eprintln!(" PR summary");
+    eprintln!(
+        "═══════════════════════════════════════════════════════════════{}",
+        style_reset()
+    );
+    if !summary.purpose.is_empty() {
+        eprintln!("\n{}What it does:{}", style_bold(), style_reset());
+        for line in summary.purpose.lines() {
+            eprintln!("  {line}");
+        }
+    }
+    if !summary.architecture.is_empty() {
+        eprintln!("\n{}Architecture:{}", style_bold(), style_reset());
+        for line in summary.architecture.lines() {
+            eprintln!("  {line}");
+        }
+    }
+    if !summary.good_points.is_empty() {
+        eprintln!("\n{}Good points:{}", style_bold(), style_reset());
+        for p in &summary.good_points {
+            eprintln!("  • {p}");
+        }
+    }
+    if !summary.bad_points.is_empty() {
+        eprintln!("\n{}Concerns:{}", style_bold(), style_reset());
+        for p in &summary.bad_points {
+            eprintln!("  • {p}");
+        }
+    }
+    eprintln!(
+        "\n{}═══════════════════════════════════════════════════════════════{}\n",
+        style_bold(),
+        style_reset()
+    );
+}
+
 /// Interactive triage: Post/Ignore/Ask per finding.
 /// TTY: arrow-key menu (Ask is an explicit item — never free-text on same prompt).
 /// Non-TTY: letter line; ask only via `ask <question>` or multi-word free text (never bare P/I/A…).
@@ -492,6 +540,9 @@ pub fn run_findings_triage(
 ) -> Result<(FindingsReport, PathBuf)> {
     let mut ask = ask;
     let mut report: FindingsReport = read_json(findings_path)?;
+    if let Some(ref summary) = report.pr_summary {
+        print_pr_summary(summary);
+    }
     if report.findings.is_empty() {
         eprintln!("scrutiny findings-triage: no findings");
         return Ok((report, findings_path.to_path_buf()));

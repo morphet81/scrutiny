@@ -137,6 +137,10 @@ enum Commands {
         from_json: Option<String>,
     },
     /// Orchestrate full probe: analyze → plan → headless agents → triage → post
+    ///
+    /// `scrutiny probe stack [N]` probes every open PR in the current `gh stack`
+    /// (optionally after `gh stack checkout N`). Plan knobs are prompted once on
+    /// the first PR and reused; triage runs after all reviews complete.
     #[command(hide = true)]
     Probe {
         #[arg(long)]
@@ -144,7 +148,7 @@ enum Commands {
         /// PR URL or number (else local branch)
         #[arg(long)]
         pr: Option<String>,
-        /// Positional alias for --pr
+        /// Positional: PR URL/number, or `stack` [N] for gh stack mode
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
         #[arg(long)]
@@ -1119,6 +1123,7 @@ fn run() -> Result<()> {
                 pack_path: pack,
                 plan_path: plan,
                 pr,
+                pr_summary: None,
             })?;
             println!("{}", path.display());
         }

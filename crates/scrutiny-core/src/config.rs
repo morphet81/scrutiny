@@ -89,6 +89,9 @@ pub struct TimeoutsConfig {
     /// Triage "Ask a question…" agent.
     #[serde(default)]
     pub probe_ask_wall_secs: Option<u64>,
+    /// Probe PR overview agent (shown before findings triage).
+    #[serde(default)]
+    pub probe_summary_wall_secs: Option<u64>,
     /// TDD test-plan agent.
     #[serde(default)]
     pub forge_test_plan_wall_secs: Option<u64>,
@@ -552,6 +555,9 @@ pub struct ReviewConfig {
     pub security_by_tier: TierBools,
     pub performance_by_tier: TierBools,
     pub error_handling_by_tier: TierBools,
+    /// Headless PR overview agent before findings triage (`scrutiny probe`).
+    #[serde(default = "default_true")]
+    pub pr_summary: bool,
     #[serde(default)]
     pub signals: ReviewSignalsConfig,
 }

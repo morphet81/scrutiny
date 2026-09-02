@@ -3,9 +3,11 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread::{self, JoinHandle};
 
 use crate::agent_runner::{
-    run_isolated_review, run_team_review, session_records_from_report, ReviewReport,
+    run_isolated_review, run_pr_summary_agent, run_team_review, session_records_from_report,
+    ProbePrSummary, ReviewReport,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
@@ -205,6 +207,14 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
     let mut report_path: Option<PathBuf> = None;
 
     if !plan.skip_ai && !input.skip_agents {
+        let summary_handle = spawn_pr_summary_agent(
+            cfg.review.pr_summary,
+            &detected,
+            &plan.model,
+            &pack_path,
+            &cwd,
+        );
+
         let term = resolve_terminal(cfg.headless, &detected.client, "probe");
         let (report, rpath) = if plan.spawn_mode == "team" {
             eprintln!("scrutiny probe: team lead agent…");
@@ -220,6 +230,8 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
             report.deduped_from
         );
         report_path = Some(rpath);
+
+        let pr_summary = join_pr_summary_agent(summary_handle);
 
         let agents_json = serde_json::to_string(&session_records_from_report(&report))?;
         match run_review_session_write(ReviewSessionWriteInput {
@@ -239,6 +251,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
             pack_path: Some(pack_path.clone()),
             plan_path: Some(plan_path.clone()),
             pr: pr_for_init.clone(),
+            pr_summary,
         })?;
         merge_ai_findings(&findings_path, &report.findings)?;
         eprintln!(
@@ -290,6 +303,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         pack_path: Some(pack_path.clone()),
         plan_path: Some(plan_path.clone()),
         pr: pr_for_init,
+        pr_summary: None,
     })?;
     if input.skip_triage {
         let pending = PendingTriage {
@@ -364,6 +378,7 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
             pack_path: None,
             plan_path: None,
             pr: pr_arg.clone(),
+            pr_summary: None,
         })?;
         path
     } else {
@@ -408,6 +423,43 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
         input.client.clone(),
     )?;
     Ok((findings_path, Some(input.report_path)))
+}
+
+fn spawn_pr_summary_agent(
+    enabled: bool,
+    client: &crate::runtime::DetectedClient,
+    model: &str,
+    pack_path: &Path,
+    cwd: &Path,
+) -> Option<JoinHandle<Result<(ProbePrSummary, PathBuf)>>> {
+    if !enabled {
+        return None;
+    }
+    let client = client.clone();
+    let model = model.to_string();
+    let pack = pack_path.to_path_buf();
+    let cwd = cwd.to_path_buf();
+    Some(thread::spawn(move || run_pr_summary_agent(&client, &model, &pack, &cwd)))
+}
+
+fn join_pr_summary_agent(
+    handle: Option<JoinHandle<Result<(ProbePrSummary, PathBuf)>>>,
+) -> Option<ProbePrSummary> {
+    let handle = handle?;
+    match handle.join() {
+        Ok(Ok((summary, path))) => {
+            eprintln!("scrutiny probe: pr summary → {}", path.display());
+            Some(summary)
+        }
+        Ok(Err(e)) => {
+            eprintln!("scrutiny probe: warn: pr summary agent: {e:#}");
+            None
+        }
+        Err(_) => {
+            eprintln!("scrutiny probe: warn: pr summary thread panicked");
+            None
+        }
+    }
 }
 
 fn finish_triage_and_post(

@@ -39,6 +39,8 @@ pub enum HeadlessKind {
     Parley,
     /// One-shot free-form text (e.g. PR description). Read-only, no schema.
     Text,
+    /// Probe PR overview (purpose, architecture, strengths, concerns). Read-only + summary schema.
+    Summary,
 }
 
 /// Whether `model` supports Claude Code `--permission-mode auto`. Unsupported
@@ -213,6 +215,39 @@ pub const FINDINGS_JSON_SCHEMA: &str = r#"{
 /// Ask-a-question follow-up: a direct `answer` for the reviewer plus optional
 /// revised finding fields. Distinct from `FINDINGS_JSON_SCHEMA` — an ask reply
 /// is one finding, not a `findings` array.
+pub const PR_SUMMARY_JSON_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "purpose": { "type": "string" },
+    "architecture": { "type": "string" },
+    "good_points": { "type": "array", "items": { "type": "string" } },
+    "bad_points": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["purpose", "architecture", "good_points", "bad_points"]
+}"#;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProbePrSummary {
+    pub purpose: String,
+    pub architecture: String,
+    pub good_points: Vec<String>,
+    pub bad_points: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrSummarySession {
+    pub version: u32,
+    pub summary: ProbePrSummary,
+    pub model: String,
+    pub client: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
+}
+
 pub const ASK_REVISE_JSON_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -497,6 +532,12 @@ pub fn run_headless(
                         .arg("Read")
                         .arg("--json-schema")
                         .arg(ASK_REVISE_JSON_SCHEMA);
+                }
+                HeadlessKind::Summary => {
+                    cmd.arg("--allowedTools")
+                        .arg("Read")
+                        .arg("--json-schema")
+                        .arg(PR_SUMMARY_JSON_SCHEMA);
                 }
                 HeadlessKind::TeamLead => {
                     cmd.arg("--json-schema").arg(FINDINGS_JSON_SCHEMA);
@@ -836,6 +877,7 @@ pub(crate) fn cursor_headless_flags(model: &str, cwd: &Path, kind: HeadlessKind)
         HeadlessKind::Isolated
         | HeadlessKind::Consolidate
         | HeadlessKind::Ask
+        | HeadlessKind::Summary
         | HeadlessKind::Text => {
             args.push("--mode".into());
             args.push("ask".into());
@@ -1493,6 +1535,117 @@ fn consolidate_findings(
 }
 
 /// Run isolated parallel specialists; collate + dedupe into ReviewReport.
+pub fn build_pr_summary_prompt(pack_path: &Path) -> String {
+    let header = crate::caveman::dialect(
+        "Scrutiny PR summary specialist. ISOLATED. No subagents. No findings.",
+        "Scrutiny PR summary specialist. ISOLATED mode. No subagents. No findings.",
+    );
+    format!(
+        r#"{header}
+
+Read the pack and explain the change for a human reviewer about to triage findings.
+
+Tier 0: pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
+Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path.
+Tier 2: at most 6 extra Reads of head files already in pack/xref/imports. No writes.
+
+Output JSON ONLY. No prose outside JSON.
+{{
+  "purpose": "1-3 sentences: what this PR does and why",
+  "architecture": "1-3 sentences: how the change is structured (layers, modules, data flow)",
+  "good_points": ["strength 1", "strength 2"],
+  "bad_points": ["risk or concern 1", "risk or concern 2"]
+}}
+
+Rules:
+- Be concrete — cite modules/patterns from the pack, not generic praise.
+- `good_points` / `bad_points`: 2-5 bullets each; empty array only if truly none.
+- This is overview only — do NOT emit code-review findings.
+
+## Pack
+Pack: `{pack}`
+Prefer pack.md sibling if present (same stem). Read entire pack.
+"#,
+        pack = pack_path.display()
+    )
+}
+
+pub fn parse_pr_summary_json(raw: &str) -> Result<ProbePrSummary> {
+    let payload = extract_json_payload(raw)?;
+    let v: Value = serde_json::from_str(&payload).context("parse PR summary JSON")?;
+    Ok(ProbePrSummary {
+        purpose: v
+            .get("purpose")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        architecture: v
+            .get("architecture")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        good_points: v
+            .get("good_points")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        bad_points: v
+            .get("bad_points")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// Dedicated headless agent: PR overview for display before findings triage.
+/// Always runs headless (even when other probe agents use visible terminals).
+pub fn run_pr_summary_agent(
+    client: &DetectedClient,
+    model: &str,
+    pack_path: &Path,
+    cwd: &Path,
+) -> Result<(ProbePrSummary, PathBuf)> {
+    let prompt = build_pr_summary_prompt(pack_path);
+    eprintln!("scrutiny probe: pr summary agent…");
+    let out = run_headless(
+        client,
+        model,
+        cwd,
+        &prompt,
+        HeadlessKind::Summary,
+        "summary#1",
+        crate::timeouts::probe_summary(),
+    )?;
+    let summary = parse_pr_summary_json(&out.stdout).context("parse pr summary agent output")?;
+    if summary.purpose.is_empty() && summary.architecture.is_empty() {
+        bail!("pr summary agent returned empty purpose and architecture");
+    }
+    let session = PrSummarySession {
+        version: 1,
+        summary: summary.clone(),
+        model: model.to_string(),
+        client: client.client.clone(),
+        session_id: out.session_id,
+        request_id: out.request_id,
+        wall_ms: Some(out.wall_ms),
+    };
+    let out_path = temp_artifact_path(&client.client, "review", "pr-summary");
+    write_json_pretty(&out_path, &session)?;
+    Ok((summary, out_path))
+}
+
 pub fn run_isolated_review(
     client: &DetectedClient,
     plan: &ConfirmedPlan,
@@ -2271,6 +2424,16 @@ mod tests {
         .to_string();
         assert!(err.contains("claude and cursor only"), "{err}");
         assert!(err.contains("codex"), "{err}");
+    }
+
+    #[test]
+    fn parse_pr_summary_json_extracts_fields() {
+        let raw = r#"{"purpose":"Adds auth","architecture":"Service layer","good_points":["Clean split"],"bad_points":["No tests"]}"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.purpose, "Adds auth");
+        assert_eq!(s.architecture, "Service layer");
+        assert_eq!(s.good_points, vec!["Clean split"]);
+        assert_eq!(s.bad_points, vec!["No tests"]);
     }
 
     #[test]

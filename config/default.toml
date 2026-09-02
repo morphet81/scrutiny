@@ -59,6 +59,9 @@ M = true
 L = true
 XL = true
 
+# Headless PR overview before findings triage (`scrutiny probe`). Default true.
+# pr_summary = false
+
 [review.signals]
 ignore_content_signals = false
 security_path_globs = [
@@ -258,6 +261,8 @@ progress_secs = 15
 # probe_isolated_wall_secs = 600
 # probe_team_wall_secs = 600
 # probe_consolidate_wall_secs = 600
+# PR overview agent (parallel with reviewers; shown before triage).
+# probe_summary_wall_secs = 600
 # Triage "Ask a question…" agent.
 # probe_ask_wall_secs = 600
 
@@ -331,6 +336,7 @@ artifact_globs = [
 # --- probe (code review) ---
 # reviewer = ""
 # evangelist = ""
+# summary = ""              # PR overview agent (parallel; before triage)
 # security = ""
 # performance = ""
 # error_handling = ""

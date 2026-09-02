@@ -50,7 +50,7 @@ scrutiny probe --pr 42
 scrutiny probe --client claude --spawn-mode isolated
 ```
 
-Flow: detect agent CLI → eval / map / pack / scan → plan knobs → agents → triage → post comments to the PR.
+Flow: detect agent CLI → eval / map / pack / scan → plan knobs → agents (+ parallel PR summary) → triage → post comments to the PR.
 
 Artifacts: `<repo>/.scrutiny/<pr>/` (or `.scrutiny/local/`). Config: `~/.scrutiny/config.toml`.
 
@@ -59,6 +59,19 @@ Resume triage/post from an existing AI report (skip analyze/agents):
 ```bash
 scrutiny probe --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutiny/42/scan.json]
 ```
+
+**Stack** (probe every open PR in the current `gh stack`):
+
+```bash
+scrutiny probe stack
+scrutiny probe stack 2
+scrutiny probe stack --client claude --yes
+```
+
+- Optional stack number runs `gh stack checkout N` first (then restores your branch)
+- Plan knobs asked once on the first PR, reused for the rest
+- Reviews all open PRs first; triage runs one PR at a time after
+- Requires `gh stack` (same flags as single-PR probe: `--client`, `--spawn-mode`, `--yes`, …)
 
 ### Forge — implement
 
@@ -167,6 +180,7 @@ Per-tier specialist toggles (`XS`…`XL` bools).
 
 | Key | Default | Explanation |
 |-----|---------|-------------|
+| `pr_summary` | `true` | Parallel headless agent writes PR overview (purpose, architecture, good/bad points) shown before findings triage; set `false` to skip |
 | `security_by_tier` | XS/S off; M/L/XL on | Spawn security specialist when true for the eval tier |
 | `performance_by_tier` | XS/S/M off; L/XL on | Spawn performance specialist |
 | `error_handling_by_tier` | XS off; S–XL on | Spawn error-handling specialist |
@@ -355,6 +369,7 @@ Seconds. `agent_wall_secs` is the base; unset stages derive from it (`0` = unset
 | `probe_isolated_wall_secs` | base | Isolated probe agents |
 | `probe_team_wall_secs` | base | Team-mode probe lead |
 | `probe_consolidate_wall_secs` | base | Isolated consolidate pass |
+| `probe_summary_wall_secs` | base | PR overview agent (parallel; before triage) |
 | `probe_ask_wall_secs` | base | Triage “Ask a question…” |
 | `forge_test_plan_wall_secs` | base | TDD test-plan agent |
 | `forge_pr_description_wall_secs` | base | PR description agent |
