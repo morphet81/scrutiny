@@ -1573,6 +1573,23 @@ Prefer pack.md sibling if present (same stem). Read entire pack.
 pub fn parse_pr_summary_json(raw: &str) -> Result<ProbePrSummary> {
     let payload = extract_json_payload(raw)?;
     let v: Value = serde_json::from_str(&payload).context("parse PR summary JSON")?;
+    // Claude/Cursor `--output-format json` + `--json-schema`: summary lives in
+    // `structured_output` (object) or `result` (JSON string). Envelope has no
+    // top-level `purpose` — without unwrap, fields parse empty and probe skips
+    // the summary UI (same pattern as parse_findings_json / prepush).
+    // Prefer structured_output: Claude often leaves `result` as "".
+    if v.get("purpose").is_none() {
+        if let Some(r) = v.get("structured_output") {
+            return parse_pr_summary_json(&r.to_string());
+        }
+        if let Some(r) = v
+            .get("result")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            return parse_pr_summary_json(r);
+        }
+    }
     Ok(ProbePrSummary {
         purpose: v
             .get("purpose")
@@ -2434,6 +2451,36 @@ mod tests {
         assert_eq!(s.architecture, "Service layer");
         assert_eq!(s.good_points, vec!["Clean split"]);
         assert_eq!(s.bad_points, vec!["No tests"]);
+    }
+
+    #[test]
+    fn parse_pr_summary_json_unwraps_claude_structured_output() {
+        let raw = r#"{
+          "type":"result","subtype":"success","is_error":false,
+          "result":"",
+          "structured_output":{
+            "purpose":"Seat guest flow refactor",
+            "architecture":"Hook extracts table seating state",
+            "good_points":["Clear split"],
+            "bad_points":["Missing tests"]
+          }
+        }"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.purpose, "Seat guest flow refactor");
+        assert_eq!(s.architecture, "Hook extracts table seating state");
+        assert_eq!(s.good_points, vec!["Clear split"]);
+        assert_eq!(s.bad_points, vec!["Missing tests"]);
+    }
+
+    #[test]
+    fn parse_pr_summary_json_unwraps_result_string() {
+        let raw = r#"{
+          "type":"result",
+          "result":"{\"purpose\":\"Via result\",\"architecture\":\"Nested\",\"good_points\":[],\"bad_points\":[]}"
+        }"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.purpose, "Via result");
+        assert_eq!(s.architecture, "Nested");
     }
 
     #[test]
