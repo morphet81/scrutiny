@@ -489,44 +489,122 @@ enum TriagePick {
 
 /// Print PR overview from the dedicated summary agent (before findings triage).
 pub fn print_pr_summary(summary: &ProbePrSummary) {
+    let color = want_color();
+    let line = "───────────────────────────────────────────────────────────────";
+    eprintln!();
     eprintln!(
-        "\n{}═══════════════════════════════════════════════════════════════",
+        "{}{} PR OVERVIEW {}{}",
+        style_bold(),
+        if color { "\x1b[35m" } else { "" }, // magenta
+        style_reset(),
         style_bold()
     );
-    eprintln!(" PR summary");
-    eprintln!(
-        "═══════════════════════════════════════════════════════════════{}",
-        style_reset()
-    );
+    eprintln!("{line}{}", style_reset());
     if !summary.purpose.is_empty() {
-        eprintln!("\n{}What it does:{}", style_bold(), style_reset());
-        for line in summary.purpose.lines() {
-            eprintln!("  {line}");
+        eprintln!(
+            "\n{}{}What it does{}\n",
+            style_bold(),
+            if color { "\x1b[36m" } else { "" }, // cyan
+            style_reset()
+        );
+        for l in summary.purpose.lines() {
+            eprintln!("  {l}");
         }
     }
     if !summary.architecture.is_empty() {
-        eprintln!("\n{}Architecture:{}", style_bold(), style_reset());
-        for line in summary.architecture.lines() {
-            eprintln!("  {line}");
+        eprintln!(
+            "\n{}{}Architecture{}\n",
+            style_bold(),
+            if color { "\x1b[34m" } else { "" }, // blue
+            style_reset()
+        );
+        for l in summary.architecture.lines() {
+            eprintln!("  {l}");
         }
     }
     if !summary.good_points.is_empty() {
-        eprintln!("\n{}Good points:{}", style_bold(), style_reset());
+        eprintln!(
+            "\n{}{}Good points{}\n",
+            style_bold(),
+            if color { "\x1b[32m" } else { "" }, // green
+            style_reset()
+        );
         for p in &summary.good_points {
-            eprintln!("  • {p}");
+            eprintln!(
+                "  {}•{} {p}",
+                if color { "\x1b[32m" } else { "" },
+                style_reset()
+            );
         }
     }
     if !summary.bad_points.is_empty() {
-        eprintln!("\n{}Concerns:{}", style_bold(), style_reset());
+        eprintln!(
+            "\n{}{}Concerns{}\n",
+            style_bold(),
+            if color { "\x1b[33m" } else { "" }, // yellow
+            style_reset()
+        );
         for p in &summary.bad_points {
-            eprintln!("  • {p}");
+            eprintln!(
+                "  {}•{} {p}",
+                if color { "\x1b[33m" } else { "" },
+                style_reset()
+            );
         }
     }
+    eprintln!("\n{line}\n");
+}
+
+/// Colorful severity tally printed once before interactive triage.
+pub fn print_findings_dashboard(n_crit: u32, n_warn: u32, n_sug: u32) {
+    let color = want_color();
+    let total = n_crit + n_warn + n_sug;
+    let bar = "═══════════════════════════════════════════════════════════════";
+    eprintln!();
+    eprintln!("{}{bar}{}", style_bold(), style_reset());
     eprintln!(
-        "\n{}═══════════════════════════════════════════════════════════════{}\n",
+        "{}  Findings ready for triage — {} total{}",
         style_bold(),
+        total,
         style_reset()
     );
+    eprintln!();
+    eprintln!(
+        "  {}{:>3} critical{}    {}{:>3} warning{}    {}{:>3} suggestion{}",
+        style_sev("critical", color),
+        n_crit,
+        style_reset(),
+        style_sev("warning", color),
+        n_warn,
+        style_reset(),
+        style_sev("suggestion", color),
+        n_sug,
+        style_reset(),
+    );
+    // Mini bars (count-proportional ticks, capped).
+    let tick = |n: u32| -> String {
+        let t = n.min(12) as usize;
+        "█".repeat(t) + &"░".repeat(12usize.saturating_sub(t))
+    };
+    eprintln!(
+        "  {}{}{}  {}{}{}  {}{}{}",
+        style_sev("critical", color),
+        tick(n_crit),
+        style_reset(),
+        style_sev("warning", color),
+        tick(n_warn),
+        style_reset(),
+        style_sev("suggestion", color),
+        tick(n_sug),
+        style_reset(),
+    );
+    eprintln!("{}{bar}{}", style_bold(), style_reset());
+    eprintln!(
+        "{}Order: critical → warning → suggestion. ↑/↓ choose, Enter confirm.{}",
+        style_dim(color),
+        style_reset()
+    );
+    eprintln!();
 }
 
 /// Interactive triage: Post/Ignore/Ask per finding.
@@ -568,16 +646,7 @@ pub fn run_findings_triage(
         }
         (c, w, s)
     };
-    eprintln!(
-        "{}scrutiny findings-triage:{} {} findings ({} critical, {} warning, {} suggestion) — critical first.",
-        style_bold(),
-        style_reset(),
-        report.findings.len(),
-        n_crit,
-        n_warn,
-        n_sug
-    );
-    eprintln!("↑/↓ select Post / Ignore / Ask / Custom (or a fix option), Enter confirm.\n");
+    print_findings_dashboard(n_crit, n_warn, n_sug);
 
     let color = want_color();
     let mut last_sev = String::new();
@@ -607,27 +676,30 @@ pub fn run_findings_triage(
             f.severity = sev.clone();
             if sev != last_sev {
                 eprintln!();
-                match sev.as_str() {
-                    "critical" => {
-                        eprintln!(
-                            "{}## Critical{}",
-                            style_sev("critical", color),
-                            style_reset()
-                        )
-                    }
-                    "warning" => {
-                        eprintln!("{}## Warning{}", style_sev("warning", color), style_reset())
-                    }
-                    _ => {
-                        eprintln!(
-                            "{}## Suggestion{}",
-                            style_sev("suggestion", color),
-                            style_reset()
-                        )
-                    }
-                }
+                let (label, count) = match sev.as_str() {
+                    "critical" => ("CRITICAL", n_crit),
+                    "warning" => ("WARNING", n_warn),
+                    _ => ("SUGGESTION", n_sug),
+                };
+                eprintln!(
+                    "{}━━ {} ({} finding{}) ━━{}",
+                    style_sev(&sev, color),
+                    label,
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    style_reset()
+                );
                 last_sev = sev.clone();
             }
+
+            // Progress so reviewer knows where they are in the queue.
+            eprintln!(
+                "{}[{}/{}]{}",
+                style_dim(color),
+                idx + 1,
+                n,
+                style_reset()
+            );
 
             print_finding_block(f, cwd, &head_oid, &snapshot, color);
 

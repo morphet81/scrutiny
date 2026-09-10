@@ -1559,7 +1559,9 @@ Output JSON ONLY. No prose outside JSON.
 
 Rules:
 - Be concrete — cite modules/patterns from the pack, not generic praise.
+- `purpose` and `architecture` MUST be non-empty strings (never "").
 - `good_points` / `bad_points`: 2-5 bullets each; empty array only if truly none.
+- Field VALUES: clear reviewer English (not telegraphic fragments). JSON keys exact.
 - This is overview only — do NOT emit code-review findings.
 
 ## Pack
@@ -1573,24 +1575,15 @@ Prefer pack.md sibling if present (same stem). Read entire pack.
 pub fn parse_pr_summary_json(raw: &str) -> Result<ProbePrSummary> {
     let payload = extract_json_payload(raw)?;
     let v: Value = serde_json::from_str(&payload).context("parse PR summary JSON")?;
-    // Claude/Cursor `--output-format json` + `--json-schema`: summary lives in
-    // `structured_output` (object) or `result` (JSON string). Envelope has no
-    // top-level `purpose` — without unwrap, fields parse empty and probe skips
-    // the summary UI (same pattern as parse_findings_json / prepush).
-    // Prefer structured_output: Claude often leaves `result` as "".
-    if v.get("purpose").is_none() {
-        if let Some(r) = v.get("structured_output") {
-            return parse_pr_summary_json(&r.to_string());
-        }
-        if let Some(r) = v
-            .get("result")
-            .and_then(|x| x.as_str())
-            .filter(|s| !s.trim().is_empty())
-        {
-            return parse_pr_summary_json(r);
-        }
-    }
-    Ok(ProbePrSummary {
+    Ok(parse_pr_summary_value(&v))
+}
+
+fn summary_has_content(s: &ProbePrSummary) -> bool {
+    !s.purpose.is_empty() || !s.architecture.is_empty()
+}
+
+fn summary_from_object(v: &Value) -> ProbePrSummary {
+    ProbePrSummary {
         purpose: v
             .get("purpose")
             .and_then(|x| x.as_str())
@@ -1623,7 +1616,52 @@ pub fn parse_pr_summary_json(raw: &str) -> Result<ProbePrSummary> {
                     .collect()
             })
             .unwrap_or_default(),
-    })
+    }
+}
+
+/// Unwrap Claude/Cursor envelopes. Prefer the first non-empty summary among:
+/// direct object → `structured_output` (object or JSON string) → `result` string.
+/// Empty/`null` `structured_output` must NOT block a good `result` payload.
+fn parse_pr_summary_value(v: &Value) -> ProbePrSummary {
+    let direct = summary_from_object(v);
+    if summary_has_content(&direct) {
+        return direct;
+    }
+
+    if let Some(so) = v.get("structured_output") {
+        if let Some(s) = so.as_str().filter(|s| !s.trim().is_empty()) {
+            if let Ok(inner) = serde_json::from_str::<Value>(s) {
+                let parsed = parse_pr_summary_value(&inner);
+                if summary_has_content(&parsed) {
+                    return parsed;
+                }
+            } else if let Ok(parsed) = parse_pr_summary_json(s) {
+                if summary_has_content(&parsed) {
+                    return parsed;
+                }
+            }
+        } else if so.is_object() {
+            let parsed = summary_from_object(so);
+            if summary_has_content(&parsed) {
+                return parsed;
+            }
+        }
+        // null / {} / empty fields → fall through to `result`
+    }
+
+    if let Some(r) = v
+        .get("result")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        if let Ok(parsed) = parse_pr_summary_json(r) {
+            if summary_has_content(&parsed) {
+                return parsed;
+            }
+        }
+    }
+
+    direct
 }
 
 /// Dedicated headless agent: PR overview for display before findings triage.
@@ -1646,8 +1684,15 @@ pub fn run_pr_summary_agent(
         crate::timeouts::probe_summary(),
     )?;
     let summary = parse_pr_summary_json(&out.stdout).context("parse pr summary agent output")?;
-    if summary.purpose.is_empty() && summary.architecture.is_empty() {
-        bail!("pr summary agent returned empty purpose and architecture");
+    if !summary_has_content(&summary) {
+        // Keep raw stdout for debug — empty purpose usually means envelope unwrap miss
+        // or the model filled schema with blank strings.
+        let dump = temp_artifact_path(&client.client, "review", "pr-summary-raw");
+        let _ = fs::write(&dump, out.stdout.as_bytes());
+        bail!(
+            "pr summary agent returned empty purpose and architecture (raw → {})",
+            dump.display()
+        );
     }
     let session = PrSummarySession {
         version: 1,
@@ -2481,6 +2526,43 @@ mod tests {
         let s = parse_pr_summary_json(raw).unwrap();
         assert_eq!(s.purpose, "Via result");
         assert_eq!(s.architecture, "Nested");
+    }
+
+    #[test]
+    fn parse_pr_summary_falls_through_null_structured_output() {
+        // Regression: null/empty structured_output used to short-circuit and
+        // skip a good `result` string → empty purpose → triage hid the summary.
+        let raw = r#"{
+          "type":"result","subtype":"success","is_error":false,
+          "result":"{\"purpose\":\"From result\",\"architecture\":\"Layers\",\"good_points\":[\"A\"],\"bad_points\":[]}",
+          "structured_output":null
+        }"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.purpose, "From result");
+        assert_eq!(s.architecture, "Layers");
+        assert_eq!(s.good_points, vec!["A"]);
+    }
+
+    #[test]
+    fn parse_pr_summary_falls_through_empty_structured_output_object() {
+        let raw = r#"{
+          "result":"{\"purpose\":\"Recovered\",\"architecture\":\"Via result\",\"good_points\":[],\"bad_points\":[\"Risk\"]}",
+          "structured_output":{"purpose":"","architecture":"","good_points":[],"bad_points":[]}
+        }"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.purpose, "Recovered");
+        assert_eq!(s.architecture, "Via result");
+        assert_eq!(s.bad_points, vec!["Risk"]);
+    }
+
+    #[test]
+    fn parse_pr_summary_structured_output_json_string() {
+        let raw = r#"{
+          "structured_output":"{\"purpose\":\"SO string\",\"architecture\":\"Nested SO\",\"good_points\":[],\"bad_points\":[]}"
+        }"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.purpose, "SO string");
+        assert_eq!(s.architecture, "Nested SO");
     }
 
     #[test]
