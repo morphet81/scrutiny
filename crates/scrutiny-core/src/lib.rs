@@ -17,6 +17,7 @@ pub mod mdterm;
 pub mod pack;
 pub mod parley;
 pub mod parley_cmd;
+pub mod parley_stack;
 pub mod paths;
 pub mod plan;
 pub mod pr;
@@ -63,6 +64,7 @@ pub use parley::{
     ParleyAnswers, ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput,
 };
 pub use parley_cmd::{run_parley, ParleyCmdInput};
+pub use parley_stack::{run_parley_stack, ParleyStackInput};
 pub use paths::{
     init_artifact_ctx, prepare_artifacts, temp_artifact_path, warn_if_scrutiny_unignored,
 };

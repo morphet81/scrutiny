@@ -46,6 +46,8 @@ pub struct ParleyCmdInput {
     pub skip_agents: bool,
     /// Skip commit/push/reply.
     pub skip_ship: bool,
+    /// Commit + pre-push gate + reply, but do not `git push` (stack mode).
+    pub skip_push: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +271,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
             base: &base_pre_agents,
             artifact_globs: &cfg.git.artifact_globs,
             push_no_verify: cfg.parley.push_no_verify,
+            skip_push: input.skip_push,
         })?;
         eprintln!("scrutiny parley: post thread replies…");
         let (result, reply_path) = run_parley_reply(ParleyReplyInput {
@@ -1046,6 +1049,8 @@ struct ParleyShipInput<'a> {
     base: &'a WorktreeSnapshot,
     artifact_globs: &'a [String],
     push_no_verify: bool,
+    /// Commit + pre-push gate, but leave remotes alone (`gh stack push` later).
+    skip_push: bool,
 }
 
 struct PushAttempt {
@@ -1191,18 +1196,6 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
         host_commit(cwd, session_root, &commit_subject, &to_stage)?;
     }
 
-    let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .unwrap_or_else(|_| "HEAD".into())
-        .trim()
-        .to_string();
-    let upstream = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .current_dir(cwd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
     // Scrutiny owns the checks: run the pre-push hook quietly before pushing,
     // fixing via plan+chunk agents up to N times. Skipped entirely when
     // push_no_verify is set — caller opts out of all pre-push checks.
@@ -1234,6 +1227,23 @@ fn run_parley_ship(input: ParleyShipInput<'_>) -> Result<()> {
             );
         }
     }
+
+    if input.skip_push {
+        eprintln!("scrutiny parley: skip push (local commit only)");
+        return Ok(());
+    }
+
+    let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".into())
+        .trim()
+        .to_string();
+    let upstream = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
     let push_args: Vec<&str> = if upstream.is_some() {
         if input.push_no_verify {

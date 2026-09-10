@@ -5,7 +5,7 @@ description: >-
   (fetch threads, knobs, isolated|team fix agents, optional evangelist verify,
   host commit/push, script thread replies). Or chain parley-fetch / plan-write /
   reply.
-argument-hint: "[PR-URL | PR-number]"
+argument-hint: "[PR-URL | PR-number | stack [N]]"
 ---
 
 # Parley
@@ -16,11 +16,18 @@ argument-hint: "[PR-URL | PR-number]"
 SKILL_ROOT="<absolute-path-to-folder-containing-this-SKILL.md>"
 SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 "$SCRUTINY_BIN" parley [--pr <url|number>]
+"$SCRUTINY_BIN" parley stack          # every open PR in gh stack, bottom→top
+"$SCRUTINY_BIN" parley stack 2        # checkout stack #2 first
 ```
 
 Fetches unresolved review threads (GraphQL), asks members / evangelists /
 spawn mode, runs fix agents, host commits + pushes, then posts a reply under
 each thread via `addPullRequestReviewThreadReply`.
+
+**Stack mode** (`parley stack`): fully autonomous knobs. For each open PR
+bottom→top: rebase onto parent → `gh pr view` + unresolved-thread check (skip
+parley when none) → else parley with local commit (no push) → `gh stack rebase`.
+Stops on first failure. Asks before `gh stack push` at end.
 
 Sibling of `/scrutiny` and `/forge` (same binary, `~/.scrutiny/config.toml`).
 
@@ -29,7 +36,8 @@ Sibling of `/scrutiny` and `/forge` (same binary, `~/.scrutiny/config.toml`).
 - `/parley` — current branch PR
 - `/parley <PR-URL>` — specified PR
 - `/parley <PR-number>` — specified PR when unambiguous
-
+- `/parley stack` — current `gh stack`, bottom→top, deferred push
+- `/parley stack <N>` — `gh stack checkout N` first, then same
 ## Binary
 
 Skill root = folder containing **this** `SKILL.md`.

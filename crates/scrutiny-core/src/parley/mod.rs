@@ -5,7 +5,10 @@ pub mod fixes;
 pub mod plan;
 pub mod reply;
 
-pub use fetch::{run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput};
+pub use fetch::{
+    pr_has_unresolved_comments, run_parley_fetch, ParleyComment, ParleyCommentsFile,
+    ParleyFetchInput,
+};
 pub use fixes::{
     init_fixes_file, load_fixes, merge_fix_entries, validate_fixes_complete, FixEntry,
     ParleyFixesFile,

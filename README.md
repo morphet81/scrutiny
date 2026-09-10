@@ -107,6 +107,20 @@ scrutiny parley --pr 42
 
 Flow: fetch unresolved threads → fix agents → verifier → optional evangelist → pre-push gate → commit + push → reply under each thread.
 
+**Stack** (parley every open PR in the current `gh stack`, bottom→top):
+
+```bash
+scrutiny parley stack
+scrutiny parley stack 2
+```
+
+- Visualizes with `gh stack view --short`
+- Each layer: rebase onto parent → `gh pr view` + unresolved-thread check → skip parley if none → else autonomous parley (commit + reply, **no** push) → `gh stack rebase`
+- Stops on first failure with the branch/PR and reason
+- Asks before `gh stack push` at the end
+- Optional stack number runs `gh stack checkout N` first (then restores your branch)
+- Requires `gh stack`
+
 Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
 Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Tmux non-bulk splits into the origin window (`$TMUX_PANE`).
 

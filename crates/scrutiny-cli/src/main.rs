@@ -8,12 +8,13 @@ use scrutiny_core::{
     run_findings_triage, run_findings_validate, run_forge, run_forge_brief, run_forge_bulk,
     run_forge_bulk_item, run_forge_context, run_forge_fetch, run_forge_plan_write, run_map,
     run_pack, run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply,
-    run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
+    run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
     run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
     BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeBulkInput, ForgeCmdInput,
     ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput,
-    ParleyPlanWriteInput, ParleyReplyInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
-    PrCmdInput, ProbeStackInput, ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
+    ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput, PlanConfirmInput, PlanWriteInput,
+    PostCommentsInput, PrCmdInput, ProbeStackInput, ReviewCmdInput, ReviewSessionWriteInput,
+    SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -262,6 +263,11 @@ enum Commands {
         cwd: Option<PathBuf>,
     },
     /// Address unresolved PR review comments: fetch → fix agents → commit/push → reply
+    ///
+    /// `scrutiny parley stack [N]` walks the current `gh stack` bottom→top:
+    /// rebase onto parent, `gh pr view` + skip if no unresolved comments,
+    /// else parley with local commit (no push), `gh stack rebase`, then ask
+    /// before `gh stack push`. Fully autonomous knobs.
     #[command(hide = true)]
     Parley {
         #[arg(long)]
@@ -269,7 +275,7 @@ enum Commands {
         /// PR URL or number (else current branch PR)
         #[arg(long)]
         pr: Option<String>,
-        /// Positional alias for --pr
+        /// Positional: PR URL/number, or `stack` [N] for gh stack mode
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
         #[arg(long)]
@@ -841,6 +847,26 @@ fn run() -> Result<()> {
             skip_ship,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
+
+            // scrutiny parley stack [number]
+            if pr.is_none() && rest.first().map(String::as_str) == Some("stack") {
+                let stack_number = rest.get(1).and_then(|s| s.parse::<u64>().ok());
+                let paths = run_parley_stack(ParleyStackInput {
+                    cwd,
+                    stack_number,
+                    client,
+                    spawn_mode,
+                    from_json,
+                    skip_agents,
+                    skip_ship,
+                })?;
+                for p in paths {
+                    println!("{}", p.display());
+                }
+                return Ok(());
+            }
+
             let pr = pr.or_else(|| {
                 if rest.is_empty() {
                     None
@@ -848,7 +874,6 @@ fn run() -> Result<()> {
                     Some(rest.join(" "))
                 }
             });
-            ensure_git_repo(&cwd)?;
             let path = run_parley(ParleyCmdInput {
                 cwd,
                 pr,
@@ -858,6 +883,7 @@ fn run() -> Result<()> {
                 non_interactive: yes,
                 skip_agents,
                 skip_ship,
+                skip_push: false,
             })?;
             println!("{}", path.display());
         }

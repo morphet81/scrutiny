@@ -43,6 +43,20 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
 }
 "#;
 
+/// Cheap page: only `isResolved` — stack pre-check before spawning parley.
+const UNRESOLVED_COUNT_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { isResolved }
+      }
+    }
+  }
+}
+"#;
+
 #[derive(Debug, Clone)]
 pub struct ParleyFetchInput {
     pub cwd: PathBuf,
@@ -146,6 +160,61 @@ pub fn resolve_pr(cwd: &Path, pr: Option<&str>) -> Result<(u64, String)> {
         .unwrap_or("")
         .to_string();
     Ok((number, url))
+}
+
+/// `gh pr view` then count unresolved review threads. Stack mode uses this to
+/// skip parley when the PR has nothing to address.
+pub fn pr_has_unresolved_comments(cwd: &Path, pr: u64) -> Result<bool> {
+    ensure_gh()?;
+    // User-facing gate starts with `gh pr view` (also confirms the PR exists).
+    let (pr_number, _) = resolve_pr(cwd, Some(&pr.to_string()))?;
+    let n = count_unresolved_threads(cwd, pr_number)?;
+    Ok(n > 0)
+}
+
+fn count_unresolved_threads(cwd: &Path, pr_number: u64) -> Result<usize> {
+    let repo = repo_name_with_owner(cwd)?;
+    let (owner, name) = split_repo(&repo)?;
+    let mut unresolved = 0usize;
+    let mut cursor: Option<String> = None;
+    loop {
+        let vars = json!({
+            "owner": owner,
+            "name": name,
+            "number": pr_number as i64,
+            "cursor": cursor,
+        });
+        let data = gh_graphql(cwd, UNRESOLVED_COUNT_QUERY, &vars)?;
+        let threads = data
+            .pointer("/repository/pullRequest/reviewThreads")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let nodes = threads
+            .get("nodes")
+            .and_then(|n| n.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for node in nodes {
+            if node.get("isResolved").and_then(|v| v.as_bool()) != Some(true) {
+                unresolved += 1;
+            }
+        }
+        let has_next = threads
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !has_next {
+            break;
+        }
+        cursor = threads
+            .pointer("/pageInfo/endCursor")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(unresolved)
 }
 
 pub fn run_parley_fetch(input: ParleyFetchInput) -> Result<(ParleyCommentsFile, PathBuf)> {
