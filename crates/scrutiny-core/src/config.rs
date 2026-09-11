@@ -52,6 +52,9 @@ pub struct Config {
     pub scan: ScanConfig,
     #[serde(default)]
     pub forge: ForgeConfig,
+    /// Multi-ticket Jira kickoff: assign → In Progress → worktree → tab → forge --yes.
+    #[serde(default, alias = "forge-all")]
+    pub forge_all: ForgeAllConfig,
     #[serde(default)]
     pub parley: ParleyConfig,
     #[serde(default)]
@@ -409,6 +412,108 @@ impl Default for ForgeConfig {
             loc_exclude_comments: true,
             loc_exclude_extensions: default_loc_exclude_extensions(),
             complexity: ComplexityConfig::default(),
+        }
+    }
+}
+
+/// Defaults for `scrutiny forge-all` (list of Jira URLs → assign / progress / worktree / forge).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgeAllConfig {
+    /// Prefix for new branches (`feat-nero-123`).
+    #[serde(
+        default = "default_forge_all_branch_prefix",
+        alias = "branch-prefix",
+        alias = "branch-preffix",
+        alias = "branch_preffix"
+    )]
+    pub branch_prefix: String,
+    /// Directory that will hold each worktree folder (absolute, or relative to repo root).
+    #[serde(
+        default = "default_forge_all_worktree_parent",
+        alias = "worktree-parent-folder",
+        alias = "worktree_parent_folder"
+    )]
+    pub worktree_parent_folder: String,
+    /// Default answer to the TDD knob.
+    #[serde(default = "default_true", alias = "use-tdd")]
+    pub use_tdd: bool,
+    /// Default coverage % (forge `coverage_pct`).
+    #[serde(default = "default_forge_all_coverage", alias = "test-coverage")]
+    pub test_coverage: u32,
+    /// Default answer to the e2e knob.
+    #[serde(
+        default = "default_true",
+        alias = "require-e2e",
+        alias = "require_e2",
+        alias = "require-e2"
+    )]
+    pub require_e2e: bool,
+    /// How many implement agents (forge `agents` / team size).
+    #[serde(default = "default_agents_2", alias = "team-size")]
+    pub team_size: u32,
+    /// `single` | `team`.
+    #[serde(default = "default_forge_all_spawn", alias = "spawn-mode")]
+    pub spawn_mode: String,
+    /// Agent CLI: `claude` | `cursor` | `codex`.
+    #[serde(default = "default_forge_all_cli", alias = "agent-cli")]
+    pub agent_cli: String,
+    /// Model id / tier name for forge.
+    #[serde(default = "default_forge_all_model")]
+    pub model: String,
+    /// Jira assignee (`@me`, email, or account id).
+    #[serde(default = "default_forge_all_assignee", alias = "jira-assignee")]
+    pub jira_assignee: String,
+    /// Status name for `acli jira workitem transition` (default `In Progress`).
+    #[serde(
+        default = "default_forge_all_in_progress",
+        alias = "in-progress-status"
+    )]
+    pub in_progress_status: String,
+    /// Shell commands run in each worktree (cwd = worktree) before `scrutiny forge`.
+    #[serde(default, alias = "init-commands")]
+    pub init_commands: Vec<String>,
+}
+
+fn default_forge_all_branch_prefix() -> String {
+    "feat".into()
+}
+fn default_forge_all_worktree_parent() -> String {
+    "..".into()
+}
+fn default_forge_all_coverage() -> u32 {
+    100
+}
+fn default_forge_all_spawn() -> String {
+    "single".into()
+}
+fn default_forge_all_cli() -> String {
+    "claude".into()
+}
+fn default_forge_all_model() -> String {
+    "sonnet".into()
+}
+fn default_forge_all_assignee() -> String {
+    "@me".into()
+}
+fn default_forge_all_in_progress() -> String {
+    "In Progress".into()
+}
+
+impl Default for ForgeAllConfig {
+    fn default() -> Self {
+        Self {
+            branch_prefix: default_forge_all_branch_prefix(),
+            worktree_parent_folder: default_forge_all_worktree_parent(),
+            use_tdd: true,
+            test_coverage: default_forge_all_coverage(),
+            require_e2e: true,
+            team_size: default_agents_2(),
+            spawn_mode: default_forge_all_spawn(),
+            agent_cli: default_forge_all_cli(),
+            model: default_forge_all_model(),
+            jira_assignee: default_forge_all_assignee(),
+            in_progress_status: default_forge_all_in_progress(),
+            init_commands: Vec::new(),
         }
     }
 }

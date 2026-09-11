@@ -384,7 +384,7 @@ fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
     })
 }
 
-fn jira_key_from_url_or_raw(raw: &str) -> Result<String> {
+pub fn jira_key_from_url_or_raw(raw: &str) -> Result<String> {
     if is_jira_key(raw) {
         return Ok(raw.trim().to_string());
     }

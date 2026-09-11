@@ -98,6 +98,22 @@ scrutiny forge bulk --concurrency 5
 - `--dry` — no agents / no real PRs; still creates worktrees; offers cleanup at end  
 - `--concurrency N` — overrides `forge.bulk_concurrency`
 
+### Forge-all — many Jira tickets
+
+```bash
+scrutiny forge-all https://…/browse/PROJ-1 https://…/browse/PROJ-2
+scrutiny forge all PROJ-1 PROJ-2
+```
+
+For each ticket (see `[forge_all]` in config):
+
+1. Assign (`jira_assignee`, default `@me`)
+2. Transition to `in_progress_status` (default `In Progress`)
+3. Create branch `{branch_prefix}-…` + worktree under `worktree_parent_folder`
+4. Open a tmux/zellij tab in that worktree
+5. Run `[forge_all].init_commands` in the worktree (if any)
+6. Run `scrutiny forge --yes` with knobs from `[forge_all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`)
+
 ### Parley — clear review comments
 
 ```bash
@@ -329,6 +345,25 @@ Bounded agent exploration beyond the pack.
 | `branch_headless` | `"auto"` | `"auto"` follow detection \| `"never"` stay on current branch |
 | `bulk_concurrency` | `3` | Max concurrent `forge bulk` items (`--concurrency` overrides) |
 | `pr_description_prompt` | unset | If set, dedicated agent writes PR body from this prompt + diff |
+
+### `[forge_all]`
+
+Used by `scrutiny forge-all` / `scrutiny forge all`.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `branch_prefix` | `feat` | Prefix for new branches (`feat-nero-123`) |
+| `worktree_parent_folder` | `..` | Where worktrees are created (absolute or relative to repo root) |
+| `use_tdd` | `true` | Default TDD knob |
+| `test_coverage` | `100` | Default coverage % |
+| `require_e2e` | `true` | Default e2e knob |
+| `team_size` | `2` | Implement agent count |
+| `spawn_mode` | `single` | `single` \| `team` |
+| `agent_cli` | `claude` | `claude` \| `cursor` \| `codex` |
+| `model` | `sonnet` | Model id / tier |
+| `jira_assignee` | `@me` | `acli jira workitem assign` target |
+| `in_progress_status` | `In Progress` | Transition status name |
+| `init_commands` | `[]` | Shell commands run in each worktree before forge (`sh -c`, cwd = worktree) |
 
 ### `[forge.complexity]`
 

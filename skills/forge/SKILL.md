@@ -4,7 +4,7 @@ description: >-
   Implement a ticket or description. Prefer `scrutiny forge` (fetch mirror,
   fcli, knobs, TDD plan confirm, single|team implement). Or chain forge-fetch /
   plan-write / context / brief. Reuses scrutiny probe for post-impl.
-argument-hint: "[URL | issue-id | --inline description]"
+argument-hint: "[URL | issue-id | --inline description | all <jira-urls…>]"
 ---
 
 # Forge
@@ -16,6 +16,9 @@ SKILL_ROOT="<absolute-path-to-folder-containing-this-SKILL.md>"
 SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
 "$SCRUTINY_BIN" forge [--cwd <repo-root>] [--client <client>] <URL|KEY|#N>
 # or: forge --inline --input "<desc>"
+# Multi Jira kickoff (assign + In Progress + worktree + tab + forge --yes):
+"$SCRUTINY_BIN" forge-all <jira-url-or-key>…
+# alias: forge all …
 ```
 
 That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,

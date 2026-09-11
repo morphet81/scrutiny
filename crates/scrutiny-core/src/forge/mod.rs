@@ -5,6 +5,7 @@ pub mod complexity;
 pub mod context;
 pub mod fetch;
 pub mod figma;
+pub mod jira_ops;
 pub mod loc;
 pub mod plan;
 pub mod scaffold;

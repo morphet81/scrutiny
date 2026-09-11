@@ -214,6 +214,26 @@ branch_headless = "auto"
 # Binary / opaque extensions skipped when estimating LOC (no leading dots).
 # loc_exclude_extensions = ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "wav", "wasm", "dll", "so", "dylib", "exe", "bin", "class", "jar", "war", "pyc", "pyo", "o", "a", "obj", "db", "sqlite", "sqlite3"]
 
+# Max concurrent forge-bulk items (`--concurrency` overrides).
+# bulk_concurrency = 3
+
+[forge_all]
+# Multi-ticket kickoff: assign → In Progress → worktree → tmux/zellij tab → forge --yes
+branch_prefix = "feat"
+# Absolute path, or relative to the repo root (default: sibling of the repo).
+worktree_parent_folder = ".."
+use_tdd = true
+test_coverage = 100
+require_e2e = true
+team_size = 2
+spawn_mode = "single"   # single | team
+agent_cli = "claude"    # claude | cursor | codex
+model = "sonnet"
+jira_assignee = "@me"
+in_progress_status = "In Progress"
+# Shell commands run in each worktree before forge (cwd = worktree). Empty = skip.
+# init_commands = ["npm install", "npm run setup"]
+
 [forge.complexity]
 # Jira field names that hold story-point estimates (tried in order).
 story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]
