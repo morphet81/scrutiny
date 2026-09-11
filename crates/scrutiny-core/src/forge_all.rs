@@ -399,20 +399,31 @@ fn forge_all_answers_json(fa: &ForgeAllConfig, resolved_client: &str) -> Result<
 }
 
 fn all_branch_name(prefix: &str, ticket_id: &str) -> String {
-    // Prefer bulk-style `feat-nero-123` when id looks like KEY-NUM.
-    let prefix = prefix.trim().trim_end_matches('/').trim_end_matches('-');
+    // Prefer bulk-style key-number stem when id looks like KEY-NUM.
+    let prefix = prefix.trim();
     let id = ticket_id.trim();
-    if let Some((key, num)) = id.rsplit_once('-') {
+    let stem = if let Some((key, num)) = id.rsplit_once('-') {
         if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) && !key.is_empty() {
-            return format!(
-                "{}-{}-{}",
-                prefix,
-                slug(key).to_ascii_lowercase(),
-                num
-            );
+            format!("{}-{}", slug(key).to_ascii_lowercase(), num)
+        } else {
+            slug(id).to_ascii_lowercase()
         }
+    } else {
+        slug(id).to_ascii_lowercase()
+    };
+    join_branch_prefix(prefix, &stem)
+}
+
+/// Keep slash (or trailing `-`) in the prefix as written; otherwise insert `-`.
+fn join_branch_prefix(prefix: &str, stem: &str) -> String {
+    if prefix.is_empty() {
+        return stem.to_string();
     }
-    format!("{}-{}", prefix, slug(id).to_ascii_lowercase())
+    if prefix.ends_with('/') || prefix.ends_with('-') {
+        format!("{prefix}{stem}")
+    } else {
+        format!("{prefix}-{stem}")
+    }
 }
 
 fn resolve_worktree_parent(repo_root: &Path, configured: &str) -> Result<PathBuf> {
@@ -454,7 +465,12 @@ mod tests {
     #[test]
     fn all_branch_name_jira() {
         assert_eq!(all_branch_name("feat", "NERO-123"), "feat-nero-123");
-        assert_eq!(all_branch_name("fix/", "ABC-9"), "fix-abc-9");
+        assert_eq!(all_branch_name("fix/", "ABC-9"), "fix/abc-9");
+        assert_eq!(
+            all_branch_name("new-tc-manager/", "NERO-697"),
+            "new-tc-manager/nero-697"
+        );
+        assert_eq!(all_branch_name("feat-", "NERO-1"), "feat-nero-1");
     }
 
     #[test]
