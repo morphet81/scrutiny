@@ -105,31 +105,50 @@ fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
     if pid <= 1 {
         return false;
     }
-    // Process-group kill ONLY when this pid is the group leader. Blind
-    // `kill(-pid)` targets whatever PGID equals `pid` — not "pid's group" —
-    // and can nuke an unrelated group (zellij client/session) on collision.
-    let pgid = unsafe { libc::getpgid(pid) };
-    let group_leader = pgid == pid;
-    let mut signaled = false;
-    unsafe {
-        if group_leader && libc::kill(-pid, libc::SIGTERM) == 0 {
-            signaled = true;
+    #[cfg(unix)]
+    {
+        // Process-group kill ONLY when this pid is the group leader. Blind
+        // `kill(-pid)` targets whatever PGID equals `pid` — not "pid's group" —
+        // and can nuke an unrelated group (zellij client/session) on collision.
+        let pgid = unsafe { libc::getpgid(pid) };
+        let group_leader = pgid == pid;
+        let mut signaled = false;
+        unsafe {
+            if group_leader && libc::kill(-pid, libc::SIGTERM) == 0 {
+                signaled = true;
+            }
+            if libc::kill(pid, libc::SIGTERM) == 0 {
+                signaled = true;
+            }
         }
-        if libc::kill(pid, libc::SIGTERM) == 0 {
-            signaled = true;
+        if !signaled {
+            return false;
         }
-    }
-    if !signaled {
-        return false;
-    }
-    thread::sleep(Duration::from_millis(150));
-    unsafe {
-        if group_leader {
-            let _ = libc::kill(-pid, libc::SIGKILL);
+        thread::sleep(Duration::from_millis(150));
+        unsafe {
+            if group_leader {
+                let _ = libc::kill(-pid, libc::SIGKILL);
+            }
+            let _ = libc::kill(pid, libc::SIGKILL);
         }
-        let _ = libc::kill(pid, libc::SIGKILL);
+        true
     }
-    true
+    #[cfg(windows)]
+    {
+        // No POSIX process groups — tree-kill the recorded PID.
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// RAII: force-close any tracked agent panes when dropped (normal exit / unwind).
@@ -153,8 +172,9 @@ fn install_agent_pane_cleanup_hook() {
         return;
     }
     CLEANUP_ONCE.call_once(|| {
-        // Best-effort: Ctrl-C / SIGTERM should still tear down panes.
+        #[cfg(unix)]
         unsafe {
+            // Best-effort: Ctrl-C / SIGTERM should still tear down panes.
             let handler: libc::sighandler_t =
                 agent_pane_signal_handler as *const () as libc::sighandler_t;
             libc::signal(libc::SIGINT, handler);
@@ -163,6 +183,7 @@ fn install_agent_pane_cleanup_hook() {
     });
 }
 
+#[cfg(unix)]
 extern "C" fn agent_pane_signal_handler(sig: libc::c_int) {
     // Keep this minimal — then restore default and re-raise.
     let _ = std::panic::catch_unwind(|| {

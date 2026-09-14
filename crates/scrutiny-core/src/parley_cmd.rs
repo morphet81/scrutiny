@@ -20,9 +20,9 @@ use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
     clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
 };
-use crate::parley::fetch::{
-    run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput, ParleyThreadComment,
-};
+use crate::parley::fetch::{run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput};
+#[cfg(test)]
+use crate::parley::fetch::ParleyThreadComment;
 use crate::parley::fixes::{
     init_fixes_file, load_fixes, merge_fix_entries, parse_fixes_from_agent_stdout, save_fixes,
     validate_fixes_complete, FixEntry,
