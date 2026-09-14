@@ -12,6 +12,7 @@ use crate::agent_runner::{
     run_dry_placeholder_in, run_headless, run_nonheadless, run_nonheadless_in, wait_for_sentinels,
     HeadlessKind, HeadlessOutcome,
 };
+use crate::terminal::force_close_agent_panes;
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::brief::run_forge_brief;
 use crate::forge::context::run_forge_context;
@@ -84,6 +85,7 @@ fn run_forge_agent(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         return Ok(None);
     }
     if let Some(ctx) = target.term {
@@ -95,6 +97,7 @@ fn run_forge_agent(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         return Ok(None);
     }
     Ok(Some(run_headless(

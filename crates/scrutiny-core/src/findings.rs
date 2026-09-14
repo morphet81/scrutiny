@@ -728,6 +728,28 @@ pub fn print_pr_summary(summary: &ProbePrSummary) {
             );
         }
     }
+    if !summary.diagram.trim().is_empty() {
+        eprintln!(
+            "\n{}{}Diagram{}\n",
+            style_bold(),
+            if color { "\x1b[36m" } else { "" },
+            style_reset()
+        );
+        for l in summary.diagram.lines() {
+            eprintln!("  {l}");
+        }
+    }
+    if !summary.table.trim().is_empty() {
+        eprintln!(
+            "\n{}{}Table{}\n",
+            style_bold(),
+            if color { "\x1b[36m" } else { "" },
+            style_reset()
+        );
+        for l in summary.table.lines() {
+            eprintln!("  {l}");
+        }
+    }
     eprintln!("\n{line}\n");
 }
 
@@ -3316,6 +3338,8 @@ mod tests {
                 },
             ],
             review_limits: vec!["E2E pack truncated".into()],
+            diagram: String::new(),
+            table: String::new(),
         };
 
         let mut report = empty_findings_report(Some(summary));

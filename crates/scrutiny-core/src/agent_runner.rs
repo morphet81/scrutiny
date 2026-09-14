@@ -19,8 +19,8 @@ use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
 use crate::terminal::{
-    kill_cmd_for_terminal, launch_agent_in_surface, launch_agent_window, ItemSurface,
-    ResolvedTerminal,
+    force_close_agent_panes, kill_cmd_for_terminal, launch_agent_in_surface, launch_agent_window,
+    register_agent_pane, ItemSurface, ResolvedTerminal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,7 +237,9 @@ pub const PR_SUMMARY_JSON_SCHEMA: &str = r#"{
         "required": ["text", "path", "line"]
       }
     },
-    "review_limits": { "type": "array", "items": { "type": "string" } }
+    "review_limits": { "type": "array", "items": { "type": "string" } },
+    "diagram": { "type": "string" },
+    "table": { "type": "string" }
   },
   "required": ["purpose", "architecture", "good_points", "bad_points", "review_limits"]
 }"#;
@@ -279,6 +281,12 @@ pub struct ProbePrSummary {
     /// Pack/tool/review-process caveats — display only, never findings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_limits: Vec<String>,
+    /// Optional mermaid/ascii diagram — only when prose cannot show structure.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub diagram: String,
+    /// Optional markdown table — only when a comparison needs columns.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub table: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -761,9 +769,9 @@ pub fn run_headless(
 /// Launch a claude/cursor agent in a visible terminal window and return the
 /// completion-sentinel path the host should poll.
 ///
-/// The agent writes its results to disk (parley-fixes.json) as usual; the host
-/// collects from disk after the sentinel appears. The window stays open for the
-/// user to inspect after the agent finishes.
+/// The agent writes its results to disk as usual; the host collects from disk
+/// after the sentinel appears. On success the pane auto-closes (`--close-on-exit`
+/// / kill-pane). Leftovers are force-closed via [`force_close_agent_panes`].
 pub fn run_nonheadless(
     client: &DetectedClient,
     model: &str,
@@ -773,8 +781,10 @@ pub fn run_nonheadless(
     ctx: &ResolvedTerminal,
 ) -> Result<PathBuf> {
     let kill_cmd = kill_cmd_for_terminal(ctx);
+    let pid_path = artifact_path_unique("agent-pane-pid");
     let (sentinel, script_path) =
-        build_agent_script(client, model, cwd, prompt, label, Some(&kill_cmd))?;
+        build_agent_script(client, model, cwd, prompt, label, Some(&kill_cmd), &pid_path)?;
+    register_agent_pane(label, pid_path);
     eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
     launch_agent_window(ctx, label, &script_path)?;
     Ok(sentinel)
@@ -792,7 +802,11 @@ pub fn run_nonheadless_in(
     surface: &ItemSurface,
     close_on_exit: bool,
 ) -> Result<PathBuf> {
-    let (sentinel, script_path) = build_agent_script(client, model, cwd, prompt, role, None)?;
+    let pid_path = artifact_path_unique("agent-pane-pid");
+    let (sentinel, script_path) =
+        build_agent_script(client, model, cwd, prompt, role, None, &pid_path)?;
+    // Bulk/item surfaces manage their own lifetime; still track PID for host exit cleanup.
+    register_agent_pane(role, pid_path);
     eprintln!("scrutiny: launch {role} into item surface (auto mode)");
     launch_agent_in_surface(surface, role, &script_path, close_on_exit)?;
     Ok(sentinel)
@@ -818,7 +832,10 @@ pub fn run_dry_placeholder_in(cwd: &Path, role: &str, surface: &ItemSurface) -> 
 /// `kill_cmd`: optional shell command to run when sentinel exists (non-headless mode).
 /// Close decision is based on sentinel presence, not exit code — the agent may exit
 /// non-zero even after successfully running the sentinel touch, and we must close the
-/// pane in that case too. Failures (no sentinel) always keep the pane open.
+/// pane in that case too. Failures (no sentinel) keep the pane briefly; the host
+/// force-closes leftovers when agents finish or scrutiny exits.
+///
+/// The script writes its bash PID to `pid_path` so the host can SIGTERM the pane.
 fn build_agent_script(
     client: &DetectedClient,
     model: &str,
@@ -826,9 +843,11 @@ fn build_agent_script(
     prompt: &str,
     label: &str,
     kill_cmd: Option<&str>,
+    pid_path: &Path,
 ) -> Result<(PathBuf, PathBuf)> {
     let sentinel = artifact_path_unique("agent-done");
     let _ = fs::remove_file(&sentinel); // clear any stale marker
+    let _ = fs::remove_file(pid_path);
 
     let prompt_path = temp_artifact_path("scrutiny", "agent", "prompt");
     let base = inject_overrides(label, prompt);
@@ -844,27 +863,34 @@ fn build_agent_script(
     let invoke = nonheadless_invoke_line(&client.client, &client.binary, model, cwd, &prompt_path)?;
 
     let sentinel_str = sentinel.display().to_string();
+    let pid_str = pid_path.display().to_string();
     let script_path = artifact_path_unique("agent-script");
     let script = if let Some(kill) = kill_cmd {
         format!(
-            "#!/usr/bin/env bash\ncd '{cwd}'\n\
+            "#!/usr/bin/env bash\n\
+             echo $$ > '{pid}'\n\
+             cd '{cwd}'\n\
              {invoke}\n\
              if [ -f '{sentinel}' ]; then {kill}; exit 0; fi\n\
-             echo \"scrutiny: agent '{label}' did not complete — pane kept open for inspection\"\n\
+             echo \"scrutiny: agent '{label}' did not complete — pane kept until host exits\"\n\
              exec bash\n",
             cwd = cwd.display(),
             sentinel = sentinel_str,
+            pid = pid_str,
             label = label,
         )
     } else {
         format!(
-            "#!/usr/bin/env bash\ncd '{cwd}'\n\
+            "#!/usr/bin/env bash\n\
+             echo $$ > '{pid}'\n\
+             cd '{cwd}'\n\
              {invoke}\n\
              code=$?\n\
              if [ \"$code\" -eq 0 ]; then exit 0; fi\n\
-             echo \"scrutiny: agent '{label}' failed (exit $code); pane kept open for inspection\"\n\
+             echo \"scrutiny: agent '{label}' failed (exit $code); pane kept until host exits\"\n\
              exec bash\n",
             cwd = cwd.display(),
+            pid = pid_str,
             label = label,
         )
     };
@@ -1590,7 +1616,7 @@ pub fn build_pr_summary_prompt(pack_path: &Path) -> String {
     format!(
         r#"{header}
 
-Read the pack and explain the change for a human reviewer about to triage findings.
+Read the pack. Write a SHORT overview for a reviewer about to triage findings.
 
 Tier 0: pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
 Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path.
@@ -1598,12 +1624,12 @@ Tier 2: at most 6 extra Reads of head files already in pack/xref/imports. No wri
 
 Output JSON ONLY. No prose outside JSON.
 {{
-  "purpose": "1-3 sentences: what this PR does and why",
-  "architecture": "1-3 sentences: how the change is structured (layers, modules, data flow)",
-  "good_points": ["strength 1", "strength 2"],
+  "purpose": "one short sentence: what changed",
+  "architecture": "one short sentence: how it is wired (modules / data flow)",
+  "good_points": ["short strength"],
   "bad_points": [
     {{
-      "text": "actionable risk or concern (one clear sentence)",
+      "text": "actionable risk (one clear sentence)",
       "path": "rel/path/from/pack",
       "line": 42,
       "severity": "suggestion",
@@ -1611,20 +1637,26 @@ Output JSON ONLY. No prose outside JSON.
       "proposed_fix": "optional concrete fix"
     }}
   ],
-  "review_limits": ["pack/tool caveat only — e.g. truncated file, missing env"]
+  "review_limits": ["pack caveat only if any"],
+  "diagram": "",
+  "table": ""
 }}
 
-Rules:
-- Be concrete — cite modules/patterns from the pack, not generic praise.
-- `purpose` and `architecture` MUST be non-empty strings (never "").
-- `good_points`: 2-5 bullets; empty array only if truly none.
+Style (mandatory):
+- Plain, concise English. No flourish, metaphor, or Shakespearean wording.
+- Prefer short words. Cut filler. Every sentence must earn its place.
+- `purpose`: ONE sentence, ≤25 words.
+- `architecture`: ONE sentence (two only if data flow needs it), ≤30 words.
+- `good_points`: 0–3 bullets; each ≤12 words; concrete (module/pattern), not praise.
 - `bad_points`: actionable code risks ONLY. Each MUST include `path` + `line` from pack
-  unified diff / symbol slices (1-based new-file lines). Prefer severity
-  `suggestion` or `warning` (rare `critical`). 0-5 items; empty if none.
-- `review_limits`: pack/tool/review-process caveats (truncation, unread regions,
-  missing config). Display only — NEVER put these in `bad_points`. Empty if none.
-- Field VALUES: clear reviewer English (not telegraphic fragments). JSON keys exact.
-- Do NOT emit a `findings` array. Anchored `bad_points` are promoted to triage later.
+  unified diff / symbol slices (1-based new-file lines). Prefer `suggestion` or `warning`.
+  0–5 items; empty if none.
+- `review_limits`: pack/tool caveats only (truncation, unread regions). Empty if none.
+  NEVER put pack limits in `bad_points`.
+- `diagram` / `table`: EMPTY string by default. Fill ONLY when a visual is necessary to
+  understand structure or a comparison that prose cannot make clear. Prefer nothing.
+  diagram = mermaid or compact ascii; table = github-flavored markdown table.
+- JSON keys exact. Do NOT emit a `findings` array. Anchored `bad_points` promote later.
 
 ## Pack
 Pack: `{pack}`
@@ -1747,6 +1779,18 @@ fn summary_from_object(v: &Value) -> ProbePrSummary {
         good_points: parse_string_list(v, "good_points"),
         bad_points: parse_bad_points(v),
         review_limits: parse_string_list(v, "review_limits"),
+        diagram: v
+            .get("diagram")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        table: v
+            .get("table")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
     }
 }
 
@@ -1899,6 +1943,7 @@ pub fn run_isolated_review(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         let mut agents: Vec<AgentRunResult> = Vec::new();
         for (_sentinel, findings_path, role, index, paths) in entries {
             let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
@@ -2130,6 +2175,7 @@ pub fn run_team_review(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
             Ok(raw) => {
                 let f = parse_findings_json(&raw, "lead").unwrap_or_default();

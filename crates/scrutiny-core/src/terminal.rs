@@ -5,9 +5,13 @@
 //! headless child.
 
 use anyhow::{bail, Context, Result};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, Once, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalContext {
@@ -42,6 +46,126 @@ pub struct ResolvedTerminal {
     pub kind: TerminalContext,
     pub zellij: Option<ZellijAnchor>,
     pub tmux: Option<TmuxAnchor>,
+}
+
+/// Visible agent pane tracked so the host can force-close leftovers on exit.
+#[derive(Debug, Clone)]
+struct TrackedAgentPane {
+    label: String,
+    pid_path: PathBuf,
+}
+
+static TRACKED_AGENT_PANES: Mutex<Vec<TrackedAgentPane>> = Mutex::new(Vec::new());
+static CLEANUP_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+static CLEANUP_ONCE: Once = Once::new();
+
+/// Register a non-headless agent pane (bash PID written to `pid_path` by the script).
+pub fn register_agent_pane(label: &str, pid_path: PathBuf) {
+    install_agent_pane_cleanup_hook();
+    if let Ok(mut g) = TRACKED_AGENT_PANES.lock() {
+        g.push(TrackedAgentPane {
+            label: label.to_string(),
+            pid_path,
+        });
+    }
+}
+
+/// Kill still-running agent pane processes so `--close-on-exit` panes disappear.
+/// Safe to call multiple times; no-ops when nothing is tracked or PIDs already dead.
+pub fn force_close_agent_panes() {
+    let panes = match TRACKED_AGENT_PANES.lock() {
+        Ok(mut g) => std::mem::take(&mut *g),
+        Err(_) => return,
+    };
+    if panes.is_empty() {
+        return;
+    }
+    let mut closed = 0u32;
+    for pane in &panes {
+        if kill_agent_pane_pidfile(&pane.pid_path) {
+            closed += 1;
+            eprintln!("scrutiny: force-closed agent pane {}", pane.label);
+        }
+        let _ = fs::remove_file(&pane.pid_path);
+    }
+    if closed == 0 && !panes.is_empty() {
+        // PIDs already gone (auto --close-on-exit) — silent.
+    } else if closed > 1 {
+        eprintln!("scrutiny: force-closed {closed} agent pane(s) total");
+    }
+}
+
+fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(pid_path) else {
+        return false;
+    };
+    let Ok(pid) = raw.trim().parse::<i32>() else {
+        return false;
+    };
+    if pid <= 1 {
+        return false;
+    }
+    // Prefer process-group kill so claude/cursor children die with the wrapper.
+    let mut signaled = false;
+    unsafe {
+        if libc::kill(-pid, libc::SIGTERM) == 0 {
+            signaled = true;
+        }
+        if libc::kill(pid, libc::SIGTERM) == 0 {
+            signaled = true;
+        }
+    }
+    if !signaled {
+        return false;
+    }
+    thread::sleep(Duration::from_millis(150));
+    unsafe {
+        let _ = libc::kill(-pid, libc::SIGKILL);
+        let _ = libc::kill(pid, libc::SIGKILL);
+    }
+    true
+}
+
+/// RAII: force-close any tracked agent panes when dropped (normal exit / unwind).
+pub struct AgentPaneCleanupGuard;
+
+impl Default for AgentPaneCleanupGuard {
+    fn default() -> Self {
+        install_agent_pane_cleanup_hook();
+        Self
+    }
+}
+
+impl Drop for AgentPaneCleanupGuard {
+    fn drop(&mut self) {
+        force_close_agent_panes();
+    }
+}
+
+fn install_agent_pane_cleanup_hook() {
+    if CLEANUP_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    CLEANUP_ONCE.call_once(|| {
+        // Best-effort: Ctrl-C / SIGTERM should still tear down panes.
+        unsafe {
+            let handler: libc::sighandler_t =
+                agent_pane_signal_handler as *const () as libc::sighandler_t;
+            libc::signal(libc::SIGINT, handler);
+            libc::signal(libc::SIGTERM, handler);
+        }
+    });
+}
+
+extern "C" fn agent_pane_signal_handler(sig: libc::c_int) {
+    // Keep this minimal — then restore default and re-raise.
+    let _ = std::panic::catch_unwind(|| {
+        force_close_agent_panes();
+    });
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        let _ = libc::raise(sig);
+    }
 }
 
 /// A per-item terminal container (one per bulk ticket): agents for that item are

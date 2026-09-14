@@ -15,6 +15,7 @@ use crate::agent_runner::{
     claude_error_message, run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind,
     HeadlessOutcome,
 };
+use crate::terminal::force_close_agent_panes;
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
     clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
@@ -377,6 +378,7 @@ fn run_isolated_parley(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         let expected: Vec<String> = comments.comments.iter().map(|c| c.id.clone()).collect();
         return collect_disk_fixes(
             &plan.fixes_path,
@@ -595,6 +597,7 @@ fn run_team_parley(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         let expected: Vec<String> = comments.comments.iter().map(|c| c.id.clone()).collect();
         return collect_disk_fixes(
             &plan.fixes_path,
@@ -739,6 +742,7 @@ fn run_verify_agents(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         return Ok(());
     }
 
@@ -887,6 +891,7 @@ fn run_parley_repair(
                 crate::timeouts::get().nonheadless
             );
         }
+        force_close_agent_panes();
         return Ok(());
     }
 

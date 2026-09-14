@@ -24,7 +24,7 @@ use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteI
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
 use crate::runtime::{resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput};
 use crate::scan::run_scan;
-use crate::terminal::resolve_terminal;
+use crate::terminal::{resolve_terminal, AgentPaneCleanupGuard};
 
 #[derive(Debug, Clone)]
 pub struct ReviewCmdInput {
@@ -224,6 +224,8 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         );
 
         let term = resolve_terminal(cfg.headless, &detected.client, "probe");
+        // Force-close leftover agent panes on exit / Ctrl-C / unwind.
+        let _pane_guard = term.as_ref().map(|_| AgentPaneCleanupGuard::default());
         let (report, rpath) = if plan.spawn_mode == "team" {
             eprintln!("scrutiny probe: team lead agent…");
             run_team_review(&detected, &plan, &pack_path, &cwd, term.as_ref())?
