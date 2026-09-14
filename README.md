@@ -206,18 +206,23 @@ Model id per complexity tier for `claude` / `cursor` / `codex`.
 
 Claude: Anthropic aliases or pinned ids — not Cursor slugs.
 
-### `[review]`
+### `[probe]`
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `pr_summary` | `true` | Parallel headless agent writes PR overview (purpose, architecture, good points, anchored concerns, review limits) shown before findings triage; anchored concerns are promoted into findings. Set `false` to skip |
+
+### `[probe.review]`
 
 Per-tier specialist toggles (`XS`…`XL` bools).
 
 | Key | Default | Explanation |
 |-----|---------|-------------|
-| `pr_summary` | `true` | Parallel headless agent writes PR overview (purpose, architecture, good points, anchored concerns, review limits) shown before findings triage; anchored concerns are promoted into findings. Set `false` to skip |
 | `security_by_tier` | XS/S off; M/L/XL on | Spawn security specialist when true for the eval tier |
 | `performance_by_tier` | XS/S/M off; L/XL on | Spawn performance specialist |
 | `error_handling_by_tier` | XS off; S–XL on | Spawn error-handling specialist |
 
-### `[review.signals]`
+### `[probe.review.signals]`
 
 Content-signal gating (path globs + diff regexes). Full lists live in [`config/default.toml`](config/default.toml).
 
@@ -232,7 +237,7 @@ Content-signal gating (path globs + diff regexes). Full lists live in [`config/d
 | `performance_css_patterns` | nth-child/keyframes… | CSS diff regexes |
 | `error_handling_diff_patterns` | try/catch/Result/unwrap… | Diff regexes for error-handling |
 
-### `[agents]`
+### `[probe.agents]`
 
 | Key | Default | Explanation |
 |-----|---------|-------------|
@@ -240,7 +245,7 @@ Content-signal gating (path globs + diff regexes). Full lists live in [`config/d
 | `max_reviewers` | `2` | Cap on reviewers (also tightened when pack is small) |
 | `max_evangelists` | `1` | Cap on evangelists (also caps parley verifiers) |
 
-#### `[agents.reviewers_by_tier]`
+#### `[probe.agents.reviewers_by_tier]`
 
 Suggested reviewer count per eval tier (then capped by `max_reviewers` / `max_agents_total`).
 
@@ -252,7 +257,7 @@ Suggested reviewer count per eval tier (then capped by `max_reviewers` / `max_ag
 | `L` | `2` |
 | `XL` | `2` |
 
-#### `[agents.evangelists_by_tier]`
+#### `[probe.agents.evangelists_by_tier]`
 
 Suggested evangelist count per eval tier (then capped by `max_evangelists` / `max_agents_total`).
 
@@ -272,7 +277,7 @@ Suggested evangelist count per eval tier (then capped by `max_evangelists` / `ma
 | `exclude_globs` | lockfiles, `node_modules`, `dist`, snaps… | Paths excluded from eval/pack |
 | `artifact_globs` | `coverage/*`, playwright reports… | Never staged by forge/parley commits — cleaned from the tree instead |
 
-### `[pack]`
+### `[probe.pack]`
 
 Review-pack size and cross-file budgets.
 

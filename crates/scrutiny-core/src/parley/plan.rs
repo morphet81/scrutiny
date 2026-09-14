@@ -89,8 +89,8 @@ pub fn prompt_parley_answers(
         } else {
             a.members = 0;
         }
-        a.evangelists = a.evangelists.min(cfg.agents.max_evangelists);
-        a.verifiers = a.verifiers.min(cfg.agents.max_evangelists);
+        a.evangelists = a.evangelists.min(cfg.probe.agents.max_evangelists);
+        a.verifiers = a.verifiers.min(cfg.probe.agents.max_evangelists);
         if a.client.is_empty() {
             a.client = client.to_string();
         }
@@ -105,8 +105,8 @@ pub fn prompt_parley_answers(
     let default_evangelists = cfg
         .parley
         .default_evangelists
-        .min(cfg.agents.max_evangelists);
-    let default_verifiers = cfg.parley.default_verifiers.min(cfg.agents.max_evangelists);
+        .min(cfg.probe.agents.max_evangelists);
+    let default_verifiers = cfg.parley.default_verifiers.min(cfg.probe.agents.max_evangelists);
 
     if skip_prompt || !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         let spawn = if let Some(m) = spawn_mode_preset {
@@ -147,12 +147,12 @@ pub fn prompt_parley_answers(
     let verifiers: u32 = Input::with_theme(&ColorfulTheme::default())
         .with_prompt(format!(
             "Verifiers to check fixes address comments (0–{})",
-            cfg.agents.max_evangelists
+            cfg.probe.agents.max_evangelists
         ))
         .default(default_verifiers)
         .validate_with(|n: &u32| -> Result<(), String> {
-            if *n > cfg.agents.max_evangelists {
-                return Err(format!("max {}", cfg.agents.max_evangelists));
+            if *n > cfg.probe.agents.max_evangelists {
+                return Err(format!("max {}", cfg.probe.agents.max_evangelists));
             }
             Ok(())
         })
@@ -162,12 +162,12 @@ pub fn prompt_parley_answers(
     let evangelists: u32 = Input::with_theme(&ColorfulTheme::default())
         .with_prompt(format!(
             "Evangelists to verify fixes afterwards (0–{})",
-            cfg.agents.max_evangelists
+            cfg.probe.agents.max_evangelists
         ))
         .default(default_evangelists)
         .validate_with(|n: &u32| -> Result<(), String> {
-            if *n > cfg.agents.max_evangelists {
-                return Err(format!("max {}", cfg.agents.max_evangelists));
+            if *n > cfg.probe.agents.max_evangelists {
+                return Err(format!("max {}", cfg.probe.agents.max_evangelists));
             }
             Ok(())
         })
@@ -233,11 +233,11 @@ pub fn run_parley_plan_write(input: ParleyPlanWriteInput) -> Result<(ParleyPlan,
     let evangelists = input
         .answers
         .evangelists
-        .min(input.cfg.agents.max_evangelists);
+        .min(input.cfg.probe.agents.max_evangelists);
     let verifiers = input
         .answers
         .verifiers
-        .min(input.cfg.agents.max_evangelists);
+        .min(input.cfg.probe.agents.max_evangelists);
     let spawn_mode = normalize_spawn_mode(&input.answers.spawn_mode)?;
     let buckets = partition_comments(&input.comments.comments, members);
     let fixes_path = artifact_path("parley-fixes");
@@ -353,7 +353,7 @@ mod tests {
         let cfg: Config = toml::from_str(crate::config::DEFAULT_TOML).unwrap();
         let raw = r#"{"client":"claude","model":"opus","members":1,"verifiers":2,"evangelists":0,"spawn_mode":"isolated"}"#;
         let a = prompt_parley_answers(&cfg, "claude", "opus", 3, None, Some(raw), true).unwrap();
-        assert_eq!(a.verifiers, 2.min(cfg.agents.max_evangelists));
+        assert_eq!(a.verifiers, 2.min(cfg.probe.agents.max_evangelists));
     }
 
     #[test]
@@ -363,7 +363,7 @@ mod tests {
         let a = prompt_parley_answers(&cfg, "claude", "opus", 3, None, Some(raw), true).unwrap();
         assert_eq!(
             a.verifiers,
-            default_verifiers().min(cfg.agents.max_evangelists)
+            default_verifiers().min(cfg.probe.agents.max_evangelists)
         );
     }
 

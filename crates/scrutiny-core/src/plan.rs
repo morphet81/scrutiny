@@ -315,9 +315,9 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
             .and_then(|p| crate::config::load_config(&p).ok())
             .map(|c| {
                 (
-                    c.agents.max_reviewers,
-                    c.agents.max_evangelists,
-                    c.agents.max_agents_total,
+                    c.probe.agents.max_reviewers,
+                    c.probe.agents.max_evangelists,
+                    c.probe.agents.max_agents_total,
                 )
             })
     };

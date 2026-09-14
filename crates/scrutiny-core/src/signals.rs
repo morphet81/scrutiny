@@ -24,7 +24,7 @@ pub fn detect_content_signals(
     files: &[EvalFile],
     unified_diff: &str,
 ) -> ContentSignals {
-    let sig = &cfg.review.signals;
+    let sig = &cfg.probe.review.signals;
     if sig.ignore_content_signals {
         return ContentSignals {
             security: true,

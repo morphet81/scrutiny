@@ -216,7 +216,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
 
     if !plan.skip_ai && !input.skip_agents {
         let summary_handle = spawn_pr_summary_agent(
-            cfg.review.pr_summary,
+            cfg.probe.pr_summary,
             &detected,
             &plan.model,
             &pack_path,

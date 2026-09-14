@@ -1,19 +1,8 @@
 default_client = "claude"
-# Run spawned agents headless (stdout captured). Set false to open each agent
-# in a visible terminal window (claude/cursor; tmux/zellij/macOS Terminal/iTerm2).
-# Applies to parley, probe, and forge.
-# Unsupported surfaces or Codex fall back to headless.
 headless = true
-# Inject caveman-ultra style into every spawned-agent prompt and write
-# scrutiny instruction text in caveman dialect. Set false for plain English.
-# Env SCRUTINY_NO_CAVEMAN=1 also disables (used by `scrutiny bench` skill arm).
 caveman = true
-# When set, skip client prompt for `scrutiny probe` (must be installed on PATH).
 # force_client = "claude"
-# When set, skip spawn-mode prompt. Default when unset: isolated.
 # force_spawn_mode = "isolated"
-# Editor for PR descriptions (forge + `scrutiny pr`). Supports args, e.g. "code --wait".
-# Falls back to $VISUAL, then $EDITOR, then vi.
 # editor = "vi"
 
 [models.cursor]
@@ -38,32 +27,64 @@ m = "gpt-5.5-medium"
 l = "gpt-5.6-sol-medium"
 xl = "gpt-5.6-terra-medium"
 
-[review.security_by_tier]
+[git]
+base_candidates = ["main", "master", "develop"]
+exclude_globs = [
+  "**/package-lock.json",
+  "**/*.lock",
+  "**/node_modules/**",
+  "**/*.snap",
+  "**/dist/**",
+  "**/*.min.js",
+  "**/*.map",
+  "**/generated/**",
+  "**/*.pb.go",
+  "**/*.pb.ts",
+]
+artifact_globs = [
+  "coverage-*/*",
+  "coverage/*",
+  ".nyc_output/*",
+  ".vitest/*",
+  "playwright-report/*",
+  "test-results/*",
+  "*.tsbuildinfo",
+  "*.log",
+]
+# push_no_verify = false
+
+[timeouts]
+agent_wall_secs = 600
+progress_secs = 15
+headless_first_output_secs = 90
+
+[probe]
+# Headless PR overview before findings triage. Default true.
+# Anchored concerns (bad_points with path+line) promote into findings; review_limits stay display-only.
+# pr_summary = false
+
+[probe.review.security_by_tier]
 XS = false
 S = false
 M = true
 L = true
 XL = true
 
-[review.performance_by_tier]
+[probe.review.performance_by_tier]
 XS = false
 S = false
 M = false
 L = true
 XL = true
 
-[review.error_handling_by_tier]
+[probe.review.error_handling_by_tier]
 XS = false
 S = true
 M = true
 L = true
 XL = true
 
-# Headless PR overview before findings triage (`scrutiny probe`). Default true.
-# Anchored concerns (bad_points with path+line) promote into findings; review_limits stay display-only.
-# pr_summary = false
-
-[review.signals]
+[probe.review.signals]
 ignore_content_signals = false
 security_path_globs = [
   "**/auth/**", "**/*auth*", "**/*oauth*", "**/*session*",
@@ -114,26 +135,26 @@ error_handling_diff_patterns = [
   '(?i)\b(onError|errorBoundary|ErrorBoundary|toast\.error)\b',
 ]
 
-[agents]
+[probe.agents]
 max_agents_total = 4
 max_reviewers = 2
 max_evangelists = 1
 
-[agents.reviewers_by_tier]
+[probe.agents.reviewers_by_tier]
 XS = 0
 S = 1
 M = 1
 L = 2
 XL = 2
 
-[agents.evangelists_by_tier]
+[probe.agents.evangelists_by_tier]
 XS = 0
 S = 0
 M = 0
 L = 1
 XL = 1
 
-[pack]
+[probe.pack]
 max_chars = 48000
 doc_digest_lines = 40
 symbol_context_lines = 3
@@ -148,7 +169,7 @@ xref_char_budget = 6000
 xref_body_lines = 40
 annex_char_budget = 12000
 
-[pack.explore]
+[probe.pack.explore]
 enable = true
 max_extra_reads = 6
 max_extra_chars = 24000
@@ -156,11 +177,11 @@ prefer_read_over_bash = true
 allow_repo_grep = false
 require_pack_path_hint = true
 
-[scan]
+[probe.scan]
 enable = true
-# commands = []  # optional project lint hooks, run in repo cwd
+# commands = []
 
-[scan.i18n]
+[probe.scan.i18n]
 enable = true
 reference_locale = "en"
 path_globs = [
@@ -173,14 +194,7 @@ path_globs = [
 check_placeholders = true
 check_empty_values = true
 full_catalog = false
-# Filter missing-key warnings for unsupported plural categories (zero/one/two/few/many/other).
-# When true, only warn when the target locale supports that category.
-# Unknown locales remain conservative (warn all). Built-in table covers common single-category
-# locales (ms/th/ja/ko/zh/id/vi = `other` only; tr = `one`+`other`).
 plural_aware_filtering = true
-# Explicit locale → supported categories override. Example for custom locales:
-# [scan.i18n.locale_plural_categories]
-# "custom-locale" = ["other"]
 
 [forge]
 enable_figma = true
@@ -206,183 +220,45 @@ skip_ship = true
 enable_branch = true
 branch_headless = "auto"
 
-# Optional. When set, a dedicated headless agent writes the PR description from
-# this prompt + the diff (overrides the implement agent's pr_body). Leave unset
-# to keep the default deterministic body.
-# pr_description_prompt = "Summarize for reviewers in structured Markdown (## sections, paragraphs, bullet lists, bold): what changed, why, risk, test notes."
-
-# Optional. When set, forge runs an m-tier agent before implement to estimate
-# whether the PR add+del LOC may exceed this budget; over budget → confirm or abort.
-# max_loc = 400
-# Exclude test / doc paths and comment-only lines from LOC counting (defaults true).
-# loc_exclude_test = true
-# loc_exclude_doc = true
-# loc_exclude_comments = true
-# Binary / opaque extensions skipped when estimating LOC (no leading dots).
-# loc_exclude_extensions = ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi", "webm", "wav", "wasm", "dll", "so", "dylib", "exe", "bin", "class", "jar", "war", "pyc", "pyo", "o", "a", "obj", "db", "sqlite", "sqlite3"]
-
-# Max concurrent forge-bulk items (`--concurrency` overrides).
-# bulk_concurrency = 3
-
-[forge_all]
-# Multi-ticket kickoff: assign → In Progress → worktree → tmux/zellij tab → forge --yes
+[forge.all]
 branch_prefix = "feat"
-# Absolute path, or relative to the repo root (default: sibling of the repo).
 worktree_parent_folder = ".."
 use_tdd = true
 test_coverage = 100
 require_e2e = true
 team_size = 2
-spawn_mode = "single"   # single | team
-agent_cli = "claude"    # claude | cursor | codex
+spawn_mode = "single"
+agent_cli = "claude"
 model = "sonnet"
 jira_assignee = "@me"
 in_progress_status = "In Progress"
-# Shell commands run in each worktree before forge (cwd = worktree). Empty = skip.
-# init_commands = ["npm install", "npm run setup"]
 
 [forge.complexity]
-# Jira field names that hold story-point estimates (tried in order).
 story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]
-# Keywords suggesting broad, cross-cutting scope (+8 pts each, capped at 2 hits).
 breadth_keywords = ["refactor", "migrate", "rewrite", "redesign", "architecture", "overhaul", "restructure", "across"]
-# Keywords suggesting external/API integration work (+6 pts each, capped at 2 hits).
 integration_keywords = ["api", "endpoint", "webhook", "schema", "database", "migration", "third-party", "external", "integration"]
-# Keywords suggesting security-sensitive changes (+10 pts each, capped at 2 hits).
 risk_keywords = ["auth", "security", "payment", "permission", "encryption", "pii", "credential", "oauth", "token"]
-# Keywords indicating trivial changes (-8 pts each, capped at 2 hits).
 trivial_keywords = ["typo", "copy", "wording", "rename", "bump", "documentation", "translation", "minor", "spelling"]
-# Label substrings that bump complexity up (+6 pts, max 1).
 bump_labels = ["urgent", "complex", "breaking-change", "breaking", "epic", "large"]
-# Label substrings that pull complexity down (-6 pts, max 1).
 lower_labels = ["trivial", "minor", "quick", "simple", "easy", "small"]
-# Tier thresholds [XS_max, S_max, M_max, L_max]; above L_max → XL.
 tier_thresholds = [18, 35, 55, 95]
 
 [parley]
 default_members = 1
 default_evangelists = 1
-# Verifiers check that fixes actually address comments (runs before evangelist).
 default_verifiers = 1
 push_fix_max_loops = 2
-# Max fix chunks the pre-push plan agent may emit (one agent per chunk).
 prepush_fix_max_chunks = 8
-# Re-implement threads left as stubs or rejected by a verifier so failures
-# never post as PR replies. Runs after verifiers, before evangelists.
 repair = true
-# Pass --no-verify to git push in `scrutiny parley`. Default false.
 # push_no_verify = false
 
-# Agent wall-clock limits, in seconds. Every key is optional.
-# `agent_wall_secs` is the base; a stage with no explicit value derives from it
-# (implement/fix/prepush-fix x2, non-headless x3, bulk item x8). Raise one stage
-# alone by uncommenting just that line.
-[timeouts]
+[parley.timeouts]
 agent_wall_secs = 600
-# How often "still running" ticks print.
-progress_secs = 15
-# Agents opened in a visible terminal window (default: agent_wall_secs x3).
-# nonheadless_wall_secs = 1800
+prepush_fix_wall_secs = 1200
+prepush_plan_wall_secs = 120
 
-# probe
-# probe_isolated_wall_secs = 600
-# probe_team_wall_secs = 600
-# probe_consolidate_wall_secs = 600
-# PR overview agent (parallel with reviewers; shown before triage).
-# probe_summary_wall_secs = 600
-# Triage "Ask a question…" agent.
-# probe_ask_wall_secs = 600
-
-# forge
-# forge_test_plan_wall_secs = 600
-# forge_loc_estimate_wall_secs = 600
-# forge_pr_description_wall_secs = 600
-# forge_implement_wall_secs = 1200
-# Verify-gate fix agent.
-# forge_fix_wall_secs = 1200
-# One item of a forge-bulk run (default: agent_wall_secs x8).
-# forge_bulk_item_wall_secs = 4800
-
-# parley — these supersede the legacy [parley] keys of the same name.
-parley_agent_wall_secs = 600
-parley_prepush_fix_wall_secs = 1200
-# Pre-push plan agent (splits the log into fix chunks; read-only).
-parley_prepush_plan_wall_secs = 120
-# Kill headless agents that produce no stdout within N seconds (0 = disable).
-headless_first_output_secs = 90
-
-# Per-role model overrides. Key = agent label prefix with "-" → "_".
-# Value = tier xs|s|m|l|xl (resolved via [models.<client>]) OR a raw model id.
-# Unset → session model.
-# Prefix catch-all: `parley = "l"` covers every parley_* role (member, lead,
-# verifier, evangelist, repair, push_fix, prepush_plan). Exact role still wins.
-# Special defaults when neither family nor role is set:
-#   parley_prepush_plan → xs; forge_loc_estimate → m.
 [agent_models]
 # parley = "l"
 # parley_prepush_plan = "xs"
 # forge_loc_estimate = "m"
 # parley_push_fix = "m"
-
-[git]
-base_candidates = ["main", "master", "develop"]
-exclude_globs = [
-  "**/package-lock.json",
-  "**/*.lock",
-  "**/node_modules/**",
-  "**/*.snap",
-  "**/dist/**",
-  "**/*.min.js",
-  "**/*.map",
-  "**/generated/**",
-  "**/*.pb.go",
-  "**/*.pb.ts",
-]
-# Build/test artifacts never committed by parley/forge (cleaned instead).
-# Guards against agent-created coverage dirs that are not gitignored.
-artifact_globs = [
-  "coverage-*/*",
-  "coverage/*",
-  ".nyc_output/*",
-  ".vitest/*",
-  "playwright-report/*",
-  "test-results/*",
-  "*.tsbuildinfo",
-  "*.log",
-]
-# Pass --no-verify to git push in `scrutiny pr` and `scrutiny forge`. Default false.
-# push_no_verify = false
-
-# Custom prompt injection. Text here is prepended to spawned-agent prompts.
-# Order: global → per-agent → scrutiny's own prompt.
-# Per-agent key = the agent's label prefix with "-" replaced by "_".
-# Unknown keys are ignored. Team leads only inject into their own prompt, not
-# into teammates they spawn themselves. Uncomment to enable.
-# [prompts]
-# Prepended to EVERY spawned agent (probe, parley, forge).
-# global = "Follow our house rules: cite file:line; never touch generated code."
-#
-# Per-role overrides (prepended after `global`, before scrutiny's prompt).
-# [prompts.agents]
-# --- probe (code review) ---
-# reviewer = ""
-# evangelist = ""
-# summary = ""              # PR overview agent (parallel; before triage)
-# security = ""
-# performance = ""
-# error_handling = ""
-# lead = ""                 # team-mode review lead
-# --- parley (PR comment resolution) ---
-# parley_member = ""
-# parley_lead = ""
-# parley_verifier = ""
-# parley_evangelist = ""
-# parley_prepush_plan = ""   # splits pre-push log into fix chunks
-# parley_push_fix = ""
-# --- forge (ticket implementation) ---
-# forge_test_plan = ""
-# forge_test_plan_revise = ""
-# forge_loc_estimate = ""
-# forge_implement = ""       # single-agent implement
-# forge_po_team = ""         # team-mode PO/lead implement
-# forge_verify_fix = ""

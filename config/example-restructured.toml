@@ -1,0 +1,362 @@
+# PROPOSED shape only — not loaded by scrutiny. Shipped defaults stay in config/default.toml.
+# Hierarchy: global < command < command variant
+
+# =============================================================================
+# GLOBAL
+# =============================================================================
+
+default_client = "claude"
+default_model = "m"               # tier or raw model id; session fallback
+headless = true                    # false = open agents in visible terminal window
+caveman = true                     # false or SCRUTINY_NO_CAVEMAN=1 to disable
+# force_client = "claude"
+# force_spawn_mode = "isolated"
+# editor = "vi"                    # supports args, e.g. "code --wait"
+
+[models.cursor]
+xs = "composer-2-fast"
+s = "composer-2-fast"
+m = "claude-4.6-sonnet-medium-thinking"
+l = "claude-sonnet-5-thinking-high"
+xl = "claude-opus-4-8-thinking-high"
+
+[models.claude]                    # use aliases or pinned Anthropic ids only
+xs = "haiku"
+s = "haiku"
+m = "sonnet"
+l = "opus"
+xl = "opus"
+
+[models.codex]
+xs = "gpt-5.3-codex"
+s = "gpt-5.3-codex"
+m = "gpt-5.5-medium"
+l = "gpt-5.6-sol-medium"
+xl = "gpt-5.6-terra-medium"
+
+[git]
+base_candidates = ["main", "master", "develop"]
+exclude_globs = [
+  "**/package-lock.json",
+  "**/*.lock",
+  "**/node_modules/**",
+  "**/*.snap",
+  "**/dist/**",
+  "**/*.min.js",
+  "**/*.map",
+  "**/generated/**",
+  "**/*.pb.go",
+  "**/*.pb.ts",
+]
+artifact_globs = [                 # never committed by parley/forge; cleaned instead
+  "coverage-*/*",
+  "coverage/*",
+  ".nyc_output/*",
+  ".vitest/*",
+  "playwright-report/*",
+  "test-results/*",
+  "*.tsbuildinfo",
+  "*.log",
+]
+# push_no_verify = false
+
+[timeouts]
+agent_wall_secs = 600              # base; stages derive (fix x2, nonheadless x3, bulk x8)
+progress_secs = 15
+headless_first_output_secs = 90    # 0 = disable
+
+# =============================================================================
+# COMMAND — probe
+# =============================================================================
+
+[probe]
+# pr_summary = false               # headless PR overview before triage; default true
+
+[probe.timeouts]                   # all inherit [timeouts].agent_wall_secs
+# agent_wall_secs = 600
+# isolated_wall_secs = 600
+# team_wall_secs = 600
+# consolidate_wall_secs = 600
+# summary_wall_secs = 600
+# ask_wall_secs = 600
+
+[probe.agent_models]
+# reviewer = "m"
+# evangelist = "m"
+# summary = "m"
+# security = "l"
+# performance = "l"
+# error_handling = "m"
+# lead = "l"
+
+[probe.prompts]
+# global = ""
+# reviewer = ""
+# evangelist = ""
+# summary = ""
+# security = ""
+# performance = ""
+# error_handling = ""
+# lead = ""
+
+[probe.review.security_by_tier]
+XS = false
+S = false
+M = true
+L = true
+XL = true
+
+[probe.review.performance_by_tier]
+XS = false
+S = false
+M = false
+L = true
+XL = true
+
+[probe.review.error_handling_by_tier]
+XS = false
+S = true
+M = true
+L = true
+XL = true
+
+[probe.review.signals]
+ignore_content_signals = false
+security_path_globs = [
+  "**/auth/**", "**/*auth*", "**/*oauth*", "**/*session*",
+  "**/permission*/**", "**/*permission*", "**/*rbac*", "**/*acl*",
+  "**/security/**", "**/*crypto*", "**/*secret*", "**/*credential*",
+  "**/payment*/**", "**/*billing*", "**/*checkout*",
+  "**/middleware/**", "**/api/**", "**/server/**", "**/backend/**",
+  "**/.env*", "**/secrets/**",
+]
+security_diff_patterns = [
+  '(?i)\b(fetch|axios|XMLHttpRequest|got\(|node-fetch|reqwest|ureq|httpx|RestClient|HttpClient)\b',
+  '(?i)\b(WebSocket|EventSource|graphql|apollo|trpc)\b',
+  '(?i)\b(Authorization|Bearer\s+|JWT|csrf|xsrf|Set-Cookie|document\.cookie)\b',
+  '(?i)\b(localStorage|sessionStorage|indexedDB)\.(get|set|remove)Item',
+  '(?i)\b(password|passwd|api[_-]?key|private[_-]?key|client[_-]?secret)\b',
+  '(?i)dangerouslySetInnerHTML|innerHTML\s*=|outerHTML\s*=',
+  '(?i)\beval\s*\(|new\s+Function\s*\(',
+  '(?i)\bexec\s*\(|child_process|Command::new|std::process::Command',
+  '(?i)\b(Access-Control-Allow-Origin|\bcors\b|window\.location)',
+]
+performance_path_globs = [
+  "**/hooks/**", "**/domain/**", "**/stores/**", "**/data/**",
+  "**/workers/**", "**/wasm/**", "**/native/**",
+  "**/*List*", "**/*Table*", "**/*Grid*", "**/*Virtual*",
+]
+performance_diff_patterns = [
+  '(?i)\b(useEffect|useLayoutEffect|useMemo|useCallback|useTransition|startTransition)\s*\(',
+  '(?i)\b(React\.memo|memo\s*\()',
+  '(?i)\.map\s*\(|\.filter\s*\(|\.reduce\s*\(|\.flatMap\s*\(',
+  '(?i)\bfor\s*\(|\bwhile\s*\(|\.forEach\s*\(',
+  '(?i)requestAnimationFrame|getBoundingClientRect|offsetWidth|offsetHeight|scrollTop',
+  '(?i)\b(will-change|contain:|content-visibility:)',
+  '(?i)\.clone\s*\(|to_vec\s*\(|collect::<Vec',
+  '(?i)\bMutex::|\bRwLock::|blocking_',
+]
+performance_css_path_globs = ["**/*.css", "**/*.scss", "**/*.sass", "**/*.less"]
+performance_css_patterns = [
+  '(?i):(nth-child|nth-of-type|has)\s*\(',
+  '(?i)@keyframes|\banimation:',
+  '(?i)[*]\s*[>+~]|[>+~]\s*[*]',
+  '(?i)\bfilter:|\bbackdrop-filter:',
+]
+error_handling_diff_patterns = [
+  '(?i)\btry\s*\{|\bcatch\s*\(|\.catch\s*\(|finally\s*\{',
+  '(?i)\basync\s+function|\basync\s*\(|await\s+',
+  '(?i)\bResult<|anyhow::|thiserror|Promise\.reject',
+  '(?i)\.unwrap\s*\(|\.expect\s*\(|panic!',
+  '(?i)\b(onError|errorBoundary|ErrorBoundary|toast\.error)\b',
+]
+
+[probe.agents]
+max_agents_total = 4
+max_reviewers = 2
+max_evangelists = 1
+
+[probe.agents.reviewers_by_tier]
+XS = 0
+S = 1
+M = 1
+L = 2
+XL = 2
+
+[probe.agents.evangelists_by_tier]
+XS = 0
+S = 0
+M = 0
+L = 1
+XL = 1
+
+[probe.pack]
+max_chars = 48000
+doc_digest_lines = 40
+symbol_context_lines = 3
+min_file_chars = 1200
+source_weight = 4
+test_weight = 2
+doc_weight = 1
+enable_xref = true
+xref_max_symbols = 40
+xref_max_files_scanned = 300
+xref_char_budget = 6000
+xref_body_lines = 40
+annex_char_budget = 12000
+
+[probe.pack.explore]
+enable = true
+max_extra_reads = 6
+max_extra_chars = 24000
+prefer_read_over_bash = true
+allow_repo_grep = false
+require_pack_path_hint = true
+
+[probe.scan]
+enable = true
+# commands = []
+
+[probe.scan.i18n]
+enable = true
+reference_locale = "en"
+path_globs = [
+  "**/i18n/locales/*.json",
+  "**/locales/*.json",
+  "**/locale/*.json",
+  "**/lang/*.json",
+  "**/translations/*.json",
+]
+check_placeholders = true
+check_empty_values = true
+full_catalog = false
+plural_aware_filtering = true      # warn only when target locale supports that plural category
+# [probe.scan.i18n.locale_plural_categories]  # override built-in plural category table per locale
+# "custom-locale" = ["other"]                 # valid categories: zero one two few many other
+
+[probe.stack]                      # `scrutiny probe stack`; inherits [probe] / global
+# reuse_plan_from_first = true
+# defer_triage = true
+
+# =============================================================================
+# COMMAND — forge
+# =============================================================================
+
+[forge]
+# force_model = "sonnet"           # pin → force, skips complexity suggest + prompt
+
+enable_figma = true
+enable_lore = true
+enable_ticket_writeback = true
+enable_po = true
+
+default_approach = "tdd"
+default_agents = 2
+default_testers = 1
+default_reviewers = 1
+default_evangelists = 0
+
+verify_max_loops = 2
+verify_coverage = true
+
+enable_branch = true
+branch_headless = "auto"
+
+# pr_description_prompt = ""       # when set, dedicated agent writes PR body from this + diff
+# max_loc = 400                    # over budget → confirm or abort before implement
+# loc_exclude_test = true
+# loc_exclude_doc = true
+# loc_exclude_comments = true
+# loc_exclude_extensions = ["png", "jpg", ...]
+
+[forge.timeouts]                   # all inherit [timeouts].agent_wall_secs
+# implement_wall_secs = 1200       # default: agent_wall_secs x2
+# fix_wall_secs = 1200             # default: agent_wall_secs x2
+# test_plan_wall_secs = 600
+# test_plan_revise_wall_secs = 600
+# loc_estimate_wall_secs = 600
+# pr_description_wall_secs = 600
+
+[forge.agent_models]
+# implement = "l"
+# verify_fix = "l"
+# loc_estimate = "m"               # special default: always m when unset
+# test_plan = "m"
+# po_team = "l"
+
+[forge.prompts]
+# global = ""
+# test_plan = ""
+# test_plan_revise = ""
+# implement = ""
+# po_team = ""
+# verify_fix = ""
+
+[forge.complexity]
+story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]
+breadth_keywords = ["refactor", "migrate", "rewrite", "redesign", "architecture", "overhaul", "restructure", "across"]       # +8 pts each, capped at 2
+integration_keywords = ["api", "endpoint", "webhook", "schema", "database", "migration", "third-party", "external", "integration"] # +6 pts each, capped at 2
+risk_keywords = ["auth", "security", "payment", "permission", "encryption", "pii", "credential", "oauth", "token"]          # +10 pts each, capped at 2
+trivial_keywords = ["typo", "copy", "wording", "rename", "bump", "documentation", "translation", "minor", "spelling"]       # -8 pts each, capped at 2
+bump_labels = ["urgent", "complex", "breaking-change", "breaking", "epic", "large"]   # +6 pts, max 1
+lower_labels = ["trivial", "minor", "quick", "simple", "easy", "small"]               # -6 pts, max 1
+tier_thresholds = [18, 35, 55, 95]  # [XS_max, S_max, M_max, L_max]; above L_max → XL
+
+[forge.bulk]
+concurrency = 3                    # `--concurrency` overrides
+# item_wall_secs = 4800            # default: agent_wall_secs x8
+
+[forge.all]                        # `scrutiny forge all` kickoff; unset keys inherit [forge]
+branch_prefix = "feat"
+worktree_parent_folder = ".."      # absolute or relative to repo root
+use_tdd = true
+test_coverage = 100
+require_e2e = true
+team_size = 2
+spawn_mode = "single"              # single | team
+agent_cli = "claude"               # claude | cursor | codex
+model = "sonnet"
+jira_assignee = "@me"
+in_progress_status = "In Progress"
+# init_commands = ["npm install"]  # run in each worktree before forge
+
+# =============================================================================
+# COMMAND — parley
+# =============================================================================
+
+[parley]
+
+default_members = 1
+default_evangelists = 1
+default_verifiers = 1              # check fixes address comments; runs before evangelist
+push_fix_max_loops = 2
+prepush_fix_max_chunks = 8
+repair = true                      # re-implement stubs/rejected threads before evangelist posts
+# push_no_verify = false
+
+[parley.timeouts]
+agent_wall_secs = 600
+prepush_fix_wall_secs = 1200       # default: agent_wall_secs x2
+prepush_plan_wall_secs = 120       # read-only; splits pre-push log into fix chunks
+
+[parley.agent_models]              # `default = "l"` is a catch-all for all parley roles
+# default = "l"
+# member = "m"
+# lead = "l"
+# verifier = "m"
+# evangelist = "m"
+# push_fix = "m"
+# prepush_plan = "xs"              # special default: always xs when unset
+
+[parley.prompts]
+# global = ""
+# member = ""
+# lead = ""
+# verifier = ""
+# evangelist = ""
+# push_fix = ""
+# prepush_plan = ""
+
+[parley.stack]                     # `scrutiny parley stack`; inherits [parley] / global
+# autonomous = true
+# commit_without_push = true

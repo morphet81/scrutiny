@@ -145,7 +145,7 @@ pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
-    let pack_cfg = &cfg.pack;
+    let pack_cfg = &cfg.probe.pack;
 
     let repo = git::discover_repo(cwd)?;
     let repo_root = repo.root.display().to_string();

@@ -25,48 +25,31 @@ const LOCAL_CONFIG_FILE_NAME: &str = "scrutiny.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_client: String,
-    /// Run spawned agents headless (stdout captured). When false, opens each
-    /// agent in a visible terminal window (claude/cursor + tmux/zellij/macOS).
     #[serde(default = "default_true")]
     pub headless: bool,
-    /// Inject caveman-ultra style + dialect into spawned-agent prompts (default on).
-    /// Override off with `caveman = false` or env `SCRUTINY_NO_CAVEMAN=1`.
     #[serde(default = "default_true")]
     pub caveman: bool,
-    /// Force headless client for `scrutiny probe` (cursor|claude|codex). Omit → detect + prompt.
     #[serde(default)]
     pub force_client: Option<String>,
-    /// Force spawn mode: isolated | team. Omit → prompt (default **isolated**).
     #[serde(default)]
     pub force_spawn_mode: Option<String>,
-    /// Editor for PR descriptions. Omit → `$VISUAL` → `$EDITOR` → `vi`.
     #[serde(default)]
     pub editor: Option<String>,
     pub models: BTreeMap<String, ClientModels>,
-    pub review: ReviewConfig,
-    pub agents: AgentsConfig,
     pub git: GitConfig,
     #[serde(default)]
-    pub pack: PackConfig,
-    #[serde(default)]
-    pub scan: ScanConfig,
+    pub probe: ProbeConfig,
     #[serde(default)]
     pub forge: ForgeConfig,
-    /// Multi-ticket Jira kickoff: assign → In Progress → worktree → tab → forge --yes.
-    #[serde(default, alias = "forge-all")]
-    pub forge_all: ForgeAllConfig,
     #[serde(default)]
     pub parley: ParleyConfig,
     #[serde(default)]
     pub timeouts: TimeoutsConfig,
     #[serde(default)]
     pub prompts: PromptsConfig,
-    /// Per-role model overrides. Key = agent label prefix with `-` → `_`
-    /// (same as `[prompts.agents]`). Value = tier `xs|s|m|l|xl` resolved via
-    /// `[models.<client>]`, or a raw model id. Unset → session model.
-    /// Prefix keys apply to a family: `parley = "l"` covers every `parley_*`
-    /// role. Exact role still wins. Special defaults when neither is set:
-    /// `parley_prepush_plan` → client `xs`; `forge_loc_estimate` → `m`.
+    /// Merged agent-model overrides: old [agent_models] + per-command [*.agent_models].
+    /// Prefix catch-all: `parley = "l"` covers every `parley_*` role. Exact role wins.
+    /// Special defaults: `parley_prepush_plan` → xs; `forge_loc_estimate` → m.
     #[serde(default)]
     pub agent_models: BTreeMap<String, String>,
 }
@@ -100,6 +83,8 @@ pub struct TimeoutsConfig {
     /// TDD test-plan agent.
     #[serde(default)]
     pub forge_test_plan_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub forge_test_plan_revise_wall_secs: Option<u64>,
     /// Pre-implement LOC estimate agent (when `[forge] max_loc` is set).
     #[serde(default)]
     pub forge_loc_estimate_wall_secs: Option<u64>,
@@ -128,6 +113,90 @@ pub struct TimeoutsConfig {
     /// Unset → 90. `0` disables the early kill (full wall only).
     #[serde(default)]
     pub headless_first_output_secs: Option<u64>,
+}
+
+/// Per-command timeout overrides for probe agents (all inherit [timeouts].agent_wall_secs).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ProbeTimeoutsConfig {
+    #[serde(default)]
+    pub agent_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub isolated_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub team_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub consolidate_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub summary_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub ask_wall_secs: Option<u64>,
+}
+
+/// Per-command timeout overrides for forge agents (all inherit [timeouts].agent_wall_secs).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ForgeTimeoutsConfig {
+    #[serde(default)]
+    pub implement_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub fix_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub test_plan_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub test_plan_revise_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub loc_estimate_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub pr_description_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub item_wall_secs: Option<u64>,
+}
+
+/// Per-command timeout overrides for parley agents (all inherit [timeouts].agent_wall_secs).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ParleyTimeoutsConfig {
+    #[serde(default)]
+    pub agent_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub prepush_fix_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub prepush_plan_wall_secs: Option<u64>,
+}
+
+/// Probe command config: review/agent/pack/scan settings + probe-specific overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeConfig {
+    /// Headless PR overview agent before findings triage (`scrutiny probe`).
+    #[serde(default = "default_true")]
+    pub pr_summary: bool,
+    #[serde(default)]
+    pub review: ReviewConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
+    #[serde(default)]
+    pub pack: PackConfig,
+    #[serde(default)]
+    pub scan: ScanConfig,
+    #[serde(default)]
+    pub timeouts: ProbeTimeoutsConfig,
+    #[serde(default)]
+    pub agent_models: BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompts: BTreeMap<String, String>,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            pr_summary: true,
+            review: ReviewConfig::default(),
+            agents: AgentsConfig::default(),
+            pack: PackConfig::default(),
+            scan: ScanConfig::default(),
+            timeouts: ProbeTimeoutsConfig::default(),
+            agent_models: BTreeMap::new(),
+            prompts: BTreeMap::new(),
+        }
+    }
 }
 
 /// User-injected prompt text prepended to spawned-agent prompts.
@@ -218,6 +287,12 @@ pub struct ParleyConfig {
     /// hooks. Default false.
     #[serde(default)]
     pub push_no_verify: bool,
+    #[serde(default)]
+    pub timeouts: ParleyTimeoutsConfig,
+    #[serde(default)]
+    pub agent_models: BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompts: BTreeMap<String, String>,
 }
 
 fn default_parley_members() -> u32 {
@@ -256,6 +331,9 @@ impl Default for ParleyConfig {
             agent_wall_secs: None,
             repair: default_parley_repair(),
             push_no_verify: false,
+            timeouts: ParleyTimeoutsConfig::default(),
+            agent_models: BTreeMap::new(),
+            prompts: BTreeMap::new(),
         }
     }
 }
@@ -275,8 +353,16 @@ pub struct ForgeConfig {
     pub reviewers: Option<u32>,
     #[serde(default)]
     pub evangelists: Option<u32>,
+    #[serde(default, alias = "model")]
+    pub force_model: Option<String>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub all: ForgeAllConfig,
+    #[serde(default)]
+    pub timeouts: ForgeTimeoutsConfig,
+    #[serde(default)]
+    pub agent_models: BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompts: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub enable_figma: bool,
     #[serde(default = "default_true")]
@@ -396,7 +482,11 @@ impl Default for ForgeConfig {
             testers: None,
             reviewers: None,
             evangelists: None,
-            model: None,
+            force_model: None,
+            all: ForgeAllConfig::default(),
+            timeouts: ForgeTimeoutsConfig::default(),
+            agent_models: BTreeMap::new(),
+            prompts: BTreeMap::new(),
             enable_figma: true,
             enable_lore: true,
             enable_ticket_writeback: true,
@@ -672,9 +762,6 @@ pub struct ReviewConfig {
     pub security_by_tier: TierBools,
     pub performance_by_tier: TierBools,
     pub error_handling_by_tier: TierBools,
-    /// Headless PR overview agent before findings triage (`scrutiny probe`).
-    #[serde(default = "default_true")]
-    pub pr_summary: bool,
     #[serde(default)]
     pub signals: ReviewSignalsConfig,
 }
@@ -1084,6 +1171,41 @@ pub struct TierCounts {
     pub xl: u32,
 }
 
+impl Default for TierBools {
+    fn default() -> Self {
+        Self { xs: false, s: false, m: false, l: false, xl: false }
+    }
+}
+
+impl Default for TierCounts {
+    fn default() -> Self {
+        Self { xs: 0, s: 0, m: 0, l: 0, xl: 0 }
+    }
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            security_by_tier: TierBools { xs: false, s: false, m: true, l: true, xl: true },
+            performance_by_tier: TierBools { xs: false, s: false, m: false, l: true, xl: true },
+            error_handling_by_tier: TierBools { xs: false, s: true, m: true, l: true, xl: true },
+            signals: ReviewSignalsConfig::default(),
+        }
+    }
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            reviewers_by_tier: TierCounts { xs: 0, s: 1, m: 1, l: 2, xl: 2 },
+            evangelists_by_tier: TierCounts { xs: 0, s: 0, m: 0, l: 1, xl: 1 },
+            max_agents_total: default_max_agents_total(),
+            max_reviewers: default_max_reviewers_cap(),
+            max_evangelists: default_max_evangelists_cap(),
+        }
+    }
+}
+
 impl TierBools {
     pub fn get(&self, tier: Tier) -> bool {
         match tier {
@@ -1192,21 +1314,21 @@ impl Config {
         tier: Tier,
         content: &crate::signals::ContentSignals,
     ) -> SuggestedPlan {
-        let tier_sec = self.review.security_by_tier.get(tier);
-        let tier_perf = self.review.performance_by_tier.get(tier);
-        let tier_err = self.review.error_handling_by_tier.get(tier);
+        let tier_sec = self.probe.review.security_by_tier.get(tier);
+        let tier_perf = self.probe.review.performance_by_tier.get(tier);
+        let tier_err = self.probe.review.error_handling_by_tier.get(tier);
 
-        let security = if self.review.signals.ignore_content_signals {
+        let security = if self.probe.review.signals.ignore_content_signals {
             tier_sec
         } else {
             tier_sec && content.security
         };
-        let performance = if self.review.signals.ignore_content_signals {
+        let performance = if self.probe.review.signals.ignore_content_signals {
             tier_perf
         } else {
             tier_perf && content.performance
         };
-        let error_handling = if self.review.signals.ignore_content_signals {
+        let error_handling = if self.probe.review.signals.ignore_content_signals {
             tier_err
         } else {
             // On S+ tiers, allow error_handling when content hits OR when tier wants it and there is source
@@ -1214,24 +1336,24 @@ impl Config {
         };
 
         let mut reviewers = self
-            .agents
+            .probe.agents
             .reviewers_by_tier
             .get(tier)
-            .min(self.agents.max_reviewers);
+            .min(self.probe.agents.max_reviewers);
         let mut evangelists = self
-            .agents
+            .probe.agents
             .evangelists_by_tier
             .get(tier)
-            .min(self.agents.max_evangelists);
+            .min(self.probe.agents.max_evangelists);
 
         // Soft total cap: reviewers + evangelists + specialists
         let specialists = (security as u32) + (performance as u32) + (error_handling as u32);
         let mut total = reviewers + evangelists + specialists;
-        while total > self.agents.max_agents_total && evangelists > 0 {
+        while total > self.probe.agents.max_agents_total && evangelists > 0 {
             evangelists -= 1;
             total -= 1;
         }
-        while total > self.agents.max_agents_total && reviewers > 1 {
+        while total > self.probe.agents.max_agents_total && reviewers > 1 {
             reviewers -= 1;
             total -= 1;
         }
@@ -1282,7 +1404,7 @@ impl Config {
             reviewers,
             evangelists,
             prompt_reviewers: reviewers > 0,
-            prompt_evangelists: evangelists > 0 || self.agents.evangelists_by_tier.get(tier) > 0,
+            prompt_evangelists: evangelists > 0 || self.probe.agents.evangelists_by_tier.get(tier) > 0,
         }
     }
 
@@ -1301,7 +1423,7 @@ impl Config {
     ) -> SuggestedForge {
         let f = &self.forge;
         let model = f
-            .model
+            .force_model
             .clone()
             .or_else(|| self.model_for(client, tier).map(|s| s.to_string()))
             .unwrap_or_else(|| "default".into());
@@ -1321,7 +1443,7 @@ impl Config {
             testers: f.testers.unwrap_or(f.default_testers),
             reviewers: f.reviewers.unwrap_or(f.default_reviewers),
             evangelists: f.evangelists.unwrap_or(f.default_evangelists),
-            prompt_model: f.model.is_none(),
+            prompt_model: f.force_model.is_none(),
             prompt_approach: f.approach.is_none(),
             prompt_e2e: f.e2e.is_none(),
             prompt_agents: f.agents.is_none(),
@@ -1476,22 +1598,110 @@ pub fn load_config(path: &Path) -> Result<Config> {
         merge_toml(&mut value, lvalue);
     }
 
+    normalize_value(&mut value);
     let mut cfg: Config = value.try_into().context("parse config.toml")?;
     store_prompt_overrides(&cfg.prompts);
     crate::caveman::store_caveman_enabled(cfg.caveman);
-    seed_parley_timeouts(&mut cfg);
+    merge_command_timeouts(&mut cfg);
+    merge_agent_models(&mut cfg);
     crate::timeouts::install(crate::timeouts::Timeouts::resolve(&cfg.timeouts));
     Ok(cfg)
 }
 
-/// Legacy `[parley]` walls feed `[timeouts]` when the newer keys are absent.
-fn seed_parley_timeouts(cfg: &mut Config) {
-    if cfg.timeouts.parley_agent_wall_secs.is_none() {
-        cfg.timeouts.parley_agent_wall_secs = cfg.parley.agent_wall_secs;
+/// Migrate old top-level keys to the new nested structure for backward compat.
+fn normalize_value(v: &mut toml::Value) {
+    let toml::Value::Table(root) = v else { return };
+    for (old_key, new_parent, new_child) in [
+        ("review", "probe", "review"),
+        ("agents", "probe", "agents"),
+        ("pack", "probe", "pack"),
+        ("scan", "probe", "scan"),
+        ("forge_all", "forge", "all"),
+    ] {
+        if let Some(val) = root.remove(old_key) {
+            let parent = root
+                .entry(new_parent.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            if let toml::Value::Table(pt) = parent {
+                if let Some(existing) = pt.get_mut(new_child) {
+                    merge_toml(existing, val);
+                } else {
+                    pt.insert(new_child.to_string(), val);
+                }
+            }
+        }
     }
-    if cfg.timeouts.parley_prepush_fix_wall_secs.is_none() {
-        cfg.timeouts.parley_prepush_fix_wall_secs = cfg.parley.prepush_fix_wall_secs;
+    // Lift legacy `pr_summary` off `probe.review` onto `probe` (new home).
+    if let Some(toml::Value::Table(probe)) = root.get_mut("probe") {
+        if let Some(toml::Value::Table(review)) = probe.get_mut("review") {
+            if let Some(ps) = review.remove("pr_summary") {
+                probe.entry("pr_summary".to_string()).or_insert(ps);
+            }
+        }
     }
+}
+
+/// Copy per-command timeout fields into the flat TimeoutsConfig.
+/// Per-command wins over flat when both are set; flat explicit value always wins over
+/// nothing. Order: flat `[timeouts]` explicit > per-command > nothing.
+fn merge_command_timeouts(cfg: &mut Config) {
+    macro_rules! fill {
+        ($flat:ident, $src:expr) => {
+            if cfg.timeouts.$flat.is_none() {
+                cfg.timeouts.$flat = $src;
+            }
+        };
+    }
+    // Probe
+    let pt = cfg.probe.timeouts;
+    fill!(probe_isolated_wall_secs, pt.isolated_wall_secs);
+    fill!(probe_team_wall_secs, pt.team_wall_secs);
+    fill!(probe_consolidate_wall_secs, pt.consolidate_wall_secs);
+    fill!(probe_summary_wall_secs, pt.summary_wall_secs);
+    fill!(probe_ask_wall_secs, pt.ask_wall_secs);
+
+    // Forge
+    let ft = cfg.forge.timeouts;
+    fill!(forge_implement_wall_secs, ft.implement_wall_secs);
+    fill!(forge_fix_wall_secs, ft.fix_wall_secs);
+    fill!(forge_test_plan_wall_secs, ft.test_plan_wall_secs);
+    fill!(forge_test_plan_revise_wall_secs, ft.test_plan_revise_wall_secs);
+    fill!(forge_loc_estimate_wall_secs, ft.loc_estimate_wall_secs);
+    fill!(forge_pr_description_wall_secs, ft.pr_description_wall_secs);
+    fill!(forge_bulk_item_wall_secs, ft.item_wall_secs);
+
+    // Parley — per-command struct wins; legacy [parley] direct fields are fallback
+    let parley_t = cfg.parley.timeouts;
+    fill!(parley_agent_wall_secs, parley_t.agent_wall_secs.or(cfg.parley.agent_wall_secs));
+    fill!(parley_prepush_fix_wall_secs, parley_t.prepush_fix_wall_secs.or(cfg.parley.prepush_fix_wall_secs));
+    fill!(parley_prepush_plan_wall_secs, parley_t.prepush_plan_wall_secs);
+}
+
+/// Expand per-command agent_models maps into the flat agent_models BTreeMap.
+/// Forge/parley keys are prefixed (`forge_implement`, `parley_member`, etc.).
+/// Probe keys stay bare (`reviewer`, `summary`) to match agent labels.
+/// A `default` key in a per-command map acts as the catch-all (e.g. `parley`).
+fn merge_agent_models(cfg: &mut Config) {
+    let mut flat = std::mem::take(&mut cfg.agent_models);
+
+    for (prefix, map) in [
+        ("probe", &cfg.probe.agent_models),
+        ("forge", &cfg.forge.agent_models),
+        ("parley", &cfg.parley.agent_models),
+    ] {
+        for (k, v) in map {
+            let flat_key = if k == "default" {
+                prefix.to_string()
+            } else if prefix == "probe" {
+                k.clone()
+            } else {
+                format!("{prefix}_{k}")
+            };
+            flat.entry(flat_key).or_insert_with(|| v.clone());
+        }
+    }
+
+    cfg.agent_models = flat;
 }
 
 pub fn find_shipped_default(start: &Path) -> PathBuf {
@@ -1522,11 +1732,12 @@ mod tests {
         let cfg: Config = toml::from_str(DEFAULT_TOML).expect("parse default");
         assert_eq!(cfg.default_client, "claude");
         assert!(cfg.caveman);
-        assert_eq!(cfg.agents.reviewers_by_tier.get(Tier::Xs), 0);
-        assert!(!cfg.review.security_by_tier.get(Tier::S));
-        assert!(cfg.review.security_by_tier.get(Tier::M));
-        assert_eq!(cfg.pack.max_chars, 48_000);
-        assert!(cfg.scan.enable);
+        assert!(cfg.probe.pr_summary);
+        assert_eq!(cfg.probe.agents.reviewers_by_tier.get(Tier::Xs), 0);
+        assert!(!cfg.probe.review.security_by_tier.get(Tier::S));
+        assert!(cfg.probe.review.security_by_tier.get(Tier::M));
+        assert_eq!(cfg.probe.pack.max_chars, 48_000);
+        assert!(cfg.probe.scan.enable);
         let claude = cfg.suggested_plan("claude", Tier::L);
         assert_eq!(claude.model, "opus");
         let plan = cfg.suggested_plan("cursor", Tier::M);
@@ -1537,9 +1748,9 @@ mod tests {
         let plan_xs = cfg.suggested_plan("cursor", Tier::Xs);
         assert!(!plan_xs.prompt_reviewers);
         assert!(!plan_xs.prompt_evangelists);
-        assert_eq!(cfg.agents.max_agents_total, 4);
-        assert!(cfg.scan.i18n.enable);
-        assert!(cfg.pack.explore.enable);
+        assert_eq!(cfg.probe.agents.max_agents_total, 4);
+        assert!(cfg.probe.scan.i18n.enable);
+        assert!(cfg.probe.pack.explore.enable);
         assert!(cfg.forge.enable_figma);
         assert_eq!(cfg.forge.default_approach, "tdd");
         assert!(cfg.forge.max_loc.is_none());
@@ -1562,7 +1773,7 @@ mod tests {
             "haiku"
         );
         assert_eq!(cfg.parley.prepush_fix_max_chunks, 8);
-        assert_eq!(cfg.timeouts.parley_prepush_plan_wall_secs, Some(120));
+        assert_eq!(cfg.parley.timeouts.prepush_plan_wall_secs, Some(120));
     }
 
     #[test]
@@ -1699,10 +1910,11 @@ mod tests {
     fn timeouts_section_overrides_legacy_parley_keys() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        // Swap default.toml's `[timeouts]` block for overrides, and put a legacy
-        // wall back into the `[parley]` table that precedes it.
+        // Swap default.toml's `[timeouts]` block for custom overrides and insert a legacy
+        // `prepush_fix_wall_secs` into `[parley]`.  Because `[git]` now precedes
+        // `[timeouts]`, use `[probe.` as the tail anchor so `[git]` isn't duplicated.
         let head = DEFAULT_TOML.split("[timeouts]").next().unwrap();
-        let tail = &DEFAULT_TOML[DEFAULT_TOML.find("[git]").unwrap()..];
+        let tail = &DEFAULT_TOML[DEFAULT_TOML.find("[probe.").unwrap()..];
         fs::write(
             &path,
             format!(
@@ -1724,6 +1936,22 @@ mod tests {
             t.parley_prepush_fix, 1200,
             "legacy [parley] key still seeds"
         );
+    }
+
+    #[test]
+    fn lifts_legacy_pr_summary_onto_probe() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Old shape: [review] pr_summary = false — must land on probe.pr_summary.
+        fs::write(
+            &path,
+            format!(
+                "{DEFAULT_TOML}\n[review]\npr_summary = false\n"
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(&path).unwrap();
+        assert!(!cfg.probe.pr_summary);
     }
 
     #[test]
@@ -1775,7 +2003,7 @@ mod tests {
         let cfg: Config = base.try_into().unwrap();
         assert_eq!(cfg.default_client, "codex");
         // untouched fields still come from global/defaults
-        assert_eq!(cfg.agents.reviewers_by_tier.get(Tier::Xs), 0);
+        assert_eq!(cfg.probe.agents.reviewers_by_tier.get(Tier::Xs), 0);
     }
 
     #[test]

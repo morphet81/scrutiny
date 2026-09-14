@@ -45,7 +45,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
-    let fa = cfg.forge_all.clone();
+    let fa = cfg.forge.all.clone();
 
     if input.tickets.is_empty() {
         bail!("forge-all needs at least one Jira URL or key");

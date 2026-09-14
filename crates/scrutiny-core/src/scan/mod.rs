@@ -101,7 +101,7 @@ pub fn run_scan(
         .map(|p| p.architecture_risk)
         .unwrap_or_else(|| matches!(map.tier, Tier::L | Tier::Xl));
 
-    if !cfg.scan.enable {
+    if !cfg.probe.scan.enable {
         let report = empty_report(map_path, pack_path, eval_path, &map, architecture_risk);
         let out = temp_artifact_path(&map.repo, &map.branch, "scan");
         write_json_pretty(&out, &report)?;
@@ -116,12 +116,12 @@ pub fn run_scan(
     collect_risk_without_test(&map, &mut findings);
     collect_large_hunks(eval.as_ref(), pack.as_ref(), &mut findings);
 
-    match i18n::collect_i18n_findings(&repo.root, &map, &cfg.scan.i18n) {
+    match i18n::collect_i18n_findings(&repo.root, &map, &cfg.probe.scan.i18n) {
         Ok(mut i18n_findings) => findings.append(&mut i18n_findings),
         Err(e) => eprintln!("scrutiny scan: i18n parity warn: {e:#}"),
     }
 
-    for cmd in &cfg.scan.commands {
+    for cmd in &cfg.probe.scan.commands {
         if let Some(f) = run_lint_hook(cwd, cmd) {
             findings.push(f);
         }
