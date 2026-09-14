@@ -83,7 +83,7 @@ scrutiny forge "https://…/browse/PROJ-123"
 scrutiny forge --inline --input "Add dark mode toggle"
 ```
 
-Flow: fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement → verify gate (tests + pre-push checks) → commit → optional draft PR.
+Flow: fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
 
 **Bulk** (many tickets, each on its own branch/worktree):
 
@@ -341,6 +341,8 @@ Bounded agent exploration beyond the pack.
 | `verify_commands` | `[]` | Explicit verify-gate commands; empty → auto-detect harness |
 | `verify_max_loops` | `2` (shipped) | Max fix loops before gate fails (`5` if key omitted from a minimal file) |
 | `verify_coverage` | `true` | Gate on coverage % when measurable |
+| `skip_verify` | `true` (temporary) | Skip host verify gate after implement; set `false` to restore |
+| `skip_ship` | `true` (temporary) | Skip commit + draft PR; use `scrutiny pr` after; set `false` to restore |
 | `prepush_cmd` | unset | Override pre-push checks in the verify gate; empty → `git hook run pre-push` if a hook exists |
 | `branch_headless` | `"auto"` | `"auto"` follow detection \| `"never"` stay on current branch |
 | `bulk_concurrency` | `3` | Max concurrent `forge bulk` items (`--concurrency` overrides) |

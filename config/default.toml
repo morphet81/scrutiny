@@ -197,6 +197,12 @@ default_evangelists = 0
 verify_max_loops = 2
 verify_coverage = true
 
+# TEMPORARY: stop after implement. Skip host verify gate (tests/lint/pre-push) and
+# ship (commit + draft PR). Review changes locally, then `scrutiny pr` when ready.
+# Set both false to restore the full forge pipeline.
+skip_verify = true
+skip_ship = true
+
 enable_branch = true
 branch_headless = "auto"
 

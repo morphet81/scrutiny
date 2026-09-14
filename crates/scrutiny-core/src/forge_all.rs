@@ -516,4 +516,25 @@ mod tests {
             "{err:#}"
         );
     }
+
+    #[test]
+    fn forge_script_runs_forge_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("driver.sh");
+        write_forge_script(
+            &script,
+            Path::new("/bin/scrutiny"),
+            Path::new("/tmp/wt"),
+            "NERO-1",
+            "{}",
+            Path::new("/tmp/done"),
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+        assert!(
+            !body.contains("SCRUTINY_FORCE_HEADLESS"),
+            "forge-all must not force headless (custom models need visible/non-first-output path)"
+        );
+        assert!(body.contains("forge --yes --from-json"));
+    }
 }

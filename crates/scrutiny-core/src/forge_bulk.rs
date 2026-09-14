@@ -493,6 +493,14 @@ fn conclude_item(item: &ItemPlan, cfg: &Config, headless: bool, dry: bool) -> Re
             Ok(m) if !m.trim().is_empty() => eprintln!("pr.json:\n{m}"),
             _ => eprintln!("pr.json:  (none)"),
         }
+    } else if cfg.forge.skip_ship {
+        eprintln!(
+            "\n===== {} — skip_ship: not committing or opening PR (temporary) =====",
+            item.id
+        );
+        eprintln!("worktree: {}", item.worktree.display());
+        eprintln!("pr.json:  {}", item.pr_meta_path.display());
+        eprintln!("next → review changes, then `scrutiny pr` when ready");
     } else {
         init_artifact_ctx(&item.worktree, &item.session)?;
         // Each bulk item runs in a fresh worktree (clean at creation), so an

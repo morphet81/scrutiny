@@ -275,17 +275,26 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         dry: false,
     })?;
 
-    run_forge_ship(
-        &cwd,
-        &session_root,
-        &outcome.pr_meta_path,
-        &cfg,
-        skip_prompts,
-        /* create_pr_noninteractive */ false,
-        &prefix,
-        &ticket,
-        &outcome.base,
-    )?;
+    if cfg.forge.skip_ship {
+        eprintln!(
+            "scrutiny forge: skip_ship — not committing or opening PR (temporary)"
+        );
+        eprintln!(
+            "scrutiny forge: next → review changes, then `scrutiny pr` when ready"
+        );
+    } else {
+        run_forge_ship(
+            &cwd,
+            &session_root,
+            &outcome.pr_meta_path,
+            &cfg,
+            skip_prompts,
+            /* create_pr_noninteractive */ false,
+            &prefix,
+            &ticket,
+            &outcome.base,
+        )?;
+    }
 
     eprintln!(
         "scrutiny forge: done. session={} ticket={} pr_meta={}",
@@ -393,6 +402,13 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
             framework: None,
         });
     }
+    if cfg.forge.skip_verify {
+        verify_plan.commands.clear();
+        verify_plan.coverage = None;
+        eprintln!(
+            "scrutiny forge: skip_verify — host will not run tests/lint/pre-push (temporary)"
+        );
+    }
 
     let pr_meta_path = session_root.join("pr.json");
     let target = AgentTarget {
@@ -474,23 +490,27 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         target,
     )?;
 
-    match run_verify_gate(
-        detected,
-        &session.model,
-        &cwd,
-        &ticket_path,
-        &session_path,
-        &brief_path,
-        &context_path,
-        &verify_plan,
-        target,
-    )? {
-        GateOutcome::Green => {}
-        GateOutcome::Red { proceed: true } => {
-            eprintln!("scrutiny forge: verify gate red — committing anyway per user");
-        }
-        GateOutcome::Red { proceed: false } => {
-            bail!("verify gate failed — see output above; not committing");
+    if cfg.forge.skip_verify {
+        eprintln!("scrutiny forge: skipped verify gate (skip_verify=true)");
+    } else {
+        match run_verify_gate(
+            detected,
+            &session.model,
+            &cwd,
+            &ticket_path,
+            &session_path,
+            &brief_path,
+            &context_path,
+            &verify_plan,
+            target,
+        )? {
+            GateOutcome::Green => {}
+            GateOutcome::Red { proceed: true } => {
+                eprintln!("scrutiny forge: verify gate red — committing anyway per user");
+            }
+            GateOutcome::Red { proceed: false } => {
+                bail!("verify gate failed — see output above; not committing");
+            }
         }
     }
 

@@ -105,10 +105,14 @@ fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
     if pid <= 1 {
         return false;
     }
-    // Prefer process-group kill so claude/cursor children die with the wrapper.
+    // Process-group kill ONLY when this pid is the group leader. Blind
+    // `kill(-pid)` targets whatever PGID equals `pid` — not "pid's group" —
+    // and can nuke an unrelated group (zellij client/session) on collision.
+    let pgid = unsafe { libc::getpgid(pid) };
+    let group_leader = pgid == pid;
     let mut signaled = false;
     unsafe {
-        if libc::kill(-pid, libc::SIGTERM) == 0 {
+        if group_leader && libc::kill(-pid, libc::SIGTERM) == 0 {
             signaled = true;
         }
         if libc::kill(pid, libc::SIGTERM) == 0 {
@@ -120,7 +124,9 @@ fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
     }
     thread::sleep(Duration::from_millis(150));
     unsafe {
-        let _ = libc::kill(-pid, libc::SIGKILL);
+        if group_leader {
+            let _ = libc::kill(-pid, libc::SIGKILL);
+        }
         let _ = libc::kill(pid, libc::SIGKILL);
     }
     true
@@ -712,15 +718,12 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
         TerminalContext::Zellij => {
             let caps = zellij_caps();
             let _g = focus_guard();
+            open_zellij_tab(key, &cwd).context("zellij new-tab")?;
             let tab_id = if caps.tab_id || caps.current_tab_info {
-                // Prefer capturing id from new-tab stdout when available.
-                capture_new_tab_id(key, &cwd)
+                focused_tab_id_after_open()
             } else {
                 None
             };
-            if tab_id.is_none() {
-                run_zellij_argv(&zellij_open_argv(key, &cwd)).context("zellij new-tab")?;
-            }
             Ok(ItemSurface::Zellij {
                 tab: key.to_string(),
                 tab_id,
@@ -739,34 +742,22 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
     }
 }
 
-fn capture_new_tab_id(tab: &str, cwd: &str) -> Option<u32> {
+/// Read the focused tab id after we just opened a tab (no second new-tab).
+fn focused_tab_id_after_open() -> Option<u32> {
     let mut args = zellij_session_args();
-    args.extend([
-        "action".into(),
-        "new-tab".into(),
-        "--name".into(),
-        tab.into(),
-        "--cwd".into(),
-        cwd.into(),
-    ]);
+    args.extend(["action".into(), "current-tab-info".into()]);
     let out = Command::new("zellij").args(&args).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    // Newer zellij prints the tab id alone or as `id: N`.
-    for tok in text.split_whitespace() {
-        if let Ok(id) = tok.parse::<u32>() {
-            return Some(id);
-        }
-        if let Some(rest) = tok.strip_prefix("id:") {
-            if let Ok(id) = rest.parse::<u32>() {
-                return Some(id);
-            }
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("id:") {
+            return rest.trim().parse().ok();
         }
     }
-    let trimmed = text.trim();
-    trimmed.parse().ok()
+    None
 }
 
 /// Launch `bash <script_path>` as a new pane/tab named `role` inside `surface`.
@@ -985,8 +976,80 @@ fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
         .to_vec()
 }
 
+/// Open a tab whose placeholder pane is *command-pinned* to `cwd`.
+///
+/// Plain `new-tab --cwd` only seeds the start dir; interactive login shells
+/// (mise/npm/`cd` in zshrc) often leave the pane elsewhere. A one-pane layout
+/// runs a non-login shell that `cd`s then `exec`s — profile cannot undo it.
+fn open_zellij_tab(tab: &str, cwd: &str) -> Result<()> {
+    let layout_path = write_zellij_worktree_layout(cwd)?;
+    let mut args = zellij_session_args();
+    args.extend([
+        "action".into(),
+        "new-tab".into(),
+        "--name".into(),
+        tab.into(),
+        "--cwd".into(),
+        cwd.into(),
+        "--layout".into(),
+        layout_path.display().to_string(),
+    ]);
+    let status = zellij_cmd(&args).status().context("spawn zellij new-tab --layout")?;
+    if !status.success() {
+        // Older/broken layout support: fall back to --cwd + typed cd.
+        run_zellij_argv(&zellij_open_argv(tab, cwd)).context("zellij new-tab fallback")?;
+        let _ = zellij_cd_placeholder(tab, cwd);
+    }
+    Ok(())
+}
+
+fn write_zellij_worktree_layout(cwd: &str) -> Result<PathBuf> {
+    // Escape for double-quoted KDL strings and shell single quotes inside args.
+    let kdl_cwd = cwd.replace('\\', "\\\\").replace('"', "\\\"");
+    let sh_cwd = cwd.replace('\'', "'\\''");
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "zsh".into());
+    let shell_cmd = Path::new(&shell)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("zsh");
+    // Non-login `-c` so zshrc/mise cannot undo the cd; then exec an interactive shell.
+    let body = format!(
+        "layout {{\n\
+         \tpane cwd=\"{kdl_cwd}\" command=\"{shell_cmd}\" {{\n\
+         \t\targs \"-c\" \"cd '{sh_cwd}' && exec {shell_cmd}\"\n\
+         \t}}\n\
+         }}\n"
+    );
+    let path = std::env::temp_dir().join(format!(
+        "scrutiny-zellij-tab-{}-{:08x}.kdl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    fs::write(&path, body.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
 fn zellij_goto_argv(tab: &str) -> Vec<String> {
     ["action", "go-to-tab-name", tab].map(String::from).to_vec()
+}
+
+/// Explicit `cd` into the new tab's placeholder pane (fallback when layout fails).
+fn zellij_cd_placeholder(tab: &str, cwd: &str) -> Result<()> {
+    // Profiles (mise/npm) can take >250ms; wait then type cd twice.
+    thread::sleep(Duration::from_millis(800));
+    run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name for cd")?;
+    let esc = cwd.replace('\'', "'\\''");
+    let chars = format!("cd '{esc}'; clear\n");
+    run_zellij_argv(&zellij_write_chars_argv(&chars)).context("zellij write-chars cd")?;
+    thread::sleep(Duration::from_millis(200));
+    run_zellij_argv(&zellij_write_chars_argv(&chars)).context("zellij write-chars cd retry")
+}
+
+fn zellij_write_chars_argv(chars: &str) -> Vec<String> {
+    ["action", "write-chars", chars].map(String::from).to_vec()
 }
 
 fn zellij_run_argv(role: &str, script: &str, close_on_exit: bool) -> Vec<String> {
@@ -1219,6 +1282,23 @@ mod tests {
             zellij_open_argv("PROJ-1", "/tmp/wt"),
             vec!["action", "new-tab", "--name", "PROJ-1", "--cwd", "/tmp/wt"]
         );
+    }
+
+    #[test]
+    fn zellij_write_chars_cd_shape() {
+        assert_eq!(
+            zellij_write_chars_argv("cd '/tmp/wt'; clear\n"),
+            vec!["action", "write-chars", "cd '/tmp/wt'; clear\n"]
+        );
+    }
+
+    #[test]
+    fn zellij_worktree_layout_pins_cd() {
+        let path = write_zellij_worktree_layout("/tmp/my wt").unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(body.contains("cwd=\"/tmp/my wt\""), "{body}");
+        assert!(body.contains("cd '/tmp/my wt' && exec"), "{body}");
     }
 
     #[test]

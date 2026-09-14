@@ -25,23 +25,27 @@ That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,
 mirrors ticket under `.scrutiny/forge-<id>/`, exports Figma via `fcli` when links
 exist, asks spawn (default **single**)|team, playwright (skip if missing), TDD,
 coverage, e2e → **scaffolding** (guess+confirm prefix, optional branch/worktree)
-→ optional test-plan confirm → optional LOC estimate gate (`max_loc`) → implement agent → verify gate → ship step.
+→ optional test-plan confirm → optional LOC estimate gate (`max_loc`) → implement agent.
+
+**Temporary default** (`forge.skip_verify` / `forge.skip_ship` = true): stop after
+implement — no host verify gate (tests/lint/pre-push), no commit, no draft PR.
+Review locally, then `scrutiny pr`. Set both keys to `false` to restore verify →
+ship.
 
 **Scaffolding (host-owned, before implement):** host guesses a conventional
 prefix from ticket type/labels/title → confirm via Select (guess first). If
 `enable_branch`, detect git state and offer *create branch* / *+worktree* /
 *use current* (default depends on whether you're on a base branch); worktree
-switches the working dir for implement+commit. Non-TTY follows
+switches the working dir for implement. Non-TTY follows
 `branch_headless` (`auto` = create only when on a base branch; `never` = current).
 
 Implement agent must write `.scrutiny/forge-<id>/pr.json`
 (`pr_title`, `pr_body` citing the ticket URL only, `commit_subject` starting with
 the chosen prefix, `commit_body`), delete non-implementation junk (e.g. playwright
-temp media), and must **not** create branches, commit, push, or open a PR. After
-the agent exits, `scrutiny forge` confirms the commit subject (Input, default =
-AI value or guess), commits, then on a TTY asks whether to create a **draft PR**
-(PR-title Input + base branch prompt). `--yes` / non-TTY skips prompts and uses
-the defaults.
+temp media), and must **not** create branches, commit, push, or open a PR. When
+ship is enabled, after the agent exits `scrutiny forge` confirms the commit
+subject, commits, then on a TTY asks whether to create a **draft PR**. `--yes` /
+non-TTY skips prompts and uses the defaults.
 
 Sibling of `/scrutiny` and `/parley` (same binary, `~/.scrutiny/config.toml`).
 

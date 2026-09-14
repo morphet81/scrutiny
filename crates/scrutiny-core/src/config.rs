@@ -308,6 +308,14 @@ pub struct ForgeConfig {
     /// Gate on coverage % when measurable (auto-derived commands only).
     #[serde(default = "default_true")]
     pub verify_coverage: bool,
+    /// TEMPORARY: skip the verify gate (tests / lint / pre-push) after implement.
+    /// Set `false` to restore. Default true until ship pipeline is re-enabled.
+    #[serde(default = "default_true")]
+    pub skip_verify: bool,
+    /// TEMPORARY: skip commit + draft PR after implement. Use `scrutiny pr` after.
+    /// Set `false` to restore. Default true until ship pipeline is re-enabled.
+    #[serde(default = "default_true")]
+    pub skip_ship: bool,
     /// Run the interactive branch step (create branch / +worktree / none).
     #[serde(default = "default_true")]
     pub enable_branch: bool,
@@ -402,6 +410,8 @@ impl Default for ForgeConfig {
             verify_max_loops: default_verify_loops(),
             prepush_cmd: None,
             verify_coverage: true,
+            skip_verify: true,
+            skip_ship: true,
             enable_branch: true,
             branch_headless: default_branch_headless(),
             bulk_concurrency: default_bulk_concurrency(),
