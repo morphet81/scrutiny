@@ -212,7 +212,7 @@ Per-tier specialist toggles (`XS`…`XL` bools).
 
 | Key | Default | Explanation |
 |-----|---------|-------------|
-| `pr_summary` | `true` | Parallel headless agent writes PR overview (purpose, architecture, good/bad points) shown before findings triage; set `false` to skip |
+| `pr_summary` | `true` | Parallel headless agent writes PR overview (purpose, architecture, good points, anchored concerns, review limits) shown before findings triage; anchored concerns are promoted into findings. Set `false` to skip |
 | `security_by_tier` | XS/S off; M/L/XL on | Spawn security specialist when true for the eval tier |
 | `performance_by_tier` | XS/S/M off; L/XL on | Spawn performance specialist |
 | `error_handling_by_tier` | XS off; S–XL on | Spawn error-handling specialist |

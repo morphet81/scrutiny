@@ -11,7 +11,8 @@ use crate::agent_runner::{
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
 use crate::findings::{
-    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,
+    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, promote_summary_concerns,
+    run_findings_init,
     run_findings_init_empty, run_findings_resolve, run_findings_triage, run_findings_validate,
     run_post_comments, FindingsInitInput, PostCommentsInput, TriageAskCtx,
 };
@@ -261,6 +262,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
             pr_summary,
         })?;
         merge_ai_findings(&findings_path, &report.findings)?;
+        promote_summary_concerns(&findings_path)?;
         eprintln!(
             "scrutiny probe: merged {} AI findings → {}",
             report.findings.len(),
@@ -390,6 +392,7 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
     };
 
     merge_ai_findings(&findings_path, &report.findings)?;
+    promote_summary_concerns(&findings_path)?;
     eprintln!(
         "scrutiny probe: merged {} AI findings → {}",
         report.findings.len(),

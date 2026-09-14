@@ -47,10 +47,10 @@ pub use config::{
 };
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
-    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, run_findings_init,
-    run_findings_init_empty, run_findings_resolve, run_findings_triage, run_findings_validate,
-    run_post_comments, FindingsInitInput, FindingsReport, PostCommentsInput, PostResult,
-    TriageAskCtx,
+    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, promote_summary_concerns,
+    run_findings_init, run_findings_init_empty, run_findings_resolve, run_findings_triage,
+    run_findings_validate, run_post_comments, FindingsInitInput, FindingsReport, PostCommentsInput,
+    PostResult, TriageAskCtx,
 };
 pub use forge::{
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, ForgeFetchInput,

@@ -264,6 +264,160 @@ pub fn merge_ai_findings(
     Ok((report, findings_path.to_path_buf()))
 }
 
+/// Promote anchored `pr_summary.bad_points` into triage findings.
+/// Skips unanchored concerns and items already covered by an existing finding
+/// (same path + nearby line + similar title/text). `review_limits` stay display-only.
+pub fn promote_summary_concerns(
+    findings_path: &Path,
+) -> Result<(FindingsReport, PathBuf)> {
+    let mut report: FindingsReport = read_json(findings_path)?;
+    let Some(summary) = report.pr_summary.clone() else {
+        return Ok((report, findings_path.to_path_buf()));
+    };
+
+    let mut added = 0u32;
+    let mut skipped_unanchored = 0u32;
+    for c in &summary.bad_points {
+        if !c.is_actionable() {
+            skipped_unanchored += 1;
+            continue;
+        }
+        if concern_covered_by_existing(&report.findings, c) {
+            continue;
+        }
+        let next = report.findings.len() + 1;
+        report.findings.push(concern_to_triage(c, next));
+        added += 1;
+    }
+
+    if added > 0 {
+        renumber(&mut report);
+        write_json_pretty(findings_path, &report)?;
+        eprintln!("scrutiny: promoted {added} summary concern(s) → findings");
+    }
+    if skipped_unanchored > 0 {
+        eprintln!(
+            "scrutiny: warn: {skipped_unanchored} summary concern(s) lack path+line — not promoted (use review_limits for pack caveats)"
+        );
+    }
+    Ok((report, findings_path.to_path_buf()))
+}
+
+fn concern_title(c: &crate::agent_runner::SummaryConcern) -> String {
+    if let Some(t) = c.title.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return t.to_string();
+    }
+    let first = c.text.lines().next().unwrap_or(c.text.as_str()).trim();
+    if first.chars().count() <= 72 {
+        first.to_string()
+    } else {
+        let truncated: String = first.chars().take(69).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn concern_to_triage(
+    c: &crate::agent_runner::SummaryConcern,
+    number: usize,
+) -> TriageFinding {
+    let path = c.path.as_ref().map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let line = c.line.filter(|&l| l > 0);
+    let severity = normalize_severity(c.severity.as_deref().unwrap_or("suggestion"));
+    let proposed_fix = c.proposed_fix.clone().unwrap_or_default();
+    TriageFinding {
+        id: format!("F{number}"),
+        number: number as u32,
+        severity,
+        title: concern_title(c),
+        explanation: c.text.clone(),
+        proposed_fix,
+        fix_options: Vec::new(),
+        chosen_option: None,
+        include: None,
+        source: "ai.summary".into(),
+        paths: path.iter().cloned().collect(),
+        anchor: Anchor {
+            path: path.clone(),
+            side: "RIGHT".into(),
+            start_line: line,
+            line,
+            line_resolved: false,
+            line_text: None,
+            in_diff: None,
+        },
+        comment_body: None,
+        status: "pending".into(),
+        fail_reason: None,
+        needle: None,
+        ask_log: Vec::new(),
+    }
+}
+
+fn concern_covered_by_existing(
+    findings: &[TriageFinding],
+    c: &crate::agent_runner::SummaryConcern,
+) -> bool {
+    let Some(cpath) = c.path.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    let Some(cline) = c.line.filter(|&l| l > 0) else {
+        return false;
+    };
+    let ctitle = concern_title(c);
+    let ctext_norm = normalize_concern_text(&c.text);
+    for f in findings {
+        let Some(fpath) = f.anchor.path.as_deref().or(f.paths.first().map(|s| s.as_str())) else {
+            continue;
+        };
+        if fpath != cpath {
+            continue;
+        }
+        let Some(fline) = f.anchor.line.filter(|&l| l > 0) else {
+            continue;
+        };
+        if fline.abs_diff(cline) > 2 {
+            continue;
+        }
+        if titles_overlap(&f.title, &ctitle)
+            || texts_overlap(&f.explanation, &ctext_norm)
+            || texts_overlap(&f.title, &ctext_norm)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalize_concern_text(s: &str) -> String {
+    s.to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn titles_overlap(a: &str, b: &str) -> bool {
+    let na = normalize_concern_text(a);
+    let nb = normalize_concern_text(b);
+    if na.is_empty() || nb.is_empty() {
+        return false;
+    }
+    na == nb || na.contains(&nb) || nb.contains(&na)
+}
+
+fn texts_overlap(haystack: &str, needle_norm: &str) -> bool {
+    if needle_norm.is_empty() {
+        return false;
+    }
+    let h = normalize_concern_text(haystack);
+    if h.is_empty() {
+        return false;
+    }
+    h == needle_norm || h.contains(needle_norm) || needle_norm.contains(&h)
+}
+
 fn agent_to_triage(a: &crate::agent_runner::AgentFinding, number: usize) -> TriageFinding {
     let path = {
         let p = a.path.trim();
@@ -545,9 +699,31 @@ pub fn print_pr_summary(summary: &ProbePrSummary) {
             style_reset()
         );
         for p in &summary.bad_points {
+            let anchor = match (&p.path, p.line) {
+                (Some(path), Some(line)) if !path.is_empty() && line > 0 => {
+                    format!(" (`{path}:{line}`)")
+                }
+                _ => String::new(),
+            };
+            eprintln!(
+                "  {}•{} {}{anchor}",
+                if color { "\x1b[33m" } else { "" },
+                style_reset(),
+                p.text
+            );
+        }
+    }
+    if !summary.review_limits.is_empty() {
+        eprintln!(
+            "\n{}{}Review limits{}\n",
+            style_bold(),
+            if color { "\x1b[90m" } else { "" }, // dim
+            style_reset()
+        );
+        for p in &summary.review_limits {
             eprintln!(
                 "  {}•{} {p}",
-                if color { "\x1b[33m" } else { "" },
+                if color { "\x1b[90m" } else { "" },
                 style_reset()
             );
         }
@@ -3083,5 +3259,133 @@ mod tests {
             draft_key(&json!({"path":"a.ts","line":10,"body":"y"}))
         );
         assert_ne!(draft_key(&file_payload), draft_key(&payload));
+    }
+
+    fn empty_findings_report(summary: Option<ProbePrSummary>) -> FindingsReport {
+        FindingsReport {
+            version: 1,
+            repo: "test/repo".into(),
+            mode: "local".into(),
+            pr_number: None,
+            pr_url: None,
+            head_oid: "abc".into(),
+            base_ref: "main".into(),
+            eval_path: None,
+            pack_path: None,
+            scan_path: None,
+            plan_path: None,
+            review: ReviewMeta::default(),
+            pr_summary: summary,
+            findings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn promote_summary_concerns_adds_anchored_skips_limits_and_dupes() {
+        use crate::agent_runner::SummaryConcern;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let summary = ProbePrSummary {
+            purpose: "p".into(),
+            architecture: "a".into(),
+            good_points: vec![],
+            bad_points: vec![
+                SummaryConcern {
+                    text: "Dual-path render gate is subtle".into(),
+                    path: Some("src/FormBody.tsx".into()),
+                    line: Some(40),
+                    severity: Some("warning".into()),
+                    title: Some("Dual-path render gate".into()),
+                    proposed_fix: Some("Simplify condition".into()),
+                },
+                SummaryConcern {
+                    text: "Legacy string concern".into(),
+                    path: None,
+                    line: None,
+                    severity: None,
+                    title: None,
+                    proposed_fix: None,
+                },
+                SummaryConcern {
+                    text: "eslint-disable context easy to miss".into(),
+                    path: Some("src/ViewSections.tsx".into()),
+                    line: Some(88),
+                    severity: Some("suggestion".into()),
+                    title: Some("eslint-disable context".into()),
+                    proposed_fix: None,
+                },
+            ],
+            review_limits: vec!["E2E pack truncated".into()],
+        };
+
+        let mut report = empty_findings_report(Some(summary));
+        // Existing reviewer finding covers the ViewSections concern (near line + title).
+        report.findings.push(TriageFinding {
+            id: "F1".into(),
+            number: 1,
+            severity: "suggestion".into(),
+            title: "eslint-disable context".into(),
+            explanation: "eslint-disable context easy to miss".into(),
+            proposed_fix: String::new(),
+            fix_options: Vec::new(),
+            chosen_option: None,
+            include: None,
+            source: "ai.reviewer".into(),
+            paths: vec!["src/ViewSections.tsx".into()],
+            anchor: Anchor {
+                path: Some("src/ViewSections.tsx".into()),
+                side: "RIGHT".into(),
+                start_line: Some(90),
+                line: Some(90),
+                line_resolved: false,
+                line_text: None,
+                in_diff: None,
+            },
+            comment_body: None,
+            status: "pending".into(),
+            fail_reason: None,
+            needle: None,
+            ask_log: Vec::new(),
+        });
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("scrutiny-promote-{nanos}.json"));
+        write_json_pretty(&path, &report).unwrap();
+
+        let (out, _) = promote_summary_concerns(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        // Existing F1 + one promoted FormBody concern.
+        // Unanchored skipped; ViewSections near-dupe skipped; review_limits never findings.
+        assert_eq!(out.findings.len(), 2);
+        assert_eq!(out.findings[0].source, "ai.reviewer");
+        assert_eq!(out.findings[1].source, "ai.summary");
+        assert_eq!(out.findings[1].title, "Dual-path render gate");
+        assert_eq!(out.findings[1].severity, "warning");
+        assert_eq!(out.findings[1].anchor.path.as_deref(), Some("src/FormBody.tsx"));
+        assert_eq!(out.findings[1].anchor.line, Some(40));
+        assert_eq!(out.findings[1].proposed_fix, "Simplify condition");
+        assert!(!out
+            .findings
+            .iter()
+            .any(|f| f.explanation.contains("E2E pack truncated")));
+    }
+
+    #[test]
+    fn promote_summary_concerns_noop_without_summary() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let report = empty_findings_report(None);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("scrutiny-promote-empty-{nanos}.json"));
+        write_json_pretty(&path, &report).unwrap();
+        let (out, _) = promote_summary_concerns(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(out.findings.is_empty());
     }
 }

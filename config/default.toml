@@ -60,6 +60,7 @@ L = true
 XL = true
 
 # Headless PR overview before findings triage (`scrutiny probe`). Default true.
+# Anchored concerns (bad_points with path+line) promote into findings; review_limits stay display-only.
 # pr_summary = false
 
 [review.signals]

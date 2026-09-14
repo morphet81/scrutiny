@@ -39,7 +39,8 @@ pub enum HeadlessKind {
     Parley,
     /// One-shot free-form text (e.g. PR description). Read-only, no schema.
     Text,
-    /// Probe PR overview (purpose, architecture, strengths, concerns). Read-only + summary schema.
+    /// Probe PR overview (purpose, architecture, strengths, anchored concerns, review limits).
+    /// Read-only + summary schema. Anchored concerns promoted to findings after merge.
     Summary,
 }
 
@@ -221,17 +222,63 @@ pub const PR_SUMMARY_JSON_SCHEMA: &str = r#"{
     "purpose": { "type": "string" },
     "architecture": { "type": "string" },
     "good_points": { "type": "array", "items": { "type": "string" } },
-    "bad_points": { "type": "array", "items": { "type": "string" } }
+    "bad_points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" },
+          "path": { "type": "string" },
+          "line": { "type": "integer" },
+          "severity": { "type": "string" },
+          "title": { "type": "string" },
+          "proposed_fix": { "type": "string" }
+        },
+        "required": ["text", "path", "line"]
+      }
+    },
+    "review_limits": { "type": "array", "items": { "type": "string" } }
   },
-  "required": ["purpose", "architecture", "good_points", "bad_points"]
+  "required": ["purpose", "architecture", "good_points", "bad_points", "review_limits"]
 }"#;
+
+/// Actionable concern from the PR overview agent. Anchored items are promoted
+/// into triage findings after review merge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SummaryConcern {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_fix: Option<String>,
+}
+
+impl SummaryConcern {
+    /// True when path is non-empty and line > 0 — eligible for findings promote.
+    pub fn is_actionable(&self) -> bool {
+        self.path
+            .as_ref()
+            .map(|p| !p.trim().is_empty())
+            .unwrap_or(false)
+            && self.line.unwrap_or(0) > 0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProbePrSummary {
     pub purpose: String,
     pub architecture: String,
     pub good_points: Vec<String>,
-    pub bad_points: Vec<String>,
+    pub bad_points: Vec<SummaryConcern>,
+    /// Pack/tool/review-process caveats — display only, never findings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_limits: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1537,8 +1584,8 @@ fn consolidate_findings(
 /// Run isolated parallel specialists; collate + dedupe into ReviewReport.
 pub fn build_pr_summary_prompt(pack_path: &Path) -> String {
     let header = crate::caveman::dialect(
-        "Scrutiny PR summary specialist. ISOLATED. No subagents. No findings.",
-        "Scrutiny PR summary specialist. ISOLATED mode. No subagents. No findings.",
+        "Scrutiny PR summary specialist. ISOLATED. No subagents. No findings array.",
+        "Scrutiny PR summary specialist. ISOLATED mode. No subagents. No findings array.",
     );
     format!(
         r#"{header}
@@ -1554,15 +1601,30 @@ Output JSON ONLY. No prose outside JSON.
   "purpose": "1-3 sentences: what this PR does and why",
   "architecture": "1-3 sentences: how the change is structured (layers, modules, data flow)",
   "good_points": ["strength 1", "strength 2"],
-  "bad_points": ["risk or concern 1", "risk or concern 2"]
+  "bad_points": [
+    {{
+      "text": "actionable risk or concern (one clear sentence)",
+      "path": "rel/path/from/pack",
+      "line": 42,
+      "severity": "suggestion",
+      "title": "optional short title",
+      "proposed_fix": "optional concrete fix"
+    }}
+  ],
+  "review_limits": ["pack/tool caveat only — e.g. truncated file, missing env"]
 }}
 
 Rules:
 - Be concrete — cite modules/patterns from the pack, not generic praise.
 - `purpose` and `architecture` MUST be non-empty strings (never "").
-- `good_points` / `bad_points`: 2-5 bullets each; empty array only if truly none.
+- `good_points`: 2-5 bullets; empty array only if truly none.
+- `bad_points`: actionable code risks ONLY. Each MUST include `path` + `line` from pack
+  unified diff / symbol slices (1-based new-file lines). Prefer severity
+  `suggestion` or `warning` (rare `critical`). 0-5 items; empty if none.
+- `review_limits`: pack/tool/review-process caveats (truncation, unread regions,
+  missing config). Display only — NEVER put these in `bad_points`. Empty if none.
 - Field VALUES: clear reviewer English (not telegraphic fragments). JSON keys exact.
-- This is overview only — do NOT emit code-review findings.
+- Do NOT emit a `findings` array. Anchored `bad_points` are promoted to triage later.
 
 ## Pack
 Pack: `{pack}`
@@ -1582,6 +1644,92 @@ fn summary_has_content(s: &ProbePrSummary) -> bool {
     !s.purpose.is_empty() || !s.architecture.is_empty()
 }
 
+fn parse_string_list(v: &Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_concern_item(item: &Value) -> Option<SummaryConcern> {
+    if let Some(s) = item.as_str() {
+        let text = s.trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        // Legacy plain-string concern — keep for display; not actionable.
+        return Some(SummaryConcern {
+            text,
+            path: None,
+            line: None,
+            severity: None,
+            title: None,
+            proposed_fix: None,
+        });
+    }
+    if !item.is_object() {
+        return None;
+    }
+    let text = item
+        .get("text")
+        .or_else(|| item.get("concern"))
+        .or_else(|| item.get("explanation"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            item.get("title")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })?;
+    let path = item
+        .get("path")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let line = item
+        .get("line")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 0);
+    let severity = item
+        .get("severity")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let title = item
+        .get("title")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let proposed_fix = item
+        .get("proposed_fix")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Some(SummaryConcern {
+        text,
+        path,
+        line,
+        severity,
+        title,
+        proposed_fix,
+    })
+}
+
+fn parse_bad_points(v: &Value) -> Vec<SummaryConcern> {
+    v.get("bad_points")
+        .and_then(|x| x.as_array())
+        .map(|arr| arr.iter().filter_map(parse_concern_item).collect())
+        .unwrap_or_default()
+}
+
 fn summary_from_object(v: &Value) -> ProbePrSummary {
     ProbePrSummary {
         purpose: v
@@ -1596,26 +1744,9 @@ fn summary_from_object(v: &Value) -> ProbePrSummary {
             .unwrap_or("")
             .trim()
             .to_string(),
-        good_points: v
-            .get("good_points")
-            .and_then(|x| x.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        bad_points: v
-            .get("bad_points")
-            .and_then(|x| x.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        good_points: parse_string_list(v, "good_points"),
+        bad_points: parse_bad_points(v),
+        review_limits: parse_string_list(v, "review_limits"),
     }
 }
 
@@ -2490,12 +2621,32 @@ mod tests {
 
     #[test]
     fn parse_pr_summary_json_extracts_fields() {
-        let raw = r#"{"purpose":"Adds auth","architecture":"Service layer","good_points":["Clean split"],"bad_points":["No tests"]}"#;
+        let raw = r#"{
+          "purpose":"Adds auth",
+          "architecture":"Service layer",
+          "good_points":["Clean split"],
+          "bad_points":[{"text":"No tests","path":"src/auth.ts","line":10,"severity":"warning"}],
+          "review_limits":["Pack truncated e2e spec"]
+        }"#;
         let s = parse_pr_summary_json(raw).unwrap();
         assert_eq!(s.purpose, "Adds auth");
         assert_eq!(s.architecture, "Service layer");
         assert_eq!(s.good_points, vec!["Clean split"]);
-        assert_eq!(s.bad_points, vec!["No tests"]);
+        assert_eq!(s.bad_points.len(), 1);
+        assert_eq!(s.bad_points[0].text, "No tests");
+        assert_eq!(s.bad_points[0].path.as_deref(), Some("src/auth.ts"));
+        assert_eq!(s.bad_points[0].line, Some(10));
+        assert!(s.bad_points[0].is_actionable());
+        assert_eq!(s.review_limits, vec!["Pack truncated e2e spec"]);
+    }
+
+    #[test]
+    fn parse_pr_summary_accepts_legacy_string_bad_points() {
+        let raw = r#"{"purpose":"Adds auth","architecture":"Service layer","good_points":["Clean split"],"bad_points":["No tests"]}"#;
+        let s = parse_pr_summary_json(raw).unwrap();
+        assert_eq!(s.bad_points.len(), 1);
+        assert_eq!(s.bad_points[0].text, "No tests");
+        assert!(!s.bad_points[0].is_actionable());
     }
 
     #[test]
@@ -2507,21 +2658,23 @@ mod tests {
             "purpose":"Seat guest flow refactor",
             "architecture":"Hook extracts table seating state",
             "good_points":["Clear split"],
-            "bad_points":["Missing tests"]
+            "bad_points":[{"text":"Missing tests","path":"tests/seat.ts","line":1}],
+            "review_limits":[]
           }
         }"#;
         let s = parse_pr_summary_json(raw).unwrap();
         assert_eq!(s.purpose, "Seat guest flow refactor");
         assert_eq!(s.architecture, "Hook extracts table seating state");
         assert_eq!(s.good_points, vec!["Clear split"]);
-        assert_eq!(s.bad_points, vec!["Missing tests"]);
+        assert_eq!(s.bad_points[0].text, "Missing tests");
+        assert!(s.bad_points[0].is_actionable());
     }
 
     #[test]
     fn parse_pr_summary_json_unwraps_result_string() {
         let raw = r#"{
           "type":"result",
-          "result":"{\"purpose\":\"Via result\",\"architecture\":\"Nested\",\"good_points\":[],\"bad_points\":[]}"
+          "result":"{\"purpose\":\"Via result\",\"architecture\":\"Nested\",\"good_points\":[],\"bad_points\":[],\"review_limits\":[]}"
         }"#;
         let s = parse_pr_summary_json(raw).unwrap();
         assert_eq!(s.purpose, "Via result");
@@ -2534,7 +2687,7 @@ mod tests {
         // skip a good `result` string → empty purpose → triage hid the summary.
         let raw = r#"{
           "type":"result","subtype":"success","is_error":false,
-          "result":"{\"purpose\":\"From result\",\"architecture\":\"Layers\",\"good_points\":[\"A\"],\"bad_points\":[]}",
+          "result":"{\"purpose\":\"From result\",\"architecture\":\"Layers\",\"good_points\":[\"A\"],\"bad_points\":[],\"review_limits\":[]}",
           "structured_output":null
         }"#;
         let s = parse_pr_summary_json(raw).unwrap();
@@ -2546,19 +2699,20 @@ mod tests {
     #[test]
     fn parse_pr_summary_falls_through_empty_structured_output_object() {
         let raw = r#"{
-          "result":"{\"purpose\":\"Recovered\",\"architecture\":\"Via result\",\"good_points\":[],\"bad_points\":[\"Risk\"]}",
-          "structured_output":{"purpose":"","architecture":"","good_points":[],"bad_points":[]}
+          "result":"{\"purpose\":\"Recovered\",\"architecture\":\"Via result\",\"good_points\":[],\"bad_points\":[\"Risk\"],\"review_limits\":[]}",
+          "structured_output":{"purpose":"","architecture":"","good_points":[],"bad_points":[],"review_limits":[]}
         }"#;
         let s = parse_pr_summary_json(raw).unwrap();
         assert_eq!(s.purpose, "Recovered");
         assert_eq!(s.architecture, "Via result");
-        assert_eq!(s.bad_points, vec!["Risk"]);
+        assert_eq!(s.bad_points.len(), 1);
+        assert_eq!(s.bad_points[0].text, "Risk");
     }
 
     #[test]
     fn parse_pr_summary_structured_output_json_string() {
         let raw = r#"{
-          "structured_output":"{\"purpose\":\"SO string\",\"architecture\":\"Nested SO\",\"good_points\":[],\"bad_points\":[]}"
+          "structured_output":"{\"purpose\":\"SO string\",\"architecture\":\"Nested SO\",\"good_points\":[],\"bad_points\":[],\"review_limits\":[]}"
         }"#;
         let s = parse_pr_summary_json(raw).unwrap();
         assert_eq!(s.purpose, "SO string");
