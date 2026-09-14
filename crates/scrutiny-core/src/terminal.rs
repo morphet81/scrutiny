@@ -976,75 +976,33 @@ fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
         .to_vec()
 }
 
-/// Open a tab whose placeholder pane is *command-pinned* to `cwd`.
+/// Open a tab whose placeholder pane ends up in `cwd`, with session UI chrome
+/// (tab bar / status bar) intact.
 ///
-/// Plain `new-tab --cwd` only seeds the start dir; interactive login shells
-/// (mise/npm/`cd` in zshrc) often leave the pane elsewhere. A one-pane layout
-/// runs a non-login shell that `cd`s then `exec`s — profile cannot undo it.
+/// Do **not** pass a bare `layout { pane … }` via `--layout`: that creates a
+/// chrome-less tab (no tab-bar plugin) that looks like fullscreen. Plain
+/// `new-tab --cwd` inherits the session template; we then type an explicit
+/// `cd` so login profiles cannot leave the worktree.
 fn open_zellij_tab(tab: &str, cwd: &str) -> Result<()> {
-    let layout_path = write_zellij_worktree_layout(cwd)?;
-    let mut args = zellij_session_args();
-    args.extend([
-        "action".into(),
-        "new-tab".into(),
-        "--name".into(),
-        tab.into(),
-        "--cwd".into(),
-        cwd.into(),
-        "--layout".into(),
-        layout_path.display().to_string(),
-    ]);
-    let status = zellij_cmd(&args).status().context("spawn zellij new-tab --layout")?;
-    if !status.success() {
-        // Older/broken layout support: fall back to --cwd + typed cd.
-        run_zellij_argv(&zellij_open_argv(tab, cwd)).context("zellij new-tab fallback")?;
-        let _ = zellij_cd_placeholder(tab, cwd);
-    }
+    run_zellij_argv(&zellij_open_argv(tab, cwd)).context("zellij new-tab")?;
+    let _ = zellij_cd_placeholder(tab, cwd);
     Ok(())
-}
-
-fn write_zellij_worktree_layout(cwd: &str) -> Result<PathBuf> {
-    // Escape for double-quoted KDL strings and shell single quotes inside args.
-    let kdl_cwd = cwd.replace('\\', "\\\\").replace('"', "\\\"");
-    let sh_cwd = cwd.replace('\'', "'\\''");
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "zsh".into());
-    let shell_cmd = Path::new(&shell)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("zsh");
-    // Non-login `-c` so zshrc/mise cannot undo the cd; then exec an interactive shell.
-    let body = format!(
-        "layout {{\n\
-         \tpane cwd=\"{kdl_cwd}\" command=\"{shell_cmd}\" {{\n\
-         \t\targs \"-c\" \"cd '{sh_cwd}' && exec {shell_cmd}\"\n\
-         \t}}\n\
-         }}\n"
-    );
-    let path = std::env::temp_dir().join(format!(
-        "scrutiny-zellij-tab-{}-{:08x}.kdl",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0)
-    ));
-    fs::write(&path, body.as_bytes()).with_context(|| format!("write {}", path.display()))?;
-    Ok(path)
 }
 
 fn zellij_goto_argv(tab: &str) -> Vec<String> {
     ["action", "go-to-tab-name", tab].map(String::from).to_vec()
 }
 
-/// Explicit `cd` into the new tab's placeholder pane (fallback when layout fails).
+/// Explicit `cd` into the new tab's placeholder pane after shell init.
 fn zellij_cd_placeholder(tab: &str, cwd: &str) -> Result<()> {
-    // Profiles (mise/npm) can take >250ms; wait then type cd twice.
-    thread::sleep(Duration::from_millis(800));
+    // Profiles (mise/npm CodeArtifact) often take >1s and may `cd` away after
+    // `--cwd` seeds the start dir. Wait, then type cd twice.
+    thread::sleep(Duration::from_millis(1200));
     run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name for cd")?;
     let esc = cwd.replace('\'', "'\\''");
-    let chars = format!("cd '{esc}'; clear\n");
+    let chars = format!("cd '{esc}'\nclear\n");
     run_zellij_argv(&zellij_write_chars_argv(&chars)).context("zellij write-chars cd")?;
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(400));
     run_zellij_argv(&zellij_write_chars_argv(&chars)).context("zellij write-chars cd retry")
 }
 
@@ -1282,23 +1240,16 @@ mod tests {
             zellij_open_argv("PROJ-1", "/tmp/wt"),
             vec!["action", "new-tab", "--name", "PROJ-1", "--cwd", "/tmp/wt"]
         );
+        // Must stay layout-free so session tab-bar chrome is kept.
+        assert!(!zellij_open_argv("PROJ-1", "/tmp/wt").contains(&"--layout".into()));
     }
 
     #[test]
     fn zellij_write_chars_cd_shape() {
         assert_eq!(
-            zellij_write_chars_argv("cd '/tmp/wt'; clear\n"),
-            vec!["action", "write-chars", "cd '/tmp/wt'; clear\n"]
+            zellij_write_chars_argv("cd '/tmp/wt'\nclear\n"),
+            vec!["action", "write-chars", "cd '/tmp/wt'\nclear\n"]
         );
-    }
-
-    #[test]
-    fn zellij_worktree_layout_pins_cd() {
-        let path = write_zellij_worktree_layout("/tmp/my wt").unwrap();
-        let body = fs::read_to_string(&path).unwrap();
-        let _ = fs::remove_file(&path);
-        assert!(body.contains("cwd=\"/tmp/my wt\""), "{body}");
-        assert!(body.contains("cd '/tmp/my wt' && exec"), "{body}");
     }
 
     #[test]
