@@ -82,6 +82,9 @@ back to headless.
 
 - Agents **must not** `git commit` / `push` / `gh` reply — host owns ship + reply
 - Every thread gets a `parley-fixes.json` entry (`comment_id` = thread id `PRRT_…`)
+- Agents see the **full thread conversation** (not only the first review comment). A later
+  human reply (e.g. author: “that's intentional / the goal”) is authoritative — do **not**
+  still apply the AI code change; set `addressed: false` and acknowledge
 - Replies use GraphQL `addPullRequestReviewThreadReply` with that thread id
 - No auto-resolve in v1
 

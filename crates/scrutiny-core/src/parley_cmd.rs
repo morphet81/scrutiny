@@ -20,7 +20,9 @@ use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
     clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
 };
-use crate::parley::fetch::{run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput};
+use crate::parley::fetch::{
+    run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput, ParleyThreadComment,
+};
 use crate::parley::fixes::{
     init_fixes_file, load_fixes, merge_fix_entries, parse_fixes_from_agent_stdout, save_fixes,
     validate_fixes_complete, FixEntry,
@@ -816,14 +818,34 @@ fn build_member_prompt(
     p
 }
 
-/// Render assigned/repair threads (id, location, author, body) into a prompt.
+/// Render assigned/repair threads with the full conversation trail.
+///
+/// A later human reply (e.g. PR author: "that's intentional") is authoritative
+/// context for whether a code change is still wanted — agents must see it.
 fn push_threads(p: &mut String, slice: &[ParleyComment]) {
     for c in slice {
         let line = c.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
         p.push_str(&format!(
-            "### Thread `{}` — {}:{} (@{})\n{}\n\n",
-            c.id, c.path, line, c.author, c.body
+            "### Thread `{}` — {}:{} (opened by @{})\n",
+            c.id, c.path, line, c.author
         ));
+        if c.comments.is_empty() {
+            p.push_str(&format!("- @{}: {}\n\n", c.author, c.body));
+            continue;
+        }
+        p.push_str(
+            "Full conversation (oldest → newest). Later human replies override the original ask:\n",
+        );
+        for (i, tc) in c.comments.iter().enumerate() {
+            let who = if tc.author.is_empty() {
+                "?"
+            } else {
+                tc.author.as_str()
+            };
+            let mark = if i == 0 { " (original)" } else { "" };
+            p.push_str(&format!("- @{}{}: {}\n", who, mark, tc.body.trim()));
+        }
+        p.push('\n');
     }
 }
 
@@ -834,11 +856,15 @@ fn build_repair_prompt(comments_path: &str, fixes_path: &str, slice: &[ParleyCom
     p.push_str(crate::caveman::dialect(
         "You = parley repair agent. Threads below NOT properly addressed on first pass — \
          member timed out / errored, or verifier rejected fix. \
-         Actually implement each fix now.\n\
+         Implement a real fix when the conversation still asks for a change.\n\
+         If a later human reply already said the behavior is intentional / by design / \
+         the goal / not wanted, do NOT change code — set addressed:false and acknowledge.\n\
          Do NOT git commit, git push, or call gh to reply — host script does that.\n",
         "You are the parley repair agent. The threads below were NOT properly addressed on the \
          first pass — the member timed out / errored, or a verifier rejected the fix. \
-         Actually implement each fix now.\n\
+         Implement a real fix when the conversation still asks for a change.\n\
+         If a later human reply already said the behavior is intentional / by design / \
+         the goal / not wanted, do NOT change code — set addressed:false and acknowledge.\n\
          Do NOT git commit, git push, or call gh to reply — the host script does that.\n",
     ));
     p.push_str(prepush::PREPUSH_OWNERSHIP);
@@ -848,7 +874,7 @@ fn build_repair_prompt(comments_path: &str, fixes_path: &str, slice: &[ParleyCom
     p.push_str(
         "\nOverwrite each thread's fix entry with a REAL reply_body and correct `addressed` — \
          remove any placeholder / failure text. Only set `addressed: false` for a genuine, \
-         explained won't-fix.\n\n",
+         explained won't-fix (including human-dismissed threads).\n\n",
     );
     p.push_str(&format!("Comments file (full): {comments_path}\n"));
     p.push_str(&format!("Fixes file to update: {fixes_path}\n\n"));
@@ -942,11 +968,16 @@ fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFil
             if let Some(c) = comments.comments.iter().find(|c| &c.id == id) {
                 let line = c.line.map(|l| l.to_string()).unwrap_or_else(|| "?".into());
                 p.push_str(&format!(
-                    "- `{}` {}:{} — {}\n",
+                    "- `{}` {}:{} — {}{}\n",
                     c.id,
                     c.path,
                     line,
-                    truncate(&c.body, 120)
+                    truncate(&c.body, 100),
+                    if c.comments.len() > 1 {
+                        format!(" (+{} later replies — read full trail)", c.comments.len() - 1)
+                    } else {
+                        String::new()
+                    }
                 ));
             } else {
                 p.push_str(&format!("- `{id}`\n"));
@@ -965,19 +996,27 @@ fn build_verifier_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) -> S
     );
     format!(
         "{intro}\
-         Read:\n- comments: {}\n- fixes: {}\n\n\
+         Read:\n- comments: {} (full thread conversations — not just the first comment)\n\
+         - fixes: {}\n\n\
          For EACH fix entry:\n\
          - FIRST check `reply_body`. If it is a host failure placeholder — e.g. contains \
          \"finished without a structured fix entry\", \"agent error\", \"failed\", \"Skipped (no agent)\" \
          — or is empty, or does not actually respond to the comment: set `verified: false`, \
          `addressed: false`, and say so in `verification`. These are NOT real answers.\n\
+         - Read the FULL thread conversation for that comment_id. If a later human reply \
+         (especially the PR author / developer) said the behavior is intentional, by design, \
+         already correct, \"the goal\", or otherwise not wanted as a code change, then \
+         `addressed: false` that acknowledges them is CORRECT → `verified: true`. If the agent \
+         still changed code against that human context, set `verified: false`, `addressed: false`, \
+         and explain in `verification`.\n\
          - If `addressed` is true: read the referenced code and confirm the change actually \
-         resolves that review comment. If it truly does, set `verified: true`. If it does NOT \
-         (missing, partial, wrong, or unrelated), set `verified: false`, set `addressed: false`, \
+         resolves that review comment *and* is still wanted given later human replies. If it \
+         truly does, set `verified: true`. If it does NOT (missing, partial, wrong, unrelated, \
+         or contradicts human dismissal), set `verified: false`, set `addressed: false`, \
          and explain the gap in `verification` (and adjust `reply_body` to be honest).\n\
          - If `addressed` is false: confirm `reply_body` is a consistent, reasonable, comment-specific \
-         response (a genuine won't-fix with a reason). Set `verified: true` if consistent, else \
-         `verified: false` and note why in `verification`.\n\n\
+         response (a genuine won't-fix with a reason, including human-dismissed threads). Set \
+         `verified: true` if consistent, else `verified: false` and note why in `verification`.\n\n\
          Do NOT edit source code. Do NOT git commit, push, or gh-reply. Only read-merge-write the \
          fixes JSON: preserve every existing field, add `verified` and `verification`, and flip \
          `addressed` only when a claimed fix does not hold.\n\n{}",
@@ -995,8 +1034,9 @@ fn build_evangelist_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) ->
     );
     format!(
         "{intro}\
-         Read:\n- comments: {}\n- fixes: {}\n\
+         Read:\n- comments: {} (full thread conversations)\n- fixes: {}\n\
          You may edit code and amend `parley-fixes.json` entries (reply_body / explanation / snippets).\n\
+         Do NOT re-introduce code changes that a later human reply dismissed as intentional / by design.\n\
          Do NOT git commit, push, or gh-reply.\n\n{}",
         plan.comments_path, plan.fixes_path, FIXES_PROTOCOL,
         intro = intro,
@@ -1023,7 +1063,19 @@ Write each thread's entry to the fixes file IMMEDIATELY after you finish that th
 (read-merge-write), before starting the next — so partial work survives if you run out of time.\n\
 Also print a final JSON block with a top-level `\"fixes\": [ … ]` array covering your assigned ids \
 (so the host can merge if the file write is missed).\n\
-If you truly will not fix a comment, set `addressed: false` and explain the reason in reply_body.\n";
+If you truly will not fix a comment, set `addressed: false` and explain the reason in reply_body.\n\
+\n\
+## Conversation rules (mandatory)\n\
+\n\
+Assigned threads include the FULL comment conversation when available (not only the first review note).\n\
+- Read every reply in order before changing code.\n\
+- If a later reply from a human (especially the PR author / developer) clarifies that the flagged \
+behavior is intentional, by design, already correct, not a bug, \"the goal\", or otherwise not \
+wanted as a code change: do NOT edit source for that thread. Set `addressed: false` and reply \
+acknowledging their context — do not re-argue the original finding or quietly apply the AI suggestion.\n\
+- AI review comments are proposals. A human reply in the same thread is authoritative for whether \
+a code change is still desired.\n\
+- Only implement a code fix when the conversation still asks for a change after the latest human replies.\n";
 
 fn truncate(s: &str, max: usize) -> String {
     let t = s.replace('\n', " ");
@@ -1595,6 +1647,84 @@ mod tests {
     fn fixes_protocol_mentions_thread_id() {
         assert!(FIXES_PROTOCOL.contains("PRRT_"));
         assert!(FIXES_PROTOCOL.contains("comment_id"));
+    }
+
+    #[test]
+    fn fixes_protocol_honors_human_conversation() {
+        assert!(FIXES_PROTOCOL.contains("Conversation rules"));
+        assert!(FIXES_PROTOCOL.to_ascii_lowercase().contains("intentional"));
+        assert!(FIXES_PROTOCOL.contains("do NOT edit source"));
+    }
+
+    #[test]
+    fn push_threads_includes_full_conversation() {
+        let c = ParleyComment {
+            id: "PRRT_1".into(),
+            comment_id: "PRRC_1".into(),
+            database_id: Some(1),
+            path: "ci.yml".into(),
+            line: Some(10),
+            start_line: None,
+            side: None,
+            diff_side: None,
+            is_outdated: false,
+            author: "bot".into(),
+            body: "Skip blocks still auto-deploy".into(),
+            url: String::new(),
+            comments: vec![
+                ParleyThreadComment {
+                    id: "PRRC_1".into(),
+                    database_id: Some(1),
+                    body: "Skip blocks still auto-deploy".into(),
+                    url: String::new(),
+                    author: "bot".into(),
+                    path: Some("ci.yml".into()),
+                    line: Some(10),
+                    diff_side: None,
+                    created_at: None,
+                },
+                ParleyThreadComment {
+                    id: "PRRC_2".into(),
+                    database_id: Some(2),
+                    body: "Yes, that's the goal....".into(),
+                    url: String::new(),
+                    author: "morphet81".into(),
+                    path: Some("ci.yml".into()),
+                    line: Some(10),
+                    diff_side: None,
+                    created_at: None,
+                },
+            ],
+        };
+        let mut p = String::new();
+        push_threads(&mut p, &[c]);
+        assert!(p.contains("Full conversation"));
+        assert!(p.contains("@bot (original):"));
+        assert!(p.contains("@morphet81: Yes, that's the goal...."));
+        assert!(p.contains("Later human replies override"));
+    }
+
+    #[test]
+    fn push_threads_falls_back_when_trail_empty() {
+        let c = ParleyComment {
+            id: "PRRT_2".into(),
+            comment_id: String::new(),
+            database_id: None,
+            path: "a.rs".into(),
+            line: None,
+            start_line: None,
+            side: None,
+            diff_side: None,
+            is_outdated: false,
+            author: "rev".into(),
+            body: "please fix".into(),
+            url: String::new(),
+            comments: vec![],
+        };
+        let mut p = String::new();
+        push_threads(&mut p, &[c]);
+        assert!(p.contains("@rev: please fix"));
+        assert!(!p.contains("Full conversation"));
     }
 
     #[test]
