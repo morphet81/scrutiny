@@ -35,6 +35,7 @@ use crate::terminal::{
     force_close_agent_panes, load_item_surface_from_env, resolve_terminal, ItemSurface,
     ResolvedTerminal,
 };
+use console::Style;
 
 /// Shared case-title rules for TDD test-plan + implement agents.
 const TEST_TITLE_GUIDELINES: &str = "\
@@ -304,11 +305,15 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         )?;
     }
 
-    eprintln!(
-        "scrutiny forge: done. session={} ticket={} pr_meta={}",
-        outcome.session_path.display(),
-        ticket_path.display(),
-        outcome.pr_meta_path.display()
+    print_forge_complete_report(
+        &ticket,
+        &cwd,
+        &outcome.pr_meta_path,
+        &outcome.session_path,
+        &ticket_path,
+        &outcome.base,
+        &cfg.git.artifact_globs,
+        cfg.forge.skip_ship,
     );
     Ok(outcome.session_path)
 }
@@ -1610,6 +1615,257 @@ fn load_pr_meta(path: &Path) -> Result<PrMeta> {
     Ok(meta)
 }
 
+/// Colorful end-of-forge report for the item pane (forge-all / non-headless).
+/// Prints to stderr, then the process exits 0; tabs stay open when launched with
+/// `close_on_exit=false`.
+pub(crate) fn print_forge_complete_report(
+    ticket: &TicketReport,
+    cwd: &Path,
+    pr_meta_path: &Path,
+    session_path: &Path,
+    ticket_path: &Path,
+    base: &WorktreeSnapshot,
+    artifact_globs: &[String],
+    skip_ship: bool,
+) {
+    let ok = Style::new().green().bold();
+    let title = Style::new().cyan().bold();
+    let label = Style::new().yellow().bold();
+    let dim = Style::new().dim();
+    let add = Style::new().green();
+    let modi = Style::new().yellow();
+    let del = Style::new().red();
+    let rule = ok.apply_to("══════════════════════════════════════════════════════════");
+
+    eprintln!();
+    eprintln!("{rule}");
+    eprintln!(
+        "{}  {}",
+        ok.apply_to("✓  FORGE DONE"),
+        title.apply_to(&ticket.id)
+    );
+    if !ticket.title.trim().is_empty() {
+        eprintln!("   {}", dim.apply_to(ticket.title.trim()));
+    }
+    eprintln!("{rule}");
+
+    let meta = load_pr_meta(pr_meta_path).ok();
+    if let Some(ref m) = meta {
+        let headline = if !m.pr_title.trim().is_empty() {
+            m.pr_title.trim()
+        } else if !m.commit_subject.trim().is_empty() {
+            m.commit_subject.trim()
+        } else {
+            "(no title)"
+        };
+        eprintln!();
+        eprintln!("{}", label.apply_to("Implemented"));
+        eprintln!("  {}", title.apply_to(headline));
+        for line in implementation_summary_lines(m) {
+            eprintln!("  {}", dim.apply_to(format!("• {line}")));
+        }
+    }
+
+    let (added, modified, deleted) =
+        classify_forge_file_changes(cwd, base, artifact_globs).unwrap_or_default();
+
+    eprintln!();
+    eprintln!(
+        "{}  {}  {}  {}",
+        label.apply_to("Files"),
+        add.apply_to(format!("+{} added", added.len())),
+        modi.apply_to(format!("~{} modified", modified.len())),
+        del.apply_to(format!("-{} deleted", deleted.len())),
+    );
+
+    let added_disp = collapse_locale_paths(&added);
+    let modified_disp = collapse_locale_paths(&modified);
+    let deleted_disp = collapse_locale_paths(&deleted);
+
+    print_file_group("added", &added_disp, &add);
+    print_file_group("modified", &modified_disp, &modi);
+    print_file_group("deleted", &deleted_disp, &del);
+
+    if added.is_empty() && modified.is_empty() && deleted.is_empty() {
+        eprintln!("  {}", dim.apply_to("(no working-tree changes vs forge start)"));
+    }
+
+    eprintln!();
+    if skip_ship {
+        eprintln!(
+            "{}  {}",
+            label.apply_to("Next"),
+            dim.apply_to("review changes, then run `scrutiny pr` when ready")
+        );
+    }
+    eprintln!(
+        "{}  {}",
+        dim.apply_to("session"),
+        dim.apply_to(session_path.display().to_string())
+    );
+    eprintln!(
+        "{}   {}",
+        dim.apply_to("ticket"),
+        dim.apply_to(ticket_path.display().to_string())
+    );
+    eprintln!(
+        "{}  {}",
+        dim.apply_to("pr_meta"),
+        dim.apply_to(pr_meta_path.display().to_string())
+    );
+    eprintln!("{rule}");
+    eprintln!("{}", ok.apply_to("Job complete. Tab kept open (exit 0)."));
+    eprintln!();
+}
+
+fn print_file_group(kind: &str, paths: &[String], style: &Style) {
+    if paths.is_empty() {
+        return;
+    }
+    eprintln!("  {}", style.apply_to(format!("{kind}:")));
+    const MAX: usize = 40;
+    for p in paths.iter().take(MAX) {
+        eprintln!("    {} {}", style.apply_to("•"), p);
+    }
+    if paths.len() > MAX {
+        eprintln!(
+            "    {}",
+            Style::new()
+                .dim()
+                .apply_to(format!("… and {} more", paths.len() - MAX))
+        );
+    }
+}
+
+/// Bullet lines describing what was implemented (from pr.json).
+fn implementation_summary_lines(meta: &PrMeta) -> Vec<String> {
+    let mut lines = Vec::new();
+    let body = meta.commit_body.trim();
+    if !body.is_empty() {
+        for para in body.split("\n\n") {
+            let t = para.trim();
+            if !t.is_empty() {
+                lines.push(t.lines().map(str::trim).collect::<Vec<_>>().join(" "));
+            }
+        }
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+    // Fall back to ## Summary / ## Changes bullets in pr_body.
+    let mut section: Option<&str> = None;
+    for line in meta.pr_body.lines() {
+        let t = line.trim();
+        if t.eq_ignore_ascii_case("## summary") || t.eq_ignore_ascii_case("## changes") {
+            section = Some(t);
+            continue;
+        }
+        if t.starts_with("## ") {
+            if section.is_some() && lines.len() >= 6 {
+                break;
+            }
+            section = None;
+            continue;
+        }
+        if section.is_none() {
+            continue;
+        }
+        let bullet = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("* "))
+            .unwrap_or(t);
+        let bullet = bullet.trim();
+        if !bullet.is_empty() {
+            lines.push(bullet.to_string());
+        }
+        if lines.len() >= 8 {
+            break;
+        }
+    }
+    lines
+}
+
+#[derive(Debug, Default)]
+struct FileChangeBuckets {
+    added: Vec<String>,
+    modified: Vec<String>,
+    deleted: Vec<String>,
+}
+
+fn classify_forge_file_changes(
+    cwd: &Path,
+    base: &WorktreeSnapshot,
+    artifact_globs: &[String],
+) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    let now = snapshot_worktree(cwd)?;
+    let (to_stage, _skipped) = paths_changed_since(cwd, base, artifact_globs)?;
+    let want: std::collections::HashSet<&str> = to_stage.iter().map(|s| s.as_str()).collect();
+    let mut buckets = FileChangeBuckets::default();
+    for (path, status) in &now {
+        if !want.contains(path.as_str()) {
+            continue;
+        }
+        match classify_porcelain_status(status) {
+            FileChangeKind::Added => buckets.added.push(path.clone()),
+            FileChangeKind::Deleted => buckets.deleted.push(path.clone()),
+            FileChangeKind::Modified => buckets.modified.push(path.clone()),
+        }
+    }
+    buckets.added.sort();
+    buckets.modified.sort();
+    buckets.deleted.sort();
+    Ok((buckets.added, buckets.modified, buckets.deleted))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+fn classify_porcelain_status(status: &str) -> FileChangeKind {
+    let s = status.trim();
+    if s == "??" || s.contains('?') || s.contains('A') {
+        return FileChangeKind::Added;
+    }
+    if s.contains('D') {
+        return FileChangeKind::Deleted;
+    }
+    FileChangeKind::Modified
+}
+
+/// Collapse many locale JSON paths into one `…/locales/*.json (N files)` line.
+fn collapse_locale_paths(paths: &[String]) -> Vec<String> {
+    let mut locales: Vec<String> = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    let mut locale_dir: Option<String> = None;
+    for p in paths {
+        let norm = p.replace('\\', "/");
+        if let Some(idx) = norm.find("/locales/") {
+            if norm.ends_with(".json") {
+                if locale_dir.is_none() {
+                    locale_dir = Some(norm[..idx + "/locales".len()].to_string());
+                }
+                locales.push(p.clone());
+                continue;
+            }
+        }
+        rest.push(p.clone());
+    }
+    if locales.len() >= 3 {
+        if let Some(dir) = locale_dir {
+            rest.push(format!("{dir}/*.json ({} files)", locales.len()));
+        } else {
+            rest.extend(locales);
+        }
+    } else {
+        rest.extend(locales);
+    }
+    rest.sort();
+    rest
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_forge_ship(
@@ -1905,5 +2161,62 @@ mod tests {
         assert!(p.contains("Use approved plan case titles verbatim"));
         assert!(p.contains("Start with a bare verb"));
         assert!(p.contains("No prefixes: no TC-12"));
+    }
+
+    #[test]
+    fn porcelain_status_classifies_add_mod_del() {
+        assert_eq!(classify_porcelain_status("??"), FileChangeKind::Added);
+        assert_eq!(classify_porcelain_status("A "), FileChangeKind::Added);
+        assert_eq!(classify_porcelain_status(" M"), FileChangeKind::Modified);
+        assert_eq!(classify_porcelain_status("M "), FileChangeKind::Modified);
+        assert_eq!(classify_porcelain_status(" D"), FileChangeKind::Deleted);
+        assert_eq!(classify_porcelain_status("D "), FileChangeKind::Deleted);
+    }
+
+    #[test]
+    fn collapse_locale_paths_groups_many() {
+        let paths: Vec<String> = ["en", "fr", "ja", "de"]
+            .iter()
+            .map(|l| format!("src/i18n/locales/{l}.json"))
+            .collect();
+        let out = collapse_locale_paths(&paths);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("/*.json (4 files)"), "{out:?}");
+        assert!(out[0].contains("src/i18n/locales"), "{out:?}");
+    }
+
+    #[test]
+    fn collapse_locale_paths_keeps_few() {
+        let paths = vec![
+            "src/i18n/locales/en.json".into(),
+            "src/foo.ts".into(),
+        ];
+        let out = collapse_locale_paths(&paths);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn implementation_summary_prefers_commit_body() {
+        let meta = PrMeta {
+            pr_title: "Title".into(),
+            pr_body: "## Summary\n\n- from body\n".into(),
+            commit_subject: "subj".into(),
+            commit_body: "Use waitlist copy after create.".into(),
+        };
+        let lines = implementation_summary_lines(&meta);
+        assert_eq!(lines, vec!["Use waitlist copy after create.".to_string()]);
+    }
+
+    #[test]
+    fn implementation_summary_falls_back_to_pr_changes() {
+        let meta = PrMeta {
+            pr_title: "Title".into(),
+            pr_body: "## Summary\n\nFix toast.\n\n## Changes\n\n- Add locale keys\n- Wire modal\n".into(),
+            commit_subject: "subj".into(),
+            commit_body: String::new(),
+        };
+        let lines = implementation_summary_lines(&meta);
+        assert!(lines.iter().any(|l| l.contains("locale")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("modal")), "{lines:?}");
     }
 }

@@ -17,8 +17,8 @@ use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::scaffold;
 use crate::forge_cmd::{
-    prompt_forge_answers, run_forge_item_body, run_forge_ship, worktree_dir, ForgeAnswers,
-    ForgeItemCtx,
+    prompt_forge_answers, print_forge_complete_report, run_forge_item_body, run_forge_ship,
+    worktree_dir, ForgeAnswers, ForgeItemCtx,
 };
 use crate::git;
 use crate::paths::{init_artifact_ctx, prepare_artifacts, session_name, slug, write_json_pretty};
@@ -566,12 +566,18 @@ pub fn run_forge_bulk_item(plan_path: &Path, headless: bool, dry: bool) -> Resul
         dry,
     })?;
 
-    let _ = std::fs::File::create(&plan.done_sentinel);
-    eprintln!(
-        "scrutiny forge bulk item: done {} pr_meta={}",
-        plan.id,
-        outcome.pr_meta_path.display()
+    print_forge_complete_report(
+        &ticket,
+        &worktree,
+        &outcome.pr_meta_path,
+        &outcome.session_path,
+        &plan.ticket_path,
+        &outcome.base,
+        &cfg.git.artifact_globs,
+        cfg.forge.skip_ship,
     );
+
+    let _ = std::fs::File::create(&plan.done_sentinel);
     Ok(())
 }
 
