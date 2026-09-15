@@ -563,6 +563,7 @@ pub fn run_forge_bulk_item(plan_path: &Path, headless: bool, dry: bool) -> Resul
         term: None,
         surface,
         tdd_interactive: !headless,
+        skip_prompts: headless,
         dry,
     })?;
 

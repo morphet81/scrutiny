@@ -280,7 +280,8 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         prefix: prefix.clone(),
         term,
         surface,
-        tdd_interactive: true,
+        tdd_interactive: !skip_prompts,
+        skip_prompts,
         dry: false,
     })?;
 
@@ -334,6 +335,8 @@ pub(crate) struct ForgeItemCtx<'a> {
     pub surface: Option<ItemSurface>,
     /// When true and on a TTY, the TDD plan is validated interactively.
     pub tdd_interactive: bool,
+    /// When true (`-y` / `--yes` / from-json): take suggested answers on LOC / verify prompts.
+    pub skip_prompts: bool,
     /// When true: spawn no agents, guess pr.json, skip the verify gate.
     pub dry: bool,
 }
@@ -359,6 +362,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
         term,
         surface,
         tdd_interactive,
+        skip_prompts,
         dry,
     } = ctx;
 
@@ -483,6 +487,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
             &context_path,
             max_loc,
             target,
+            skip_prompts,
         )?;
     }
 
@@ -516,6 +521,7 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
             &context_path,
             &verify_plan,
             target,
+            skip_prompts,
         )? {
             GateOutcome::Green => {}
             GateOutcome::Red { proceed: true } => {
@@ -908,6 +914,7 @@ fn run_loc_estimate_gate(
     context_path: &Path,
     max_loc: u32,
     target: AgentTarget,
+    skip_prompts: bool,
 ) -> Result<()> {
     let rules = ForgeLocRules::from_forge(&cfg.forge);
     let estimate_path = session_root.join("loc-estimate.json");
@@ -971,7 +978,7 @@ fn run_loc_estimate_gate(
     }
 
     let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let interactive = tty && target.surface.is_none();
+    let interactive = tty && target.surface.is_none() && !skip_prompts;
     match decide_loc_gate(est.estimated_loc, max_loc, interactive) {
         LocGateDecision::Proceed => Ok(()),
         LocGateDecision::Abort => bail!(
@@ -1421,6 +1428,7 @@ fn run_verify_gate(
     context_path: &Path,
     plan: &VerifyPlan,
     target: AgentTarget,
+    skip_prompts: bool,
 ) -> Result<GateOutcome> {
     if plan.is_empty() {
         eprintln!("scrutiny forge: no verify commands — skip gate");
@@ -1483,7 +1491,8 @@ fn run_verify_gate(
             );
             let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
             // Bulk items (surface) never block a pane on a prompt — record red.
-            if !tty || target.surface.is_some() {
+            // `-y` takes suggested default (do not commit anyway).
+            if !tty || target.surface.is_some() || skip_prompts {
                 return Ok(GateOutcome::Red { proceed: false });
             }
             let proceed = Confirm::with_theme(&ColorfulTheme::default())

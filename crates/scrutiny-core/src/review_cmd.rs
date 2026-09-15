@@ -192,6 +192,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         client: Some(detected.client.clone()),
         spawn_mode: Some(spawn_mode.clone()),
         from_json: input.from_json.clone(),
+        accept_suggested: input.non_interactive,
     })?;
     eprintln!("  {}", answers_path.display());
     let answers_json = serde_json::to_string(&answers).ok();
@@ -522,7 +523,7 @@ fn finish_triage_and_post(
         client_override,
         pack_hint: &pack_hint,
     };
-    let (report, _) = run_findings_triage(findings_path, Some(cwd), Some(&mut ask))?;
+    let (report, _) = run_findings_triage(findings_path, Some(cwd), Some(&mut ask), false)?;
     let selected = report
         .findings
         .iter()
@@ -549,6 +550,7 @@ fn finish_triage_and_post(
         cwd: cwd.to_path_buf(),
         strict: false,
         event,
+        accept_suggested: false,
     })?;
     eprintln!(
         "scrutiny probe: posted {} comments → {}",

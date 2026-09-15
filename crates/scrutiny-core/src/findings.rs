@@ -809,10 +809,12 @@ pub fn print_findings_dashboard(n_crit: u32, n_warn: u32, n_sug: u32) {
 /// TTY: arrow-key menu (Ask is an explicit item — never free-text on same prompt).
 /// Non-TTY: letter line; ask only via `ask <question>` or multi-word free text (never bare P/I/A…).
 /// Order: critical → warning → suggestion, then renumber F1…
+/// When `accept_suggested`, each finding takes menu default (first fix option, else Post).
 pub fn run_findings_triage(
     findings_path: &Path,
     cwd: Option<&Path>,
     ask: Option<&mut TriageAskCtx<'_>>,
+    accept_suggested: bool,
 ) -> Result<(FindingsReport, PathBuf)> {
     let mut ask = ask;
     let mut report: FindingsReport = read_json(findings_path)?;
@@ -901,11 +903,20 @@ pub fn run_findings_triage(
 
             print_finding_block(f, cwd, &head_oid, &snapshot, color);
 
-            let pick = match prompt_finding_decision(f) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("  triage prompt failed: {e:#}");
-                    continue;
+            let pick = if accept_suggested {
+                eprintln!("  --yes — suggested decision");
+                if f.fix_options.is_empty() {
+                    TriagePick::Post
+                } else {
+                    TriagePick::Option(0)
+                }
+            } else {
+                match prompt_finding_decision(f) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("  triage prompt failed: {e:#}");
+                        continue;
+                    }
                 }
             };
 
@@ -1805,6 +1816,8 @@ pub struct PostCommentsInput {
     pub strict: bool,
     /// If set, skip interactive prompt. Else prompt on stderr/stdin when review.event missing.
     pub event: Option<String>,
+    /// When true (`-y` / `--yes`), take suggested defaults for pending-review + event menus.
+    pub accept_suggested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1886,7 +1899,12 @@ pub fn run_post_comments(input: PostCommentsInput) -> Result<(PostResult, PathBu
         }
         let choice = {
             use std::io::{self, IsTerminal, Write};
-            if io::stdin().is_terminal() && io::stderr().is_terminal() {
+            if input.accept_suggested {
+                eprintln!(
+                    "scrutiny post-comments: --yes — add findings to pending review, then submit"
+                );
+                "1".to_string()
+            } else if io::stdin().is_terminal() && io::stderr().is_terminal() {
                 use dialoguer::{theme::ColorfulTheme, Select};
                 let items = [
                     "Add findings to pending review, then submit (drafts kept)",
@@ -2703,6 +2721,10 @@ fn resolve_review_event(report: &mut FindingsReport, input: &PostCommentsInput) 
     }
     if let Some(ev) = &report.review.event {
         return normalize_event(ev);
+    }
+    if input.accept_suggested {
+        eprintln!("scrutiny post-comments: --yes — review event COMMENT");
+        return Ok("COMMENT".into());
     }
     let (crit, warn, sug) = included_counts(report);
     prompt_event_choice(&format!(

@@ -67,13 +67,15 @@ scrutiny probe --from-report .scrutiny/42/report.json [--pr 42] [--scan .scrutin
 ```bash
 scrutiny probe stack
 scrutiny probe stack 2
-scrutiny probe stack --client claude --yes
+scrutiny probe stack --client claude -y
 ```
 
 - Optional stack number runs `gh stack checkout N` first (then restores your branch)
 - Plan knobs asked once on the first PR, reused for the rest
 - Reviews all open PRs first; triage runs one PR at a time after
-- Requires `gh stack` (same flags as single-PR probe: `--client`, `--spawn-mode`, `--yes`, …)
+- Requires `gh stack` (same flags as single-PR probe: `--client`, `--spawn-mode`, `-y`/`--yes`, …)
+
+Global **`-y` / `--yes`**: every command that prompts takes the suggested/default answer (plan knobs, forge TDD confirm, stack push, triage, etc.).
 
 ### Forge — implement
 
@@ -90,11 +92,11 @@ Flow: fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → 
 ```bash
 scrutiny forge bulk
 scrutiny forge bulk --dry
-scrutiny forge bulk --yes < tickets.txt
+scrutiny forge bulk -y < tickets.txt
 scrutiny forge bulk --concurrency 5
 ```
 
-- `--yes` — stdin keys/URLs, no prompts, auto draft PRs  
+- `-y` / `--yes` — stdin keys/URLs, no prompts, auto draft PRs  
 - `--dry` — no agents / no real PRs; still creates worktrees; offers cleanup at end  
 - `--concurrency N` — overrides `forge.bulk_concurrency`
 

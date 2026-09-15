@@ -84,6 +84,8 @@ pub struct PlanConfirmInput {
     pub spawn_mode: Option<String>,
     /// When set, skip stdin and use these answers (CI / tests).
     pub from_json: Option<String>,
+    /// When true (and no `from_json`), accept suggested plan defaults (`-y` / `--yes`).
+    pub accept_suggested: bool,
 }
 
 pub fn run_plan_confirm(input: PlanConfirmInput) -> Result<(PlanAnswers, PathBuf)> {
@@ -111,6 +113,23 @@ pub fn run_plan_confirm(input: PlanConfirmInput) -> Result<(PlanAnswers, PathBuf
             a.spawn_mode = crate::runtime::normalize_spawn_mode(&a.spawn_mode)?;
         }
         a
+    } else if input.accept_suggested {
+        eprintln!("scrutiny plan-confirm: --yes — accepting suggested plan");
+        let spawn_mode = if let Some(m) = &input.spawn_mode {
+            crate::runtime::normalize_spawn_mode(m)?
+        } else {
+            "isolated".into()
+        };
+        PlanAnswers {
+            client,
+            model: suggested.model.clone(),
+            security: suggested.security,
+            performance: suggested.performance,
+            error_handling: suggested.error_handling,
+            reviewers: suggested.reviewers,
+            evangelists: suggested.evangelists,
+            spawn_mode,
+        }
     } else {
         prompt_plan_answers(&client, suggested, input.spawn_mode.as_deref())?
     };
@@ -553,6 +572,7 @@ mod tests {
             client: None,
             spawn_mode: None,
             from_json: Some(answers_json.into()),
+            accept_suggested: false,
         })
         .unwrap();
 
@@ -563,5 +583,64 @@ mod tests {
         assert!(path.exists());
         assert!(!answers.error_handling);
         assert!(answers.performance);
+    }
+
+    #[test]
+    fn accept_suggested_uses_eval_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let eval_path = dir.path().join("eval.json");
+        let eval = r#"{
+            "version": 1,
+            "mode": "local",
+            "repo": "test/repo",
+            "branch": "main",
+            "base": "main",
+            "head": "HEAD",
+            "tier": "M",
+            "score": 40,
+            "signals": {
+                "relevant_files": 1,
+                "relevant_loc": 10,
+                "added": 10,
+                "deleted": 0,
+                "scatter": 0.0,
+                "blast_stub": 0,
+                "risk_path_hits": 0,
+                "layers_touched": [],
+                "change_class": "feature"
+            },
+            "files": [],
+            "excluded": [],
+            "suggested_plan": {
+                "client": "claude",
+                "model": "sonnet",
+                "available_models": ["haiku", "sonnet", "opus"],
+                "security": true,
+                "performance": false,
+                "error_handling": true,
+                "reviewers": 1,
+                "evangelists": 0,
+                "prompt_reviewers": true,
+                "prompt_evangelists": false
+            },
+            "config_path": "/tmp/x"
+        }"#;
+        fs::write(&eval_path, eval).unwrap();
+        let _ = crate::paths::init_artifact_ctx(dir.path(), "local");
+
+        let (answers, _) = run_plan_confirm(PlanConfirmInput {
+            eval_path,
+            client: Some("claude".into()),
+            spawn_mode: Some("team".into()),
+            from_json: None,
+            accept_suggested: true,
+        })
+        .unwrap();
+
+        assert_eq!(answers.model, "sonnet");
+        assert!(answers.security);
+        assert!(!answers.performance);
+        assert_eq!(answers.reviewers, 1);
+        assert_eq!(answers.spawn_mode, "team");
     }
 }

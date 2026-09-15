@@ -43,6 +43,9 @@ struct Cli {
     /// Print version
     #[arg(short = 'v', short_alias = 'V', long = "version", action = clap::ArgAction::Version)]
     version: Option<bool>,
+    /// Accept suggested/default answers for every prompt (global)
+    #[arg(short = 'y', long = "yes", global = true, default_value_t = false)]
+    yes: bool,
     #[command(subcommand)]
     cmd: Commands,
 }
@@ -103,7 +106,8 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Interactively confirm plan knobs (all in one stdin session); print answers JSON path
+    /// Interactively confirm plan knobs (all in one stdin session); print answers JSON path.
+    /// With `-y` / `--yes`, accept the suggested plan without prompting.
     PlanConfirm {
         #[arg(long)]
         eval: PathBuf,
@@ -174,9 +178,6 @@ enum Commands {
         skip_agents: bool,
         #[arg(long)]
         event: Option<String>,
-        /// Skip interactive client/spawn/triage prompts
-        #[arg(long, default_value_t = false)]
-        yes: bool,
         /// Resume from AI review-report.json (skip eval/map/pack/scan/agents)
         #[arg(long, alias = "form-report")]
         from_report: Option<PathBuf>,
@@ -225,8 +226,6 @@ enum Commands {
         skill: String,
         #[arg(long)]
         agent: Option<String>,
-        #[arg(long, short = 'y', default_value_t = false)]
-        yes: bool,
         #[arg(long)]
         source: Option<String>,
         #[arg(long)]
@@ -264,6 +263,9 @@ enum Commands {
         from_json: String,
     },
     /// Interactive Post/Ignore triage for findings JSON; print path
+    ///
+    /// With `-y` / `--yes`, each finding takes the suggested menu default
+    /// (first fix option, or Post).
     FindingsTriage {
         /// Findings JSON path (positional shorthand for --findings).
         #[arg(index = 1)]
@@ -297,9 +299,6 @@ enum Commands {
         /// Skip menus; pass ParleyAnswers JSON
         #[arg(long)]
         from_json: Option<String>,
-        /// Non-interactive defaults
-        #[arg(long, default_value_t = false)]
-        yes: bool,
         /// Fetch + plan only (no headless agents)
         #[arg(long, default_value_t = false)]
         skip_agents: bool,
@@ -323,9 +322,6 @@ enum Commands {
         /// Create a ready PR instead of the default draft
         #[arg(long, default_value_t = false)]
         ready: bool,
-        /// Non-interactive: accept suggestions, skip prompts
-        #[arg(long, default_value_t = false)]
-        yes: bool,
     },
     /// Fetch unresolved PR review threads → parley-comments.json path
     ParleyFetch {
@@ -364,7 +360,7 @@ enum Commands {
     /// branch + worktree, concurrently, with the commit/PR conclude serialized
     /// on this terminal. Bulk flags (after `bulk`): `--dry` (no agents, no PR,
     /// offers to delete the branches/worktrees at the end), `--concurrency N`
-    /// (cap, default `forge.bulk_concurrency`), `--yes` (headless: keys from
+    /// (cap, default `forge.bulk_concurrency`), `-y`/`--yes` (headless: keys from
     /// stdin, auto commit + draft PR).
     ///
     /// `scrutiny forge all <jira-url…>` is an alias for `scrutiny forge-all`.
@@ -389,9 +385,6 @@ enum Commands {
         /// Skip menus; pass ForgeAnswers JSON
         #[arg(long)]
         from_json: Option<String>,
-        /// Non-interactive defaults (no TTY menus)
-        #[arg(long, default_value_t = false)]
-        yes: bool,
     },
     /// For each Jira URL: assign → In Progress → worktree + branch → tmux/zellij
     /// tab → `scrutiny forge --yes` using `[forge_all]` knobs.
@@ -543,6 +536,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let yes = cli.yes;
     let shipped =
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| PathBuf::from(".")));
     ensure_config(&shipped)?;
@@ -623,6 +617,7 @@ fn run() -> Result<()> {
                 client,
                 spawn_mode,
                 from_json,
+                accept_suggested: yes,
             })?;
             println!("{}", path.display());
         }
@@ -688,7 +683,6 @@ fn run() -> Result<()> {
             from_json,
             skip_agents,
             event,
-            yes,
             from_report,
             scan,
         } => {
@@ -787,7 +781,6 @@ fn run() -> Result<()> {
             global,
             skill,
             agent,
-            yes,
             source,
             cwd,
         } => {
@@ -867,7 +860,7 @@ fn run() -> Result<()> {
             if let Some(ref c) = cwd {
                 prepare_artifacts(c, None, &[findings.as_path()])?;
             }
-            let (_r, path) = run_findings_triage(&findings, cwd.as_deref(), None)?;
+            let (_r, path) = run_findings_triage(&findings, cwd.as_deref(), None, yes)?;
             println!("{}", path.display());
         }
         Commands::Parley {
@@ -877,7 +870,6 @@ fn run() -> Result<()> {
             client,
             spawn_mode,
             from_json,
-            yes,
             skip_agents,
             skip_ship,
         } => {
@@ -895,6 +887,7 @@ fn run() -> Result<()> {
                     from_json,
                     skip_agents,
                     skip_ship,
+                    non_interactive: yes,
                 })?;
                 for p in paths {
                     println!("{}", p.display());
@@ -928,7 +921,6 @@ fn run() -> Result<()> {
             rest,
             source,
             ready,
-            yes,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             let ticket = ticket.or_else(|| {
@@ -1015,7 +1007,6 @@ fn run() -> Result<()> {
             client,
             title,
             from_json,
-            yes,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             ensure_git_repo(&cwd)?;
@@ -1040,7 +1031,10 @@ fn run() -> Result<()> {
                 // Flags after `bulk` land in `rest` (trailing_var_arg), not their
                 // own clap fields — parse them here.
                 let dry = rest.iter().any(|t| t == "--dry");
-                let non_interactive = yes || rest.iter().any(|t| t == "--yes");
+                let non_interactive = yes
+                    || rest
+                        .iter()
+                        .any(|t| t == "--yes" || t == "-y");
                 let concurrency = rest
                     .iter()
                     .position(|t| t == "--concurrency")
@@ -1266,6 +1260,7 @@ fn run() -> Result<()> {
                 cwd,
                 strict,
                 event,
+                accept_suggested: yes,
             })?;
             eprintln!(
                 "scrutiny post-comments: posted {} comment(s) as {} → {}",

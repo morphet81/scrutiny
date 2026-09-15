@@ -20,6 +20,7 @@ pub struct ParleyStackInput {
     pub from_json: Option<String>,
     pub skip_agents: bool,
     pub skip_ship: bool,
+    pub non_interactive: bool,
 }
 
 #[derive(Deserialize)]
@@ -220,7 +221,10 @@ pub fn run_parley_stack(input: ParleyStackInput) -> Result<Vec<PathBuf>> {
     }
 
     let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let do_push = if tty {
+    let do_push = if input.non_interactive {
+        eprintln!("scrutiny parley stack: --yes — run `gh stack push`");
+        true
+    } else if tty {
         Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("Run `gh stack push` now?")
             .default(true)
