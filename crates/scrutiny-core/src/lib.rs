@@ -13,6 +13,7 @@ pub mod forge_bulk;
 pub mod forge_cmd;
 pub mod gh;
 pub mod git;
+pub mod info_cmd;
 pub mod map;
 pub mod mdterm;
 pub mod pack;
@@ -59,6 +60,7 @@ pub use forge::{
 pub use forge_all::{run_forge_all, ForgeAllInput};
 pub use forge_bulk::{run_forge_bulk, run_forge_bulk_item, ForgeBulkInput};
 pub use forge_cmd::{run_forge, ForgeCmdInput};
+pub use info_cmd::{run_info, InfoCmdInput};
 pub use map::{run_map, MapReport};
 pub use pack::{run_pack, PackReport};
 pub use parley::{

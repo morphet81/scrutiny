@@ -114,6 +114,16 @@ For each ticket (see `[forge_all]` in config):
 5. Run `[forge_all].init_commands` in the worktree (if any)
 6. Run `scrutiny forge --yes` with knobs from `[forge_all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`)
 
+### Info — colorful ticket card
+
+```bash
+scrutiny info NERO-730
+scrutiny info https://…/browse/NERO-730
+scrutiny info   # detect KEY-123 from current branch
+```
+
+Prints summary, description, custom text fields (Expected / Actual / Steps, …), ticket URL/status, and related GitHub PRs (`gh`) when found.
+
 ### Parley — clear review comments
 
 ```bash

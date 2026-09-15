@@ -7,11 +7,11 @@ use scrutiny_core::{
     run_agent_prompt, run_bench, run_eval, run_findings_init, run_findings_resolve,
     run_findings_triage, run_findings_validate, run_forge, run_forge_all, run_forge_brief,
     run_forge_bulk, run_forge_bulk_item, run_forge_context, run_forge_fetch, run_forge_plan_write,
-    run_map, run_pack, run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply,
-    run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
-    run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
+    run_info, run_map, run_pack, run_parley, run_parley_fetch, run_parley_plan_write,
+    run_parley_reply, run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr,
+    run_review, run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
     BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeAllInput, ForgeBulkInput,
-    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, ParleyAnswers, ParleyCmdInput,
+    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers, ParleyCmdInput,
     ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput, PlanConfirmInput,
     PlanWriteInput, PostCommentsInput, PrCmdInput, ProbeStackInput, ReviewCmdInput,
     ReviewSessionWriteInput, SkillsInstallInput,
@@ -31,6 +31,7 @@ Main commands:
   probe   Orchestrate full probe: analyze → plan → headless agents → triage → post
   forge   Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
   forge-all  Jira URLs → assign / In Progress / worktree / tab / forge --yes
+  info    Show colorful Jira ticket summary (+ related GitHub PRs)
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
   bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
 
@@ -48,6 +49,15 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Colorful Jira ticket summary (description, custom text fields, related PRs)
+    Info {
+        /// Working directory (git repo). Default: cwd
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Jira browse URL or key (default: detect from current branch)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
     /// Evaluate change complexity vs base branch; write eval JSON; print path
     Eval {
         /// Working directory (git repo). Default: cwd
@@ -537,6 +547,17 @@ fn run() -> Result<()> {
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| PathBuf::from(".")));
     ensure_config(&shipped)?;
     match cli.cmd {
+        Commands::Info { cwd, rest } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
+            let input = if rest.is_empty() {
+                None
+            } else {
+                Some(rest.join(" "))
+            };
+            let key = run_info(InfoCmdInput { cwd, input })?;
+            println!("{key}");
+        }
         Commands::Eval {
             cwd,
             base,

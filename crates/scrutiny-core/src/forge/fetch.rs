@@ -218,7 +218,7 @@ fn is_jira_key(s: &str) -> bool {
         && num.chars().all(|c| c.is_ascii_digit())
 }
 
-fn jira_key_from_branch(cwd: &Path) -> Result<Option<String>> {
+pub(crate) fn jira_key_from_branch(cwd: &Path) -> Result<Option<String>> {
     let out = Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(cwd)
@@ -449,7 +449,7 @@ fn extract_jira_description(raw: &Value) -> String {
 /// Render Atlassian Document Format (ADF) into GitHub-flavored Markdown so PR
 /// bodies and comments keep their structure (headings, paragraphs, lists,
 /// emphasis) instead of collapsing into one plain-text block.
-fn flatten_adf_text(v: &Value) -> String {
+pub(crate) fn flatten_adf_text(v: &Value) -> String {
     let mut out = String::new();
     render_adf(v, &mut out, "");
     // Collapse runs of 3+ newlines to a single blank line, then trim edges.
@@ -1217,6 +1217,156 @@ fn scan_value_for_figma(v: &Value, scan: &mut dyn FnMut(&str)) {
         }
         _ => {}
     }
+}
+
+/// A Jira custom field that carries free-form text (ADF or string) — typically
+/// Expected / Actual / Steps / Acceptance Criteria style extras.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JiraCustomTextField {
+    pub id: String,
+    pub name: String,
+    pub text: String,
+}
+
+/// Extract non-empty custom text fields from a Jira `fields` object.
+/// Skips ranks, empty `{}`, option/user objects, and tiny opaque strings.
+pub fn extract_jira_custom_text_fields(fields: &Value) -> Vec<JiraCustomTextField> {
+    let Some(obj) = fields.as_object() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (id, val) in obj {
+        if !id.starts_with("customfield_") {
+            continue;
+        }
+        let Some(text) = jira_field_value_as_text(val) else {
+            continue;
+        };
+        if !is_meaningful_custom_text(&text) {
+            continue;
+        }
+        out.push(JiraCustomTextField {
+            id: id.clone(),
+            name: id.clone(), // filled later via field catalog when available
+            text,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+fn jira_field_value_as_text(val: &Value) -> Option<String> {
+    match val {
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        Value::Object(map) if map.get("type").and_then(|t| t.as_str()) == Some("doc") => {
+            let text = flatten_adf_text(val);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_meaningful_custom_text(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t == "{}" || t == "[]" || t == "null" {
+        return false;
+    }
+    // LexoRank / opaque rank strings: "2|i06uja:zhzr"
+    if t.len() < 40 && t.contains('|') && !t.contains(' ') {
+        return false;
+    }
+    // UUID-ish / single tokens without spaces and no sentence punctuation
+    if t.len() < 12 && !t.contains(' ') && !t.contains('.') {
+        return false;
+    }
+    true
+}
+
+/// Best-effort map of `customfield_*` → human name via Jira REST `/field`.
+/// Returns empty map when unauthenticated or the request fails.
+pub fn load_jira_field_names(cwd: &Path) -> std::collections::HashMap<String, String> {
+    let profile = acli_jira_profile();
+    let auth = resolve_jira_download_auth(cwd, profile.as_ref());
+    let Some(auth) = auth else {
+        return std::collections::HashMap::new();
+    };
+    let url = match (&auth, profile.as_ref()) {
+        (JiraDownloadAuth::Bearer(_), Some(p)) => format!(
+            "https://api.atlassian.com/ex/jira/{}/rest/api/3/field",
+            p.cloud_id
+        ),
+        (JiraDownloadAuth::Basic { .. }, Some(p)) if !p.site.is_empty() => {
+            let host = p
+                .site
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
+            format!("https://{host}/rest/api/3/field")
+        }
+        _ => return std::collections::HashMap::new(),
+    };
+
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-sS",
+        "--connect-timeout",
+        "8",
+        "--max-time",
+        "20",
+        "-f",
+        "-H",
+        "Accept: application/json",
+    ]);
+    match &auth {
+        JiraDownloadAuth::Bearer(token) => {
+            cmd.args(["-H", &format!("Authorization: Bearer {token}")]);
+        }
+        JiraDownloadAuth::Basic { email, token } => {
+            cmd.args(["-u", &format!("{email}:{token}")]);
+        }
+    }
+    cmd.arg(&url);
+    let Ok(out) = cmd.output() else {
+        return std::collections::HashMap::new();
+    };
+    if !out.status.success() {
+        return std::collections::HashMap::new();
+    }
+    let Ok(arr) = serde_json::from_slice::<Vec<Value>>(&out.stdout) else {
+        return std::collections::HashMap::new();
+    };
+    let mut map = std::collections::HashMap::new();
+    for f in arr {
+        let id = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if id.starts_with("customfield_") && !name.is_empty() {
+            map.insert(id.to_string(), name.to_string());
+        }
+    }
+    map
+}
+
+/// Apply display names onto custom text fields (in place).
+pub fn apply_jira_field_names(
+    fields: &mut [JiraCustomTextField],
+    names: &std::collections::HashMap<String, String>,
+) {
+    for f in fields.iter_mut() {
+        if let Some(n) = names.get(&f.id) {
+            f.name = n.clone();
+        }
+    }
+    fields.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
 #[cfg(test)]

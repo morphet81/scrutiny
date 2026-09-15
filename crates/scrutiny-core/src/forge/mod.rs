@@ -14,5 +14,8 @@ pub mod verify;
 
 pub use brief::run_forge_brief;
 pub use context::run_forge_context;
-pub use fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
+pub use fetch::{
+    apply_jira_field_names, extract_jira_custom_text_fields, jira_key_from_url_or_raw,
+    load_jira_field_names, run_forge_fetch, ForgeFetchInput, JiraCustomTextField, TicketReport,
+};
 pub use plan::{run_forge_plan_write, ForgePlanWriteInput, ForgeSessionPlan};
