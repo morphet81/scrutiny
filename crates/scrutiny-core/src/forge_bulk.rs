@@ -462,7 +462,7 @@ fn run_item_agents(
             .as_ref()
             .context("non-headless item without a surface")?;
         let script = write_driver_script(scrutiny_bin, item, dry)?;
-        launch_agent_in_surface(surface, "driver", &script, /* close_on_exit */ !dry)?;
+        launch_agent_in_surface(surface, "driver", &script, &item.worktree, /* close_on_exit */ !dry)?;
         let missing = wait_for_sentinels_cancellable(
             std::slice::from_ref(&item.done_sentinel),
             crate::timeouts::forge_bulk_item(),

@@ -138,7 +138,7 @@ scrutiny parley stack 2
 - Requires `gh stack`
 
 Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
-Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Tmux non-bulk splits into the origin window (`$TMUX_PANE`).
+Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback and **`forge-all` runs drivers one at a time**. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux non-bulk splits into the origin window (`$TMUX_PANE`).
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
 

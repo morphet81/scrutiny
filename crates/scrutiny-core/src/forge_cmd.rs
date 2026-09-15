@@ -12,7 +12,6 @@ use crate::agent_runner::{
     run_dry_placeholder_in, run_headless, run_nonheadless, run_nonheadless_in, wait_for_sentinels,
     HeadlessKind, HeadlessOutcome,
 };
-use crate::terminal::force_close_agent_panes;
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::forge::brief::run_forge_brief;
 use crate::forge::context::run_forge_context;
@@ -32,7 +31,10 @@ use crate::git::{
 };
 use crate::paths::{prepare_artifacts, write_json_pretty};
 use crate::runtime::{resolve_client, ResolveClientInput};
-use crate::terminal::{resolve_terminal, ItemSurface, ResolvedTerminal};
+use crate::terminal::{
+    force_close_agent_panes, load_item_surface_from_env, resolve_terminal, ItemSurface,
+    ResolvedTerminal,
+};
 
 /// Shared case-title rules for TDD test-plan + implement agents.
 const TEST_TITLE_GUIDELINES: &str = "\
@@ -196,8 +198,14 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         },
     )?;
 
-    // Non-headless: open each agent in a visible window (claude/cursor + tmux/zellij/macOS).
-    let term = resolve_terminal(cfg.headless, &detected.client, "forge");
+    // Nested forge-all/bulk: prefer the item surface so agents stay in the
+    // ticket tab (no origin-tab focus steal). Otherwise open shared windows.
+    let surface = load_item_surface_from_env();
+    let term = if surface.is_some() {
+        None
+    } else {
+        resolve_terminal(cfg.headless, &detected.client, "forge")
+    };
 
     eprintln!("scrutiny forge: fetch ticket…");
     let (mut ticket, ticket_path) = run_forge_fetch(ForgeFetchInput {
@@ -270,7 +278,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         cfg: &cfg,
         prefix: prefix.clone(),
         term,
-        surface: None,
+        surface,
         tdd_interactive: true,
         dry: false,
     })?;

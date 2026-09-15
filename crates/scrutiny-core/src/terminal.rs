@@ -53,21 +53,34 @@ pub struct ResolvedTerminal {
 struct TrackedAgentPane {
     label: String,
     pid_path: PathBuf,
+    /// Substring that must appear in the process cmdline (usually the agent script path).
+    script_marker: String,
 }
 
 static TRACKED_AGENT_PANES: Mutex<Vec<TrackedAgentPane>> = Mutex::new(Vec::new());
 static CLEANUP_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static CLEANUP_ONCE: Once = Once::new();
+/// Set by the SIGINT/SIGTERM handler. Real pane teardown runs on Drop / explicit
+/// [`force_close_agent_panes`] — never inside the signal handler (async-unsafe).
+static CLEANUP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Register a non-headless agent pane (bash PID written to `pid_path` by the script).
-pub fn register_agent_pane(label: &str, pid_path: PathBuf) {
+/// `script_marker` is matched against `ps` cmdline before any kill so a recycled
+/// PID cannot take down zellij or unrelated processes.
+pub fn register_agent_pane(label: &str, pid_path: PathBuf, script_marker: impl Into<String>) {
     install_agent_pane_cleanup_hook();
     if let Ok(mut g) = TRACKED_AGENT_PANES.lock() {
         g.push(TrackedAgentPane {
             label: label.to_string(),
             pid_path,
+            script_marker: script_marker.into(),
         });
     }
+}
+
+/// True after Ctrl-C / SIGTERM was observed (flag-only handler).
+pub fn cleanup_requested() -> bool {
+    CLEANUP_REQUESTED.load(Ordering::SeqCst)
 }
 
 /// Kill still-running agent pane processes so `--close-on-exit` panes disappear.
@@ -82,7 +95,7 @@ pub fn force_close_agent_panes() {
     }
     let mut closed = 0u32;
     for pane in &panes {
-        if kill_agent_pane_pidfile(&pane.pid_path) {
+        if kill_agent_pane_pidfile(&pane.pid_path, &pane.script_marker) {
             closed += 1;
             eprintln!("scrutiny: force-closed agent pane {}", pane.label);
         }
@@ -95,7 +108,73 @@ pub fn force_close_agent_panes() {
     }
 }
 
-fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcIdentity {
+    start: String,
+    cmd: String,
+}
+
+/// Snapshot start-time + cmdline for `pid`. `None` if the process is gone.
+fn read_proc_identity(pid: i32) -> Option<ProcIdentity> {
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "lstart=", "-o", "command="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    // lstart is typically "Day Mon DD HH:MM:SS YYYY" then cmdline.
+    // Split on the year token (4 digits) that ends lstart.
+    let mut year_end = None;
+    for (i, w) in line.split_whitespace().enumerate() {
+        if i >= 4 && w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()) {
+            year_end = Some(i);
+            break;
+        }
+    }
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let (start, cmd) = if let Some(yi) = year_end {
+        if yi + 1 >= parts.len() {
+            return None;
+        }
+        (parts[..=yi].join(" "), parts[yi + 1..].join(" "))
+    } else {
+        // Fallback: treat whole line as cmdline (still useful for marker check).
+        (String::new(), line.to_string())
+    };
+    if cmd.is_empty() {
+        return None;
+    }
+    Some(ProcIdentity { start, cmd })
+}
+
+fn identity_matches_marker(id: &ProcIdentity, marker: &str) -> bool {
+    if marker.is_empty() {
+        // No marker → only allow obvious agent wrapper shells.
+        return id.cmd.contains("agent-script")
+            || id.cmd.contains("forge-all-driver")
+            || id.cmd.contains("bulk-driver");
+    }
+    id.cmd.contains(marker)
+}
+
+fn pid_alive(pid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        read_proc_identity(pid).is_some()
+    }
+}
+
+fn kill_agent_pane_pidfile(pid_path: &Path, script_marker: &str) -> bool {
     let Ok(raw) = fs::read_to_string(pid_path) else {
         return false;
     };
@@ -105,37 +184,52 @@ fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
     if pid <= 1 {
         return false;
     }
+    // Already dead (normal --close-on-exit) — do not SIGKILL a recycled PID.
+    if !pid_alive(pid) {
+        return false;
+    }
+    let Some(id_before) = read_proc_identity(pid) else {
+        return false;
+    };
+    if !identity_matches_marker(&id_before, script_marker) {
+        eprintln!(
+            "scrutiny: skip pane kill pid={pid}: cmdline does not match agent marker"
+        );
+        return false;
+    }
+
     #[cfg(unix)]
     {
-        // Process-group kill ONLY when this pid is the group leader. Blind
-        // `kill(-pid)` targets whatever PGID equals `pid` — not "pid's group" —
-        // and can nuke an unrelated group (zellij client/session) on collision.
-        let pgid = unsafe { libc::getpgid(pid) };
-        let group_leader = pgid == pid;
-        let mut signaled = false;
-        unsafe {
-            if group_leader && libc::kill(-pid, libc::SIGTERM) == 0 {
-                signaled = true;
-            }
-            if libc::kill(pid, libc::SIGTERM) == 0 {
-                signaled = true;
-            }
-        }
+        // Never process-group kill: `kill(-pid)` targets PGID==pid and has
+        // nuked the zellij client when a recycled pid collided.
+        let signaled = unsafe { libc::kill(pid, libc::SIGTERM) == 0 };
         if !signaled {
             return false;
         }
-        thread::sleep(Duration::from_millis(150));
-        unsafe {
-            if group_leader {
-                let _ = libc::kill(-pid, libc::SIGKILL);
+        // Poll for exit; re-check identity before any SIGKILL (PID reuse TOCTOU).
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(25));
+            if !pid_alive(pid) {
+                return true;
             }
+        }
+        let Some(id_after) = read_proc_identity(pid) else {
+            return true; // exited between checks
+        };
+        if id_after != id_before || !identity_matches_marker(&id_after, script_marker) {
+            eprintln!(
+                "scrutiny: skip SIGKILL pid={pid}: process identity changed (possible PID reuse)"
+            );
+            return false;
+        }
+        unsafe {
             let _ = libc::kill(pid, libc::SIGKILL);
         }
         true
     }
     #[cfg(windows)]
     {
-        // No POSIX process groups — tree-kill the recorded PID.
+        let _ = id_before;
         Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
@@ -146,7 +240,7 @@ fn kill_agent_pane_pidfile(pid_path: &Path) -> bool {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = pid;
+        let _ = (pid, id_before);
         false
     }
 }
@@ -174,7 +268,9 @@ fn install_agent_pane_cleanup_hook() {
     CLEANUP_ONCE.call_once(|| {
         #[cfg(unix)]
         unsafe {
-            // Best-effort: Ctrl-C / SIGTERM should still tear down panes.
+            // Flag only — no mutex / sleep / kill in the handler (async-signal-safe).
+            // Pane teardown happens via AgentPaneCleanupGuard Drop on unwind paths
+            // that still run, or explicit force_close after agent waits.
             let handler: libc::sighandler_t =
                 agent_pane_signal_handler as *const () as libc::sighandler_t;
             libc::signal(libc::SIGINT, handler);
@@ -185,10 +281,7 @@ fn install_agent_pane_cleanup_hook() {
 
 #[cfg(unix)]
 extern "C" fn agent_pane_signal_handler(sig: libc::c_int) {
-    // Keep this minimal — then restore default and re-raise.
-    let _ = std::panic::catch_unwind(|| {
-        force_close_agent_panes();
-    });
+    CLEANUP_REQUESTED.store(true, Ordering::SeqCst);
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
         let _ = libc::raise(sig);
@@ -299,6 +392,38 @@ fn probe_zellij_caps() -> ZellijCaps {
         no_focus: new_pane_help.contains("no-focus") || run_help.contains("no-focus"),
         current_tab_info: action_help.contains("current-tab-info"),
     }
+}
+
+/// True when zellij must steal focus for every pane spawn (&lt;0.44).
+/// Callers should serialize multi-item launches to avoid session thrash/crashes.
+pub fn zellij_needs_serial_launches() -> bool {
+    if detect_terminal() != Some(TerminalContext::Zellij) {
+        return false;
+    }
+    let caps = zellij_caps();
+    !caps.near_current_pane && !caps.tab_id
+}
+
+/// Env var pointing at a JSON [`ItemSurface`] for nested `scrutiny forge` (forge-all / bulk).
+pub const ITEM_SURFACE_ENV: &str = "SCRUTINY_ITEM_SURFACE";
+
+/// Load a per-item surface written by forge-all / bulk drivers, if present.
+pub fn load_item_surface_from_env() -> Option<ItemSurface> {
+    let path = std::env::var(ITEM_SURFACE_ENV).ok()?;
+    if path.is_empty() {
+        return None;
+    }
+    let raw = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Persist `surface` for a nested forge process and return the file path.
+pub fn write_item_surface(path: &Path, surface: &ItemSurface) -> Result<()> {
+    let raw = serde_json::to_string_pretty(surface).context("serialize ItemSurface")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::write(path, raw).with_context(|| format!("write {}", path.display()))
 }
 
 /// Detect the active terminal surface from the environment.
@@ -483,7 +608,6 @@ fn focused_tab_name_from_layout() -> Option<String> {
 /// Prefers a non-focused match when the focused tab is elsewhere (user browsing).
 pub fn origin_tab_from_layout(layout: &str, cwd: &Path) -> Option<String> {
     let cwd_s = cwd.to_string_lossy();
-    let cwd_end = cwd.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let mut matches: Vec<(String, bool)> = Vec::new(); // (name, tab_focused)
 
     let mut current_tab: Option<(String, bool)> = None;
@@ -508,10 +632,13 @@ pub fn origin_tab_from_layout(layout: &str, cwd: &Path) -> Option<String> {
         if pane_cwd.is_empty() {
             continue;
         }
+        // Exact / Path equality, or suffix only when pane cwd looks path-like
+        // (contains a separator) — never basename-only (ambiguous across tabs).
+        let path_like = pane_cwd.contains('/') || pane_cwd.contains('\\');
         let hit = pane_cwd == cwd_s
-            || pane_cwd.ends_with(cwd_s.as_ref())
-            || (!cwd_end.is_empty() && pane_cwd.ends_with(cwd_end))
-            || PathBuf::from(&pane_cwd) == cwd;
+            || PathBuf::from(&pane_cwd) == cwd
+            || (path_like
+                && (pane_cwd.ends_with(cwd_s.as_ref()) || cwd_s.ends_with(pane_cwd.as_str())));
         if hit {
             matches.push((tab_name.clone(), *tab_focused));
         }
@@ -573,8 +700,14 @@ fn capture_tmux_anchor() -> Option<TmuxAnchor> {
 ///
 /// Returns once the launcher command exits — the agent keeps running in its own
 /// window; the host waits on the agent's completion sentinel, not on this call.
-pub fn launch_agent_window(ctx: &ResolvedTerminal, label: &str, script_path: &Path) -> Result<()> {
+pub fn launch_agent_window(
+    ctx: &ResolvedTerminal,
+    label: &str,
+    script_path: &Path,
+    cwd: &Path,
+) -> Result<()> {
     let script = script_path.display().to_string();
+    let cwd_s = cwd.display().to_string();
     let run_cmd = format!("bash '{script}'");
     match ctx.kind {
         TerminalContext::Tmux => {
@@ -587,13 +720,15 @@ pub fn launch_agent_window(ctx: &ResolvedTerminal, label: &str, script_path: &Pa
                         "-d",
                         "-s",
                         &tmux_session_name(label),
+                        "-c",
+                        &cwd_s,
                         &run_cmd,
                     ])
                     .status()
                     .context("spawn tmux new-session")?
             } else {
                 let st = Command::new("tmux")
-                    .args(["split-window", "-t", target, &run_cmd])
+                    .args(["split-window", "-t", target, "-c", &cwd_s, &run_cmd])
                     .status()
                     .context("spawn tmux split-window")?;
                 let _ = Command::new("tmux")
@@ -607,7 +742,7 @@ pub fn launch_agent_window(ctx: &ResolvedTerminal, label: &str, script_path: &Pa
             Ok(())
         }
         TerminalContext::Zellij => {
-            launch_zellij_in_origin(ctx.zellij.as_ref(), label, &script, true)
+            launch_zellij_in_origin(ctx.zellij.as_ref(), label, &script, &cwd_s, true)
         }
         TerminalContext::AppleTerminal => {
             let status = Command::new("osascript")
@@ -639,13 +774,14 @@ fn launch_zellij_in_origin(
     anchor: Option<&ZellijAnchor>,
     label: &str,
     script: &str,
+    cwd: &str,
     close_on_exit: bool,
 ) -> Result<()> {
     let caps = zellij_caps();
 
     // Best path: open beside the invoking pane without following user focus.
     if caps.near_current_pane {
-        let args = zellij_run_near_argv(label, script, close_on_exit);
+        let args = zellij_run_near_argv(label, script, cwd, close_on_exit);
         let status = zellij_cmd(&args)
             .status()
             .context("spawn zellij run --near-current-pane")?;
@@ -659,8 +795,14 @@ fn launch_zellij_in_origin(
     if let Some(a) = anchor {
         if caps.tab_id {
             if let Some(id) = a.tab_id {
-                let args =
-                    zellij_new_pane_tab_id_argv(id, label, script, close_on_exit, caps.no_focus);
+                let args = zellij_new_pane_tab_id_argv(
+                    id,
+                    label,
+                    script,
+                    cwd,
+                    close_on_exit,
+                    caps.no_focus,
+                );
                 let status = zellij_cmd(&args)
                     .status()
                     .context("spawn zellij action new-pane --tab-id")?;
@@ -672,23 +814,18 @@ fn launch_zellij_in_origin(
         }
     }
 
-    // Legacy: go-to origin tab name, run, restore prior focus.
-    let Some(a) = anchor else {
-        let args = zellij_run_argv(label, script, close_on_exit);
-        let status = zellij_cmd(&args).status().context("spawn zellij run")?;
-        if !status.success() {
-            bail!("zellij run for {label} exited with {status}");
-        }
-        return Ok(());
-    };
-
+    // Legacy: always hold the focus lock — never unguarded `zellij run`.
     let _g = focus_guard();
-    run_zellij_argv(&zellij_goto_argv(&a.tab_name)).context("zellij go-to-tab-name origin")?;
-    run_zellij_argv(&zellij_run_argv(label, script, close_on_exit)).context("zellij run")?;
-    if let Some(prev) = &a.restore_tab_name {
-        if prev != &a.tab_name {
-            let _ = run_zellij_argv(&zellij_goto_argv(prev));
+    if let Some(a) = anchor {
+        run_zellij_argv(&zellij_goto_argv(&a.tab_name)).context("zellij go-to-tab-name origin")?;
+        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit)).context("zellij run")?;
+        if let Some(prev) = &a.restore_tab_name {
+            if prev != &a.tab_name {
+                let _ = run_zellij_argv(&zellij_goto_argv(prev));
+            }
         }
+    } else {
+        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit)).context("zellij run")?;
     }
     Ok(())
 }
@@ -787,13 +924,19 @@ pub fn launch_agent_in_surface(
     surface: &ItemSurface,
     role: &str,
     script_path: &Path,
+    cwd: &Path,
     close_on_exit: bool,
 ) -> Result<()> {
     let script = script_path.display().to_string();
+    let cwd_s = cwd.display().to_string();
     let run_cmd = format!("bash '{script}'");
     match surface {
         ItemSurface::Tmux { session } => {
-            run_argv("tmux", &tmux_launch_argv(session, &run_cmd)).context("tmux split-window")?;
+            run_argv(
+                "tmux",
+                &tmux_launch_argv(session, &cwd_s, &run_cmd),
+            )
+            .context("tmux split-window")?;
             // Best-effort pane title + readable layout (ignore failures).
             let _ = run_argv(
                 "tmux",
@@ -813,6 +956,7 @@ pub fn launch_agent_in_surface(
                         *id,
                         role,
                         &script,
+                        &cwd_s,
                         close_on_exit,
                         caps.no_focus,
                     );
@@ -821,7 +965,7 @@ pub fn launch_agent_in_surface(
             }
             let _g = focus_guard();
             run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name")?;
-            run_zellij_argv(&zellij_run_argv(role, &script, close_on_exit))
+            run_zellij_argv(&zellij_run_argv(role, &script, &cwd_s, close_on_exit))
                 .context("zellij run")?;
             Ok(())
         }
@@ -832,7 +976,7 @@ pub fn launch_agent_in_surface(
                     zellij: None,
                     tmux: None,
                 };
-                return launch_agent_window(&fallback, role, script_path);
+                return launch_agent_window(&fallback, role, script_path, cwd);
             }
             run_argv(
                 "osascript",
@@ -900,6 +1044,16 @@ pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
             }
             let _g = focus_guard();
             run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name")?;
+            // Without --tab-id, close-tab hits the *focused* tab — refuse if focus
+            // did not land on the intended name (avoids closing the last/wrong tab
+            // and exiting the whole session).
+            if let Some(focused) = focused_tab_name_from_layout() {
+                if focused != *tab {
+                    bail!(
+                        "zellij close-tab aborted: focused tab `{focused}` != target `{tab}`"
+                    );
+                }
+            }
             run_zellij_argv(&["action".into(), "close-tab".into()]).context("zellij close-tab")
         }
         ItemSurface::ITerm2 { window_id } => {
@@ -964,8 +1118,8 @@ fn tmux_open_argv(session: &str, cwd: &str) -> Vec<String> {
         .to_vec()
 }
 
-fn tmux_launch_argv(session: &str, run_cmd: &str) -> Vec<String> {
-    ["split-window", "-t", session, run_cmd]
+fn tmux_launch_argv(session: &str, cwd: &str, run_cmd: &str) -> Vec<String> {
+    ["split-window", "-t", session, "-c", cwd, run_cmd]
         .map(String::from)
         .to_vec()
 }
@@ -997,16 +1151,15 @@ fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
         .to_vec()
 }
 
-/// Open a tab whose placeholder pane ends up in `cwd`, with session UI chrome
+/// Open a tab whose placeholder pane starts in `cwd`, with session UI chrome
 /// (tab bar / status bar) intact.
 ///
 /// Do **not** pass a bare `layout { pane … }` via `--layout`: that creates a
 /// chrome-less tab (no tab-bar plugin) that looks like fullscreen. Plain
-/// `new-tab --cwd` inherits the session template; we then type an explicit
-/// `cd` so login profiles cannot leave the worktree.
+/// `new-tab --cwd` inherits the session template. Agent panes pin cwd via
+/// `zellij run --cwd` — no `write-chars` into the focused PTY (racey / session-toxic).
 fn open_zellij_tab(tab: &str, cwd: &str) -> Result<()> {
     run_zellij_argv(&zellij_open_argv(tab, cwd)).context("zellij new-tab")?;
-    let _ = zellij_cd_placeholder(tab, cwd);
     Ok(())
 }
 
@@ -1014,25 +1167,8 @@ fn zellij_goto_argv(tab: &str) -> Vec<String> {
     ["action", "go-to-tab-name", tab].map(String::from).to_vec()
 }
 
-/// Explicit `cd` into the new tab's placeholder pane after shell init.
-fn zellij_cd_placeholder(tab: &str, cwd: &str) -> Result<()> {
-    // Profiles (mise/npm CodeArtifact) often take >1s and may `cd` away after
-    // `--cwd` seeds the start dir. Wait, then type cd twice.
-    thread::sleep(Duration::from_millis(1200));
-    run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name for cd")?;
-    let esc = cwd.replace('\'', "'\\''");
-    let chars = format!("cd '{esc}'\nclear\n");
-    run_zellij_argv(&zellij_write_chars_argv(&chars)).context("zellij write-chars cd")?;
-    thread::sleep(Duration::from_millis(400));
-    run_zellij_argv(&zellij_write_chars_argv(&chars)).context("zellij write-chars cd retry")
-}
-
-fn zellij_write_chars_argv(chars: &str) -> Vec<String> {
-    ["action", "write-chars", chars].map(String::from).to_vec()
-}
-
-fn zellij_run_argv(role: &str, script: &str, close_on_exit: bool) -> Vec<String> {
-    let mut v = vec!["run".to_string()];
+fn zellij_run_argv(role: &str, script: &str, cwd: &str, close_on_exit: bool) -> Vec<String> {
+    let mut v = vec!["run".to_string(), "--cwd".into(), cwd.into()];
     if close_on_exit {
         v.push("--close-on-exit".to_string());
     }
@@ -1040,8 +1176,13 @@ fn zellij_run_argv(role: &str, script: &str, close_on_exit: bool) -> Vec<String>
     v
 }
 
-pub fn zellij_run_near_argv(role: &str, script: &str, close_on_exit: bool) -> Vec<String> {
-    let mut v = vec!["run".to_string(), "--near-current-pane".to_string()];
+pub fn zellij_run_near_argv(role: &str, script: &str, cwd: &str, close_on_exit: bool) -> Vec<String> {
+    let mut v = vec![
+        "run".to_string(),
+        "--near-current-pane".to_string(),
+        "--cwd".into(),
+        cwd.into(),
+    ];
     if close_on_exit {
         v.push("--close-on-exit".to_string());
     }
@@ -1053,6 +1194,7 @@ pub fn zellij_new_pane_tab_id_argv(
     tab_id: u32,
     role: &str,
     script: &str,
+    cwd: &str,
     close_on_exit: bool,
     no_focus: bool,
 ) -> Vec<String> {
@@ -1061,6 +1203,8 @@ pub fn zellij_new_pane_tab_id_argv(
         "new-pane".into(),
         "--tab-id".into(),
         tab_id.to_string(),
+        "--cwd".into(),
+        cwd.into(),
         "--name".into(),
         role.into(),
     ];
@@ -1175,8 +1319,15 @@ mod tests {
             vec!["new-session", "-d", "-s", "nero-8729", "-c", "/tmp/wt"]
         );
         assert_eq!(
-            tmux_launch_argv("nero-8729", "bash '/tmp/s.sh'"),
-            vec!["split-window", "-t", "nero-8729", "bash '/tmp/s.sh'"]
+            tmux_launch_argv("nero-8729", "/tmp/wt", "bash '/tmp/s.sh'"),
+            vec![
+                "split-window",
+                "-t",
+                "nero-8729",
+                "-c",
+                "/tmp/wt",
+                "bash '/tmp/s.sh'"
+            ]
         );
         assert_eq!(
             tmux_split_origin_argv("main:@2", "bash '/tmp/s.sh'"),
@@ -1201,9 +1352,11 @@ mod tests {
     #[test]
     fn zellij_run_argv_toggles_close_on_exit() {
         assert_eq!(
-            zellij_run_argv("developer", "/tmp/s.sh", true),
+            zellij_run_argv("developer", "/tmp/s.sh", "/tmp/wt", true),
             vec![
                 "run",
+                "--cwd",
+                "/tmp/wt",
                 "--close-on-exit",
                 "--name",
                 "developer",
@@ -1213,18 +1366,29 @@ mod tests {
             ]
         );
         assert_eq!(
-            zellij_run_argv("developer", "/tmp/s.sh", false),
-            vec!["run", "--name", "developer", "--", "bash", "/tmp/s.sh"]
+            zellij_run_argv("developer", "/tmp/s.sh", "/tmp/wt", false),
+            vec![
+                "run",
+                "--cwd",
+                "/tmp/wt",
+                "--name",
+                "developer",
+                "--",
+                "bash",
+                "/tmp/s.sh"
+            ]
         );
     }
 
     #[test]
     fn zellij_run_near_includes_flag() {
         assert_eq!(
-            zellij_run_near_argv("reviewer", "/tmp/s.sh", true),
+            zellij_run_near_argv("reviewer", "/tmp/s.sh", "/work", true),
             vec![
                 "run",
                 "--near-current-pane",
+                "--cwd",
+                "/work",
                 "--close-on-exit",
                 "--name",
                 "reviewer",
@@ -1238,12 +1402,14 @@ mod tests {
     #[test]
     fn zellij_new_pane_tab_id_argv_shape() {
         assert_eq!(
-            zellij_new_pane_tab_id_argv(3, "dev", "/tmp/x.sh", true, true),
+            zellij_new_pane_tab_id_argv(3, "dev", "/tmp/x.sh", "/wt", true, true),
             vec![
                 "action",
                 "new-pane",
                 "--tab-id",
                 "3",
+                "--cwd",
+                "/wt",
                 "--name",
                 "dev",
                 "--no-focus",
@@ -1266,11 +1432,20 @@ mod tests {
     }
 
     #[test]
-    fn zellij_write_chars_cd_shape() {
-        assert_eq!(
-            zellij_write_chars_argv("cd '/tmp/wt'\nclear\n"),
-            vec!["action", "write-chars", "cd '/tmp/wt'\nclear\n"]
-        );
+    fn identity_marker_matches_agent_script() {
+        let id = ProcIdentity {
+            start: "Tue Sep 15 14:00:00 2026".into(),
+            cmd: "bash /tmp/agent-script-abc.sh".into(),
+        };
+        assert!(identity_matches_marker(&id, "/tmp/agent-script-abc.sh"));
+        assert!(!identity_matches_marker(&id, "/tmp/other.sh"));
+        assert!(identity_matches_marker(
+            &ProcIdentity {
+                start: String::new(),
+                cmd: "bash /x/agent-script-1.json".into(),
+            },
+            ""
+        ));
     }
 
     #[test]
@@ -1288,5 +1463,21 @@ layout {
 "#;
         let origin = origin_tab_from_layout(layout, Path::new("/Users/me/dev/scrutiny"));
         assert_eq!(origin.as_deref(), Some("Scrutiny"));
+    }
+
+    #[test]
+    fn origin_tab_from_layout_rejects_basename_only() {
+        let layout = r#"
+layout {
+    tab name="Wrong" {
+        pane cwd="/elsewhere/scrutiny"
+    }
+    tab name="Right" {
+        pane cwd="/Users/me/dev/scrutiny"
+    }
+}
+"#;
+        let origin = origin_tab_from_layout(layout, Path::new("/Users/me/dev/scrutiny"));
+        assert_eq!(origin.as_deref(), Some("Right"));
     }
 }

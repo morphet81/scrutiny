@@ -16,8 +16,9 @@ use crate::git;
 use crate::paths::{prepare_artifacts, slug};
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{
-    detect_terminal, launch_agent_in_surface, open_item_surface, resolve_terminal, ItemSurface,
-    ResolvedTerminal, TerminalContext,
+    detect_terminal, launch_agent_in_surface, open_item_surface, resolve_terminal,
+    write_item_surface, zellij_needs_serial_launches, ItemSurface, ResolvedTerminal,
+    TerminalContext, ITEM_SURFACE_ENV,
 };
 
 #[derive(Debug, Clone)]
@@ -87,6 +88,12 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
         fa.branch_prefix,
         parent.display()
     );
+    if zellij_needs_serial_launches() {
+        eprintln!(
+            "scrutiny forge-all: zellij lacks --near-current-pane/--tab-id \
+             (upgrade to ≥0.44) — launching forge drivers one at a time to avoid session thrash"
+        );
+    }
 
     let mut prepared: Vec<PreparedItem> = Vec::new();
     for raw in &input.tickets {
@@ -186,6 +193,10 @@ fn prepare_one(
     };
 
     let script_path = session_root.join("forge-all-driver.sh");
+    let surface_path = session_root.join("item-surface.json");
+    if let Some(ref s) = surface {
+        write_item_surface(&surface_path, s)?;
+    }
     write_forge_script(
         &script_path,
         scrutiny_bin,
@@ -193,6 +204,7 @@ fn prepare_one(
         &key,
         from_json,
         &done_sentinel,
+        surface.as_ref().map(|_| surface_path.as_path()),
     )?;
 
     Ok(PreparedItem {
@@ -235,29 +247,49 @@ fn run_forge_pool(
     scrutiny_bin: &Path,
     headless: bool,
 ) -> Result<Vec<PathBuf>> {
-    // One worker per URL — user controls parallelism by how many tickets they pass.
+    let serial = !headless && zellij_needs_serial_launches();
     let (tx, rx) = mpsc::channel::<(usize, Result<PathBuf>)>();
     let mut paths = vec![PathBuf::new(); items.len()];
     let mut first_err: Option<String> = None;
 
-    for (idx, item) in items.iter().enumerate() {
-        let bin = scrutiny_bin.to_path_buf();
-        let tx = tx.clone();
-        let key = item.key.clone();
-        let worktree = item.worktree.clone();
-        let from_json = item.from_json.clone();
-        let done_path = item.done_sentinel.clone();
-        let script = item.script_path.clone();
-        let surface = item.surface.clone();
-        std::thread::spawn(move || {
+    if serial {
+        // One driver at a time: legacy zellij focus-steals on every pane spawn.
+        for (idx, item) in items.iter().enumerate() {
+            let bin = scrutiny_bin.to_path_buf();
+            let key = item.key.clone();
+            let worktree = item.worktree.clone();
+            let from_json = item.from_json.clone();
+            let done_path = item.done_sentinel.clone();
+            let script = item.script_path.clone();
+            let surface = item.surface.clone();
             let res = if headless || surface.is_none() {
                 run_forge_headless(&bin, &worktree, &key, &from_json, &done_path)
             } else {
-                run_forge_in_surface(surface.as_ref().unwrap(), &script, &done_path)
+                run_forge_in_surface(surface.as_ref().unwrap(), &script, &worktree, &done_path)
             }
             .map(|_| worktree);
             let _ = tx.send((idx, res));
-        });
+        }
+    } else {
+        for (idx, item) in items.iter().enumerate() {
+            let bin = scrutiny_bin.to_path_buf();
+            let tx = tx.clone();
+            let key = item.key.clone();
+            let worktree = item.worktree.clone();
+            let from_json = item.from_json.clone();
+            let done_path = item.done_sentinel.clone();
+            let script = item.script_path.clone();
+            let surface = item.surface.clone();
+            std::thread::spawn(move || {
+                let res = if headless || surface.is_none() {
+                    run_forge_headless(&bin, &worktree, &key, &from_json, &done_path)
+                } else {
+                    run_forge_in_surface(surface.as_ref().unwrap(), &script, &worktree, &done_path)
+                }
+                .map(|_| worktree);
+                let _ = tx.send((idx, res));
+            });
+        }
     }
     drop(tx);
 
@@ -323,8 +355,13 @@ fn run_forge_headless(
     Ok(())
 }
 
-fn run_forge_in_surface(surface: &ItemSurface, script: &Path, done: &Path) -> Result<()> {
-    launch_agent_in_surface(surface, "forge", script, /* close_on_exit */ false)?;
+fn run_forge_in_surface(
+    surface: &ItemSurface,
+    script: &Path,
+    cwd: &Path,
+    done: &Path,
+) -> Result<()> {
+    launch_agent_in_surface(surface, "forge", script, cwd, /* close_on_exit */ false)?;
     // Poll done sentinel (forge script touches it).
     let wall_secs = crate::timeouts::get().forge_bulk_item;
     let wall = Duration::from_secs(wall_secs);
@@ -348,14 +385,24 @@ fn write_forge_script(
     key: &str,
     from_json: &str,
     done: &Path,
+    surface_json: Option<&Path>,
 ) -> Result<()> {
     // Escape for single-quoted bash strings.
     let esc = |s: &str| s.replace('\'', "'\\''");
+    let surface_export = match surface_json {
+        Some(p) => format!(
+            "export {env}='{path}'\n",
+            env = ITEM_SURFACE_ENV,
+            path = esc(&p.display().to_string()),
+        ),
+        None => String::new(),
+    };
     let body = format!(
-        "#!/usr/bin/env bash\nset -euo pipefail\ncd '{wt}'\n\
+        "#!/usr/bin/env bash\nset -euo pipefail\ncd '{wt}'\n{surface}\
          '{bin}' forge --yes --from-json '{fj}' --cwd '{wt}' '{key}'\n\
          printf 'ok\\n' > '{done}'\n",
         wt = esc(&worktree.display().to_string()),
+        surface = surface_export,
         bin = esc(&bin.display().to_string()),
         fj = esc(from_json),
         key = esc(key),
@@ -521,6 +568,7 @@ mod tests {
     fn forge_script_runs_forge_yes() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("driver.sh");
+        let surface = dir.path().join("item-surface.json");
         write_forge_script(
             &script,
             Path::new("/bin/scrutiny"),
@@ -528,6 +576,7 @@ mod tests {
             "NERO-1",
             "{}",
             Path::new("/tmp/done"),
+            Some(&surface),
         )
         .unwrap();
         let body = std::fs::read_to_string(&script).unwrap();
@@ -536,5 +585,9 @@ mod tests {
             "forge-all must not force headless (custom models need visible/non-first-output path)"
         );
         assert!(body.contains("forge --yes --from-json"));
+        assert!(
+            body.contains(ITEM_SURFACE_ENV),
+            "driver must export item surface for nested forge: {body}"
+        );
     }
 }
