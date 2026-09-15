@@ -19,8 +19,8 @@ use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
 use crate::runtime::DetectedClient;
 use crate::scan::normalize_severity;
 use crate::terminal::{
-    force_close_agent_panes, kill_cmd_for_terminal, launch_agent_in_surface, launch_agent_window,
-    register_agent_pane, ItemSurface, ResolvedTerminal,
+    kill_cmd_for_terminal, launch_agent_in_surface, launch_agent_window, register_agent_pane,
+    ItemSurface, ResolvedTerminal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,8 +244,8 @@ pub const PR_SUMMARY_JSON_SCHEMA: &str = r#"{
   "required": ["purpose", "architecture", "good_points", "bad_points", "review_limits"]
 }"#;
 
-/// Actionable concern from the PR overview agent. Anchored items are promoted
-/// into triage findings after review merge.
+/// Actionable concern from the PR overview agent. Anchored items feed the
+/// consolidator (with reviewer findings) and remain eligible for triage promote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SummaryConcern {
     pub text: String,
@@ -504,7 +504,9 @@ pub use crate::caveman::{CAVEMAN_STYLE, CAVEMAN_ULTRA_PROMPT};
 /// global/agent overrides → scrutiny's prompt.
 pub fn inject_overrides(label: &str, prompt: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if crate::caveman::caveman_enabled() {
+    // Summary must emit strict JSON — caveman preamble fights that contract.
+    let skip_caveman = agent_type_from_label(label) == "summary";
+    if crate::caveman::caveman_enabled() && !skip_caveman {
         parts.push(CAVEMAN_ULTRA_PROMPT.to_string());
     }
     if let Some(skill) = bench_skill_preamble() {
@@ -1399,28 +1401,30 @@ When you spawn each member, the spawn message body MUST be the matching template
     )
 }
 
-/// Consolidation agent prompt (isolated mode). Input = the raw findings from
-/// all reviewers; output = the same JSON shape, semantically deduped.
+/// Consolidation agent prompt. Input = raw findings from reviewers/specialists
+/// plus anchored PR-summary concerns; output = same JSON shape, semantically deduped.
 pub fn build_consolidation_prompt(findings_json: &str, pack_path: &Path) -> String {
     let header = crate::caveman::dialect(
-        "Scrutiny consolidator. ISOLATED mode. Input = raw findings from all reviewers. You dedupe. You do not review.",
-        "Scrutiny consolidator. ISOLATED mode. Input = raw findings from all reviewers. You dedupe. You do not review.",
+        "Scrutiny consolidator. Input = raw findings from reviewers + PR-summary concerns. You dedupe. You do not review.",
+        "Scrutiny consolidator. Input = raw findings from reviewers and PR-summary concerns. You dedupe. You do not review.",
     );
     let rules = crate::caveman::dialect(
         r#"## Rules (mandatory)
 
-1. Merge findings = **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently.
+1. Merge findings = **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently (incl. `source_role` summary vs reviewer).
 2. Duplicates differ `severity` → keep **higher**. Rank: critical > warning > suggestion.
 3. Do **NOT** invent new findings. Do **NOT** change anchors. Do **NOT** drop unique finding. Consolidate only.
 4. Every kept finding retain `path` + `line`.
-5. Prefer clearest `title`/`explanation`/`proposed_fix` among merged duplicates."#,
+5. Prefer clearest `title`/`explanation`/`proposed_fix` among merged duplicates.
+6. Keep `source_role` when present (e.g. `summary`) on the surviving finding."#,
         r#"## Rules (mandatory)
 
-1. Merge findings that describe the **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently by different reviewers.
+1. Merge findings that describe the **same issue**: same `path` + same/near `line`, OR same root cause even when titled differently (including `source_role` summary vs reviewer).
 2. On duplicates with differing `severity`, keep the **higher** one. Rank: critical > warning > suggestion.
 3. Do **NOT** invent new findings. Do **NOT** change anchors. Do **NOT** drop a unique finding. Consolidate only.
 4. Every kept finding must retain `path` + `line`.
-5. Prefer the clearest `title`/`explanation`/`proposed_fix` among merged duplicates."#,
+5. Prefer the clearest `title`/`explanation`/`proposed_fix` among merged duplicates.
+6. Preserve `source_role` when present (e.g. `summary`) on the surviving finding."#,
     );
     format!(
         r#"{header}
@@ -1504,20 +1508,236 @@ fn nonheadless_findings_suffix(out_path: &Path) -> String {
     )
 }
 
-/// Collate a vec of `AgentRunResult` into a deduped `ReviewReport` and write it.
+/// Non-headless PR summary: write the overview JSON object to disk.
+fn nonheadless_summary_suffix(out_path: &Path) -> String {
+    format!(
+        "\n\n---\nNON-HEADLESS OUTPUT OVERRIDE:\n\
+         Do NOT print the overview JSON to stdout.\n\
+         Instead, WRITE the overview JSON object (purpose/architecture/good_points/\
+         bad_points/review_limits/diagram/table) to this file (create/overwrite):\n\
+           {}\n\
+         Use the Write tool. The host reads that file after you finish.\n\
+         JSON ONLY in that file — no markdown fences, no prose.\n",
+        out_path.display()
+    )
+}
+
+fn dump_pr_summary_raw(client: &str, raw: &str) -> PathBuf {
+    let dump = temp_artifact_path(client, "review", "pr-summary-raw");
+    let _ = fs::write(&dump, raw.as_bytes());
+    dump
+}
+
+fn finalize_pr_summary(
+    summary: ProbePrSummary,
+    client: &DetectedClient,
+    model: &str,
+    session_id: Option<String>,
+    request_id: Option<String>,
+    wall_ms: Option<u64>,
+) -> Result<(ProbePrSummary, PathBuf)> {
+    if !summary_has_content(&summary) {
+        bail!("pr summary agent returned empty purpose and architecture");
+    }
+    let session = PrSummarySession {
+        version: 1,
+        summary: summary.clone(),
+        model: model.to_string(),
+        client: client.client.clone(),
+        session_id,
+        request_id,
+        wall_ms,
+    };
+    let out_path = temp_artifact_path(&client.client, "review", "pr-summary");
+    write_json_pretty(&out_path, &session)?;
+    Ok((summary, out_path))
+}
+
+fn parse_pr_summary_raw(client: &str, raw: &str) -> Result<ProbePrSummary> {
+    match parse_pr_summary_json(raw) {
+        Ok(s) if summary_has_content(&s) => Ok(s),
+        Ok(_) => {
+            let dump = dump_pr_summary_raw(client, raw);
+            bail!(
+                "pr summary agent returned empty purpose and architecture (raw → {})",
+                dump.display()
+            )
+        }
+        Err(e) => {
+            let dump = dump_pr_summary_raw(client, raw);
+            bail!("{e:#} (raw → {})", dump.display())
+        }
+    }
+}
+
+/// Dedicated PR overview agent before findings triage.
+/// Honors non-headless mode: visible pane + Write JSON to disk (same as reviewers).
+/// Headless: `--json-schema` + parse stdout. One retry on parse failure either way.
+pub fn run_pr_summary_agent(
+    client: &DetectedClient,
+    model: &str,
+    pack_path: &Path,
+    cwd: &Path,
+    term: Option<&ResolvedTerminal>,
+) -> Result<(ProbePrSummary, PathBuf)> {
+    let prompt = build_pr_summary_prompt(pack_path);
+    eprintln!("scrutiny probe: pr summary agent…");
+
+    if let Some(ctx) = term {
+        return run_pr_summary_nonheadless(client, model, cwd, &prompt, ctx);
+    }
+    run_pr_summary_headless(client, model, cwd, &prompt)
+}
+
+fn run_pr_summary_headless(
+    client: &DetectedClient,
+    model: &str,
+    cwd: &Path,
+    prompt: &str,
+) -> Result<(ProbePrSummary, PathBuf)> {
+    let mut last_err = None;
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            eprintln!("scrutiny probe: pr summary retry ({attempt}/2)…");
+        }
+        let out = run_headless(
+            client,
+            model,
+            cwd,
+            prompt,
+            HeadlessKind::Summary,
+            "summary#1",
+            crate::timeouts::probe_summary(),
+        )?;
+        match parse_pr_summary_raw(&client.client, &out.stdout) {
+            Ok(summary) => {
+                return finalize_pr_summary(
+                    summary,
+                    client,
+                    model,
+                    out.session_id,
+                    out.request_id,
+                    Some(out.wall_ms),
+                );
+            }
+            Err(e) => {
+                eprintln!("scrutiny probe: warn: pr summary parse: {e:#}");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("pr summary agent failed")))
+}
+
+fn run_pr_summary_nonheadless(
+    client: &DetectedClient,
+    model: &str,
+    cwd: &Path,
+    prompt: &str,
+    ctx: &ResolvedTerminal,
+) -> Result<(ProbePrSummary, PathBuf)> {
+    let mut last_err = None;
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            eprintln!("scrutiny probe: pr summary retry ({attempt}/2)…");
+        }
+        let file_path = artifact_path("review-pr-summary-out");
+        let _ = fs::remove_file(&file_path);
+        let full_prompt = format!("{prompt}{}", nonheadless_summary_suffix(&file_path));
+        let sentinel = run_nonheadless(client, model, cwd, &full_prompt, "summary#1", ctx)?;
+        let wall = crate::timeouts::probe_summary().max(crate::timeouts::nonheadless());
+        let missing = wait_for_sentinels(&[sentinel], wall);
+        if !missing.is_empty() {
+            eprintln!(
+                "scrutiny probe: warn: summary pane did not signal done within {}s",
+                wall.as_secs()
+            );
+        }
+        let raw = match fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!(
+                    "could not read summary file {}: {e}",
+                    file_path.display()
+                );
+                eprintln!("scrutiny probe: warn: pr summary: {msg}");
+                last_err = Some(anyhow::anyhow!(msg));
+                continue;
+            }
+        };
+        match parse_pr_summary_raw(&client.client, &raw) {
+            Ok(summary) => {
+                return finalize_pr_summary(summary, client, model, None, None, None);
+            }
+            Err(e) => {
+                eprintln!("scrutiny probe: warn: pr summary parse: {e:#}");
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("pr summary agent failed")))
+}
+
+/// Convert anchored PR-summary concerns into consolidator input findings.
+/// Unanchored concerns are skipped (display-only / triage promote path).
+pub fn summary_concerns_as_findings(summary: &ProbePrSummary) -> Vec<AgentFinding> {
+    summary
+        .bad_points
+        .iter()
+        .filter(|c| c.is_actionable())
+        .map(|c| {
+            let path = c
+                .path
+                .as_ref()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .unwrap_or_default();
+            let line = c.line.unwrap_or(0);
+            let title = if let Some(t) = c.title.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
+            {
+                t.to_string()
+            } else {
+                let first = c.text.lines().next().unwrap_or(c.text.as_str()).trim();
+                if first.chars().count() <= 72 {
+                    first.to_string()
+                } else {
+                    let truncated: String = first.chars().take(69).collect();
+                    format!("{truncated}…")
+                }
+            };
+            AgentFinding {
+                path,
+                line,
+                start_line: None,
+                severity: normalize_severity(c.severity.as_deref().unwrap_or("suggestion")),
+                title,
+                explanation: c.text.clone(),
+                proposed_fix: c.proposed_fix.clone().unwrap_or_default(),
+                fix_options: Vec::new(),
+                source_role: "summary".into(),
+            }
+        })
+        .collect()
+}
+
+/// Collate agent results (+ optional extras such as PR-summary concerns) into a
+/// deduped `ReviewReport` and write it.
 ///
-/// Isolated-only path: after a cheap Rust dedupe pass, an LLM consolidation
-/// agent semantically merges what the heuristic missed (keeps higher severity).
-fn collate_review_report(
+/// After a cheap Rust dedupe pass, an LLM consolidation agent semantically
+/// merges what the heuristic missed (keeps higher severity).
+pub fn collate_review_report(
     agents: Vec<AgentRunResult>,
     spawn_mode: &str,
     client: &DetectedClient,
     model: &str,
     pack_path: &Path,
     cwd: &Path,
+    extra: Vec<AgentFinding>,
 ) -> Result<(ReviewReport, PathBuf)> {
-    let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum();
+    let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum::<u32>()
+        + extra.len() as u32;
     let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
+    all.extend(extra);
     let deduped = dedupe_findings(&mut all);
     let findings = consolidate_findings(client, model, pack_path, cwd, deduped);
     let usage_total = {
@@ -1839,57 +2059,13 @@ fn parse_pr_summary_value(v: &Value) -> ProbePrSummary {
     direct
 }
 
-/// Dedicated headless agent: PR overview for display before findings triage.
-/// Always runs headless (even when other probe agents use visible terminals).
-pub fn run_pr_summary_agent(
-    client: &DetectedClient,
-    model: &str,
-    pack_path: &Path,
-    cwd: &Path,
-) -> Result<(ProbePrSummary, PathBuf)> {
-    let prompt = build_pr_summary_prompt(pack_path);
-    eprintln!("scrutiny probe: pr summary agent…");
-    let out = run_headless(
-        client,
-        model,
-        cwd,
-        &prompt,
-        HeadlessKind::Summary,
-        "summary#1",
-        crate::timeouts::probe_summary(),
-    )?;
-    let summary = parse_pr_summary_json(&out.stdout).context("parse pr summary agent output")?;
-    if !summary_has_content(&summary) {
-        // Keep raw stdout for debug — empty purpose usually means envelope unwrap miss
-        // or the model filled schema with blank strings.
-        let dump = temp_artifact_path(&client.client, "review", "pr-summary-raw");
-        let _ = fs::write(&dump, out.stdout.as_bytes());
-        bail!(
-            "pr summary agent returned empty purpose and architecture (raw → {})",
-            dump.display()
-        );
-    }
-    let session = PrSummarySession {
-        version: 1,
-        summary: summary.clone(),
-        model: model.to_string(),
-        client: client.client.clone(),
-        session_id: out.session_id,
-        request_id: out.request_id,
-        wall_ms: Some(out.wall_ms),
-    };
-    let out_path = temp_artifact_path(&client.client, "review", "pr-summary");
-    write_json_pretty(&out_path, &session)?;
-    Ok((summary, out_path))
-}
-
-pub fn run_isolated_review(
+pub fn run_isolated_agents(
     client: &DetectedClient,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
-) -> Result<(ReviewReport, PathBuf)> {
+) -> Result<Vec<AgentRunResult>> {
     let mut jobs: Vec<(String, u32, Vec<String>)> = Vec::new();
 
     let buckets = if plan.reviewers > 0 {
@@ -1943,7 +2119,8 @@ pub fn run_isolated_review(
                 crate::timeouts::get().nonheadless
             );
         }
-        force_close_agent_panes();
+        // Do not force-close here — summary#1 may still be running in parallel.
+        // review_cmd closes leftovers after the summary agent joins.
         let mut agents: Vec<AgentRunResult> = Vec::new();
         for (_sentinel, findings_path, role, index, paths) in entries {
             let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
@@ -1974,7 +2151,7 @@ pub fn run_isolated_review(
                 wall_ms: None,
             });
         }
-        return collate_review_report(agents, "isolated", client, &plan.model, pack_path, cwd);
+        return Ok(agents);
     }
 
     let wall = crate::timeouts::probe_isolated();
@@ -2152,16 +2329,36 @@ pub fn run_isolated_review(
         );
     }
 
-    collate_review_report(agents, "isolated", client, &plan.model, pack_path, cwd)
+    Ok(agents)
 }
 
-pub fn run_team_review(
+/// Spawn isolated agents, then collate (+ optional extras) into a report.
+pub fn run_isolated_review(
     client: &DetectedClient,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
 ) -> Result<(ReviewReport, PathBuf)> {
+    let agents = run_isolated_agents(client, plan, pack_path, cwd, term)?;
+    collate_review_report(
+        agents,
+        "isolated",
+        client,
+        &plan.model,
+        pack_path,
+        cwd,
+        Vec::new(),
+    )
+}
+
+pub fn run_team_agents(
+    client: &DetectedClient,
+    plan: &ConfirmedPlan,
+    pack_path: &Path,
+    cwd: &Path,
+    term: Option<&ResolvedTerminal>,
+) -> Result<Vec<AgentRunResult>> {
     let prompt_base = build_team_lead_prompt(pack_path, plan);
 
     if let Some(ctx) = term {
@@ -2175,7 +2372,7 @@ pub fn run_team_review(
                 crate::timeouts::get().nonheadless
             );
         }
-        force_close_agent_panes();
+        // Do not force-close here — summary#1 may still be running in parallel.
         let (findings, ok, stderr) = match fs::read_to_string(&findings_path) {
             Ok(raw) => {
                 let f = parse_findings_json(&raw, "lead").unwrap_or_default();
@@ -2192,7 +2389,7 @@ pub fn run_team_review(
             role: "lead".into(),
             index: 1,
             paths: Vec::new(),
-            findings: findings.clone(),
+            findings,
             ok,
             stderr,
             usage: None,
@@ -2200,18 +2397,7 @@ pub fn run_team_review(
             session_id: None,
             wall_ms: None,
         };
-        let report = ReviewReport {
-            version: 1,
-            spawn_mode: "team".into(),
-            model: plan.model.clone(),
-            findings,
-            agents: vec![agent],
-            deduped_from: 0,
-            usage_total: None,
-        };
-        let out_path = temp_artifact_path(&plan.client, "review", "report");
-        write_json_pretty(&out_path, &report)?;
-        return Ok((report, out_path));
+        return Ok(vec![agent]);
     }
 
     let wall = crate::timeouts::probe_team();
@@ -2235,31 +2421,32 @@ pub fn run_team_review(
             out.stderr
         );
     }
+    let ok = out.code == 0 || !findings.is_empty();
     let agent = AgentRunResult {
         role: "lead".into(),
         index: 1,
         paths: Vec::new(),
-        findings: findings.clone(),
-        ok: out.code == 0 || !findings.is_empty(),
+        findings,
+        ok,
         stderr: out.stderr,
         usage: out.usage.clone(),
         request_id: out.request_id.clone(),
         session_id: out.session_id.clone(),
         wall_ms: Some(out.wall_ms),
     };
-    let usage_total = out.usage.clone();
-    let report = ReviewReport {
-        version: 1,
-        spawn_mode: "team".into(),
-        model: plan.model.clone(),
-        findings,
-        agents: vec![agent],
-        deduped_from: 0,
-        usage_total,
-    };
-    let out_path = temp_artifact_path(&plan.client, "review", "report");
-    write_json_pretty(&out_path, &report)?;
-    Ok((report, out_path))
+    Ok(vec![agent])
+}
+
+/// Spawn team lead, then collate (+ optional extras) into a report.
+pub fn run_team_review(
+    client: &DetectedClient,
+    plan: &ConfirmedPlan,
+    pack_path: &Path,
+    cwd: &Path,
+    term: Option<&ResolvedTerminal>,
+) -> Result<(ReviewReport, PathBuf)> {
+    let agents = run_team_agents(client, plan, pack_path, cwd, term)?;
+    collate_review_report(agents, "team", client, &plan.model, pack_path, cwd, Vec::new())
 }
 
 pub fn session_records_from_report(report: &ReviewReport) -> Vec<ReviewAgentRecord> {
@@ -2405,6 +2592,20 @@ mod tests {
             "expected embedded ultra preamble"
         );
         assert!(out.ends_with("Fix the thing."));
+    }
+
+    #[test]
+    fn summary_skips_caveman_preamble() {
+        let _g = crate::caveman::tests::lock_for_test();
+        crate::caveman::store_caveman_enabled(true);
+        std::env::remove_var("SCRUTINY_NO_CAVEMAN");
+        std::env::remove_var("SCRUTINY_BENCH_SKILL_PREAMBLE");
+        let out = inject_overrides("summary#1", "JSON ONLY.");
+        assert!(
+            !out.contains("# STYLE (mandatory) — caveman ultra"),
+            "summary must not get caveman preamble"
+        );
+        assert_eq!(out, "JSON ONLY.");
     }
 
     #[test]
@@ -2607,8 +2808,45 @@ mod tests {
         assert!(p.contains("consolidator") || p.contains("Consolidator"));
         assert!(p.contains("higher") && p.contains("severity"));
         assert!(p.contains("critical > warning > suggestion"));
+        assert!(p.contains("PR-summary") || p.contains("summary"));
         assert!(p.contains(r#""findings":["#));
         assert!(p.contains(raw));
+    }
+
+    #[test]
+    fn summary_concerns_as_findings_skips_unanchored() {
+        let summary = ProbePrSummary {
+            purpose: "p".into(),
+            architecture: "a".into(),
+            good_points: vec![],
+            bad_points: vec![
+                SummaryConcern {
+                    text: "anchored risk".into(),
+                    path: Some("src/a.rs".into()),
+                    line: Some(10),
+                    severity: Some("warning".into()),
+                    title: Some("Risk".into()),
+                    proposed_fix: Some("fix it".into()),
+                },
+                SummaryConcern {
+                    text: "no anchor".into(),
+                    path: None,
+                    line: None,
+                    severity: None,
+                    title: None,
+                    proposed_fix: None,
+                },
+            ],
+            review_limits: vec![],
+            diagram: String::new(),
+            table: String::new(),
+        };
+        let out = summary_concerns_as_findings(&summary);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, "src/a.rs");
+        assert_eq!(out[0].line, 10);
+        assert_eq!(out[0].source_role, "summary");
+        assert_eq!(out[0].title, "Risk");
     }
 
     #[test]

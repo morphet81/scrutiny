@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 
 use crate::agent_runner::{
-    run_isolated_review, run_pr_summary_agent, run_team_review, session_records_from_report,
-    ProbePrSummary, ReviewReport,
+    collate_review_report, run_isolated_agents, run_pr_summary_agent, run_team_agents,
+    session_records_from_report, summary_concerns_as_findings, ProbePrSummary, ReviewReport,
 };
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
@@ -24,7 +24,7 @@ use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteI
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
 use crate::runtime::{resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput};
 use crate::scan::run_scan;
-use crate::terminal::{resolve_terminal, AgentPaneCleanupGuard};
+use crate::terminal::{force_close_agent_panes, resolve_terminal, AgentPaneCleanupGuard};
 
 #[derive(Debug, Clone)]
 pub struct ReviewCmdInput {
@@ -215,24 +215,52 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
     let mut report_path: Option<PathBuf> = None;
 
     if !plan.skip_ai && !input.skip_agents {
+        let term = resolve_terminal(cfg.headless, &detected.client, "probe");
+        // Force-close leftover agent panes on exit / Ctrl-C / unwind (after summary joins).
+        let _pane_guard = term.as_ref().map(|_| AgentPaneCleanupGuard::default());
+
         let summary_handle = spawn_pr_summary_agent(
             cfg.probe.pr_summary,
             &detected,
             &plan.model,
             &pack_path,
             &cwd,
+            term.clone(),
         );
 
-        let term = resolve_terminal(cfg.headless, &detected.client, "probe");
-        // Force-close leftover agent panes on exit / Ctrl-C / unwind.
-        let _pane_guard = term.as_ref().map(|_| AgentPaneCleanupGuard::default());
-        let (report, rpath) = if plan.spawn_mode == "team" {
+        let spawn_mode = plan.spawn_mode.as_str();
+        let agents = if spawn_mode == "team" {
             eprintln!("scrutiny probe: team lead agent…");
-            run_team_review(&detected, &plan, &pack_path, &cwd, term.as_ref())?
+            run_team_agents(&detected, &plan, &pack_path, &cwd, term.as_ref())?
         } else {
             eprintln!("scrutiny probe: isolated parallel agents…");
-            run_isolated_review(&detected, &plan, &pack_path, &cwd, term.as_ref())?
+            run_isolated_agents(&detected, &plan, &pack_path, &cwd, term.as_ref())?
         };
+
+        let pr_summary = join_pr_summary_agent(summary_handle);
+        // Summary may have shared the pane pool; close leftovers before consolidate/triage.
+        force_close_agent_panes();
+
+        let extra = pr_summary
+            .as_ref()
+            .map(summary_concerns_as_findings)
+            .unwrap_or_default();
+        if !extra.is_empty() {
+            eprintln!(
+                "scrutiny probe: folding {} summary concern(s) into consolidator",
+                extra.len()
+            );
+        }
+
+        let (report, rpath) = collate_review_report(
+            agents,
+            spawn_mode,
+            &detected,
+            &plan.model,
+            &pack_path,
+            &cwd,
+            extra,
+        )?;
         eprintln!(
             "  report {} ({} findings, from {} raw)",
             rpath.display(),
@@ -240,8 +268,6 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
             report.deduped_from
         );
         report_path = Some(rpath);
-
-        let pr_summary = join_pr_summary_agent(summary_handle);
 
         let agents_json = serde_json::to_string(&session_records_from_report(&report))?;
         match run_review_session_write(ReviewSessionWriteInput {
@@ -438,6 +464,7 @@ fn spawn_pr_summary_agent(
     model: &str,
     pack_path: &Path,
     cwd: &Path,
+    term: Option<crate::terminal::ResolvedTerminal>,
 ) -> Option<JoinHandle<Result<(ProbePrSummary, PathBuf)>>> {
     if !enabled {
         return None;
@@ -446,7 +473,9 @@ fn spawn_pr_summary_agent(
     let model = model.to_string();
     let pack = pack_path.to_path_buf();
     let cwd = cwd.to_path_buf();
-    Some(thread::spawn(move || run_pr_summary_agent(&client, &model, &pack, &cwd)))
+    Some(thread::spawn(move || {
+        run_pr_summary_agent(&client, &model, &pack, &cwd, term.as_ref())
+    }))
 }
 
 fn join_pr_summary_agent(
