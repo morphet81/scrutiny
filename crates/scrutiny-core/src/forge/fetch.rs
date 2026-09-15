@@ -234,13 +234,14 @@ pub(crate) fn jira_key_from_branch(cwd: &Path) -> Result<Option<String>> {
 }
 
 fn extract_jira_key_from_text(text: &str) -> Option<String> {
-    // Scan for PROJ-123 style tokens
+    // Scan for PROJ-123 / proj-123 tokens; normalize to uppercase (branch names are often lower).
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i].is_ascii_uppercase() {
+        if bytes[i].is_ascii_alphabetic() {
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_uppercase() || bytes[i].is_ascii_digit()) {
+            while i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i].is_ascii_digit())
+            {
                 i += 1;
             }
             if i < bytes.len() && bytes[i] == b'-' {
@@ -250,9 +251,9 @@ fn extract_jira_key_from_text(text: &str) -> Option<String> {
                     i += 1;
                 }
                 if i > num_start {
-                    let candidate = &text[start..i];
-                    if is_jira_key(candidate) {
-                        return Some(candidate.to_string());
+                    let candidate = text[start..i].to_ascii_uppercase();
+                    if is_jira_key(&candidate) {
+                        return Some(candidate);
                     }
                 }
             }
@@ -385,8 +386,13 @@ fn fetch_jira(cwd: &Path, raw: &str) -> Result<TicketReport> {
 }
 
 pub fn jira_key_from_url_or_raw(raw: &str) -> Result<String> {
-    if is_jira_key(raw) {
-        return Ok(raw.trim().to_string());
+    let trimmed = raw.trim();
+    if is_jira_key(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if is_jira_key(&upper) {
+        return Ok(upper);
     }
     if let Some(key) = extract_jira_key_from_text(raw) {
         return Ok(key);
@@ -398,8 +404,9 @@ pub fn jira_key_from_url_or_raw(raw: &str) -> Result<String> {
             .split(|c: char| c == '/' || c == '?' || c == '#')
             .next()
             .unwrap_or("");
-        if is_jira_key(key) {
-            return Ok(key.to_string());
+        let key_up = key.to_ascii_uppercase();
+        if is_jira_key(&key_up) {
+            return Ok(key_up);
         }
     }
     bail!("could not extract Jira key from: {raw}");
@@ -1464,6 +1471,14 @@ mod tests {
         assert_eq!(
             extract_jira_key_from_text("feat/PROJ-99-login"),
             Some("PROJ-99".into())
+        );
+        assert_eq!(
+            extract_jira_key_from_text("new-tc-manager/nero-731"),
+            Some("NERO-731".into())
+        );
+        assert_eq!(
+            extract_jira_key_from_text("feat/Nero-730-wip"),
+            Some("NERO-730".into())
         );
     }
 
