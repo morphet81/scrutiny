@@ -50,7 +50,7 @@ Test case titles (it/test strings in the plan and in code):\n\
 
 /// Wall clock for a non-headless agent window (user may be watching — be generous).
 /// Where a forge agent runs: headless (captured), a shared visible window
-/// (`term`), or a per-item surface (`surface`, bulk mode). `dry` spawns no agent.
+/// (`term`), or a per-item surface (`surface`, multi-ticket forge). `dry` spawns no agent.
 #[derive(Clone, Copy)]
 struct AgentTarget<'a> {
     term: Option<&'a ResolvedTerminal>,
@@ -199,7 +199,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
         },
     )?;
 
-    // Nested forge-all/bulk: prefer the item surface so agents stay in the
+    // Nested multi-ticket forge: prefer the item surface so agents stay in the
     // ticket tab (no origin-tab focus steal). Otherwise open shared windows.
     let surface = load_item_surface_from_env();
     let term = if surface.is_some() {
@@ -321,7 +321,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
 
 /// Everything for one item between params and ship: plan-write → context →
 /// brief → (TDD plan) → implement → verify gate. Shared by single `run_forge`
-/// and each bulk item driver. Returns the pr-meta + session paths.
+/// and each multi-ticket item driver. Returns the pr-meta + session paths.
 pub(crate) struct ForgeItemCtx<'a> {
     pub detected: &'a crate::runtime::DetectedClient,
     pub cwd: PathBuf,
@@ -1624,7 +1624,7 @@ fn load_pr_meta(path: &Path) -> Result<PrMeta> {
     Ok(meta)
 }
 
-/// Colorful end-of-forge report for the item pane (forge-all / non-headless).
+/// Colorful end-of-forge report for the item pane (multi-ticket / non-headless).
 /// Prints to stderr, then the process exits 0; tabs stay open when launched with
 /// `close_on_exit=false`.
 pub(crate) fn print_forge_complete_report(

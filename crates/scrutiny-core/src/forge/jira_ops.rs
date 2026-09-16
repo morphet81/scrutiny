@@ -1,4 +1,4 @@
-//! Jira write ops for `forge-all` (assign + transition via `acli`).
+//! Jira write ops for multi-ticket `forge` (assign + transition via `acli`).
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;

@@ -44,7 +44,7 @@ pub fn require_acli() -> Result<()> {
 }
 
 /// Fail fast when `acli` is missing or Jira is not authenticated.
-/// Used by `forge-all` before any ticket work starts.
+/// Used by multi-ticket `forge` before any ticket work starts.
 pub fn require_acli_jira() -> Result<()> {
     require_acli()?;
     let output = Command::new("acli")
@@ -62,14 +62,14 @@ pub fn require_acli_jira() -> Result<()> {
         bail!(
             "acli is not authenticated to Jira.\n\
              Run: acli jira auth login\n\
-             Then re-run `scrutiny forge-all`."
+             Then re-run `scrutiny forge`."
         );
     }
     bail!(
         "acli is not authenticated to Jira.\n\
          {detail}\n\
          Run: acli jira auth login\n\
-         Then re-run `scrutiny forge-all`."
+         Then re-run `scrutiny forge`."
     );
 }
 

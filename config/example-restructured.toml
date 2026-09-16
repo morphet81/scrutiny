@@ -61,7 +61,7 @@ artifact_globs = [                 # never committed by parley/forge; cleaned in
 # push_no_verify = false
 
 [timeouts]
-agent_wall_secs = 600              # base; stages derive (fix x2, nonheadless x3, bulk x8)
+agent_wall_secs = 600              # base; stages derive (fix x2, nonheadless x3, forge item x8)
 progress_secs = 15
 headless_first_output_secs = 90    # 0 = disable
 
@@ -302,11 +302,7 @@ bump_labels = ["urgent", "complex", "breaking-change", "breaking", "epic", "larg
 lower_labels = ["trivial", "minor", "quick", "simple", "easy", "small"]               # -6 pts, max 1
 tier_thresholds = [18, 35, 55, 95]  # [XS_max, S_max, M_max, L_max]; above L_max → XL
 
-[forge.bulk]
-concurrency = 3                    # `--concurrency` overrides
-# item_wall_secs = 4800            # default: agent_wall_secs x8
-
-[forge.all]                        # `scrutiny forge all` kickoff; unset keys inherit [forge]
+[forge.all]                        # multi-ticket `scrutiny forge` kickoff; unset keys inherit [forge]
 branch_prefix = "feat"
 worktree_parent_folder = ".."      # absolute or relative to repo root
 use_tdd = true

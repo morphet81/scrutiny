@@ -6,12 +6,12 @@ use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, resolve_parley_fixes_path,
     run_agent_prompt, run_bench, run_eval, run_findings_init, run_findings_resolve,
     run_findings_triage, run_findings_validate, run_forge, run_forge_all, run_forge_brief,
-    run_forge_bulk, run_forge_bulk_item, run_forge_context, run_forge_fetch, run_forge_plan_write,
-    run_info, run_map, run_pack, run_parley, run_parley_fetch, run_parley_plan_write,
-    run_parley_reply, run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr,
-    run_review, run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
-    BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeAllInput, ForgeBulkInput,
-    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers, ParleyCmdInput,
+    run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map, run_pack,
+    run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply, run_parley_stack,
+    run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
+    run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
+    BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeAllInput, ForgeCmdInput,
+    ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers, ParleyCmdInput,
     ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput, PlanConfirmInput,
     PlanWriteInput, PostCommentsInput, PrCmdInput, ProbeStackInput, ReviewCmdInput,
     ReviewSessionWriteInput, SkillsInstallInput,
@@ -29,8 +29,7 @@ use std::process::ExitCode;
 {about-with-newline}
 Main commands:
   probe   Orchestrate full probe: analyze → plan → headless agents → triage → post
-  forge   Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent
-  forge-all  Jira URLs → assign / In Progress / worktree / tab / forge --yes
+  forge   Jira URLs → assign / In Progress / worktree / tab / implement (`--here` = cwd)
   info    Show colorful Jira ticket summary (+ related GitHub PRs)
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
   bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
@@ -354,24 +353,21 @@ enum Commands {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Orchestrate ticket implement: fetch → knobs → optional TDD plan → agent.
+    /// For each Jira URL: assign → In Progress → worktree + branch → tmux/zellij
+    /// tab → implement with `[forge.all]` knobs.
     ///
-    /// `scrutiny forge bulk` runs several tickets at once — each on its own
-    /// branch + worktree, concurrently, with the commit/PR conclude serialized
-    /// on this terminal. Bulk flags (after `bulk`): `--dry` (no agents, no PR,
-    /// offers to delete the branches/worktrees at the end), `--concurrency N`
-    /// (cap, default `forge.bulk_concurrency`), `-y`/`--yes` (headless: keys from
-    /// stdin, auto commit + draft PR).
-    ///
-    /// `scrutiny forge all <jira-url…>` is an alias for `scrutiny forge-all`.
-    #[command(hide = true)]
+    /// `scrutiny forge --here [ticket]` implements in the current folder
+    /// (prompts unless `-y` / `--from-json`).
     Forge {
         #[arg(long)]
         cwd: Option<PathBuf>,
-        /// URL, issue key/number, or description
+        /// Implement in the current working tree (no assign / worktree / tab)
+        #[arg(long, default_value_t = false)]
+        here: bool,
+        /// URL, issue key/number, or description (`--here` only)
         #[arg(long)]
         input: Option<String>,
-        /// Positional alias for --input
+        /// Jira URLs/keys (multi-ticket), or ticket / description with `--here`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
         #[arg(long, default_value_t = false)]
@@ -382,33 +378,9 @@ enum Commands {
         client: Option<String>,
         #[arg(long)]
         title: Option<String>,
-        /// Skip menus; pass ForgeAnswers JSON
+        /// Skip menus; pass ForgeAnswers JSON (`--here` only)
         #[arg(long)]
         from_json: Option<String>,
-    },
-    /// For each Jira URL: assign → In Progress → worktree + branch → tmux/zellij
-    /// tab → `scrutiny forge --yes` using `[forge_all]` knobs.
-    ForgeAll {
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        #[arg(long)]
-        client: Option<String>,
-        /// Jira browse URLs or keys (one or more)
-        #[arg(required = true, num_args = 1..)]
-        tickets: Vec<String>,
-    },
-    /// Internal: run one `forge bulk` item as a child driver process.
-    #[command(hide = true)]
-    ForgeBulkItem {
-        /// Path to the item plan JSON written by the orchestrator.
-        #[arg(long)]
-        item: PathBuf,
-        /// Headless (captured child, no panes, auto commit + draft PR).
-        #[arg(long, default_value_t = false)]
-        headless: bool,
-        /// Dry run: spawn no agents, guess pr.json, no real PR.
-        #[arg(long, default_value_t = false)]
-        dry: bool,
     },
     /// Fetch ticket (jira|github|gitlab|inline) → ticket JSON path
     ForgeFetch {
@@ -1000,6 +972,7 @@ fn run() -> Result<()> {
         }
         Commands::Forge {
             cwd,
+            here,
             input,
             rest,
             inline,
@@ -1010,90 +983,41 @@ fn run() -> Result<()> {
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             ensure_git_repo(&cwd)?;
-            // `scrutiny forge all <urls…>` → forge-all
-            if input.is_none() && rest.first().map(String::as_str) == Some("all") {
-                let tickets: Vec<String> = rest.into_iter().skip(1).collect();
-                if tickets.is_empty() {
-                    anyhow::bail!("forge all needs at least one Jira URL or key");
-                }
-                let paths = run_forge_all(ForgeAllInput {
+            if here {
+                let input = input.or_else(|| {
+                    if rest.is_empty() {
+                        None
+                    } else {
+                        Some(rest.join(" "))
+                    }
+                });
+                let path = run_forge(ForgeCmdInput {
                     cwd,
-                    tickets,
-                    client,
-                })?;
-                for p in paths {
-                    println!("{}", p.display());
-                }
-                return Ok(());
-            }
-            // `scrutiny forge bulk [--dry] [--concurrency N]` → bulk orchestrator.
-            if input.is_none() && rest.first().map(String::as_str) == Some("bulk") {
-                // Flags after `bulk` land in `rest` (trailing_var_arg), not their
-                // own clap fields — parse them here.
-                let dry = rest.iter().any(|t| t == "--dry");
-                let non_interactive = yes
-                    || rest
-                        .iter()
-                        .any(|t| t == "--yes" || t == "-y");
-                let concurrency = rest
-                    .iter()
-                    .position(|t| t == "--concurrency")
-                    .and_then(|i| rest.get(i + 1))
-                    .and_then(|v| v.parse::<usize>().ok());
-                let sessions = run_forge_bulk(ForgeBulkInput {
-                    cwd,
-                    client,
+                    input,
+                    inline,
                     source,
-                    non_interactive,
-                    concurrency,
-                    dry,
+                    client,
+                    title,
+                    from_json,
+                    non_interactive: yes,
                 })?;
-                for p in sessions {
-                    println!("{}", p.display());
-                }
+                println!("{}", path.display());
                 return Ok(());
             }
-            let input = input.or_else(|| {
-                if rest.is_empty() {
-                    None
-                } else {
-                    Some(rest.join(" "))
-                }
-            });
-            let path = run_forge(ForgeCmdInput {
-                cwd,
-                input,
-                inline,
-                source,
-                client,
-                title,
-                from_json,
-                non_interactive: yes,
-            })?;
-            println!("{}", path.display());
-        }
-        Commands::ForgeAll {
-            cwd,
-            client,
-            tickets,
-        } => {
-            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
-            ensure_git_repo(&cwd)?;
+            if rest.is_empty() {
+                anyhow::bail!(
+                    "forge needs at least one Jira URL or key \
+                     (or pass --here to implement in the current folder)"
+                );
+            }
             let paths = run_forge_all(ForgeAllInput {
                 cwd,
-                tickets,
+                tickets: rest,
                 client,
             })?;
             for p in paths {
                 println!("{}", p.display());
             }
-        }
-        Commands::ForgeBulkItem {
-            item,
-            headless,
-            dry,
-        } => {
-            run_forge_bulk_item(&item, headless, dry)?;
         }
         Commands::ForgeFetch {
             cwd,

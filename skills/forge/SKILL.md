@@ -1,10 +1,11 @@
 ---
 name: forge
 description: >-
-  Implement a ticket or description. Prefer `scrutiny forge` (fetch mirror,
-  fcli, knobs, TDD plan confirm, single|team implement). Or chain forge-fetch /
-  plan-write / context / brief. Reuses scrutiny probe for post-impl.
-argument-hint: "[URL | issue-id | --inline description | all <jira-urls…>]"
+  Implement a ticket or description. Prefer `scrutiny forge` for multi-ticket
+  Jira kickoff (assign / worktree / tab), or `forge --here` for cwd implement.
+  Or chain forge-fetch / plan-write / context / brief. Reuses scrutiny probe
+  for post-impl.
+argument-hint: "[jira-urls… | --here URL | --inline description]"
 ---
 
 # Forge
@@ -14,18 +15,19 @@ argument-hint: "[URL | issue-id | --inline description | all <jira-urls…>]"
 ```bash
 SKILL_ROOT="<absolute-path-to-folder-containing-this-SKILL.md>"
 SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
-"$SCRUTINY_BIN" forge [--cwd <repo-root>] [--client <client>] <URL|KEY|#N>
-# or: forge --inline --input "<desc>"
-# Multi Jira kickoff (assign + In Progress + worktree + tab + forge --yes):
-"$SCRUTINY_BIN" forge-all <jira-url-or-key>…
-# alias: forge all …
+# Multi-ticket: assign + In Progress + worktree + tab + forge --here --yes
+"$SCRUTINY_BIN" forge [--cwd <repo-root>] [--client <client>] <jira-url-or-key>…
+# Current folder implement (prompts unless -y / --from-json):
+"$SCRUTINY_BIN" forge --here [--cwd <repo-root>] [--client <client>] <URL|KEY|#N>
+# or: forge --here --inline --input "<desc>"
 ```
 
-That requires the source CLI (`acli` / `gh` / `glab`) with install URLs on miss,
-mirrors ticket under `.scrutiny/forge-<id>/`, exports Figma via `fcli` when links
-exist, asks spawn (default **single**)|team, playwright (skip if missing), TDD,
-coverage, e2e → **scaffolding** (guess+confirm prefix, optional branch/worktree)
-→ optional test-plan confirm → optional LOC estimate gate (`max_loc`) → implement agent.
+Multi-ticket uses `[forge.all]` knobs. `--here` requires the source CLI
+(`acli` / `gh` / `glab`) with install URLs on miss, mirrors ticket under
+`.scrutiny/forge-<id>/`, exports Figma via `fcli` when links exist, asks spawn
+(default **single**)|team, playwright (skip if missing), TDD, coverage, e2e →
+**scaffolding** (guess+confirm prefix, optional branch/worktree) → optional
+test-plan confirm → optional LOC estimate gate (`max_loc`) → implement agent.
 
 **Temporary default** (`forge.skip_verify` / `forge.skip_ship` = true): stop after
 implement — no host verify gate (tests/lint/pre-push), no commit, no draft PR.
@@ -43,7 +45,7 @@ Implement agent must write `.scrutiny/forge-<id>/pr.json`
 (`pr_title`, `pr_body` citing the ticket URL only, `commit_subject` starting with
 the chosen prefix, `commit_body`), delete non-implementation junk (e.g. playwright
 temp media), and must **not** create branches, commit, push, or open a PR. When
-ship is enabled, after the agent exits `scrutiny forge` confirms the commit
+ship is enabled, after the agent exits `scrutiny forge --here` confirms the commit
 subject, commits, then on a TTY asks whether to create a **draft PR**. `--yes` /
 non-TTY skips prompts and uses the defaults.
 
@@ -51,34 +53,12 @@ Sibling of `/scrutiny` and `/parley` (same binary, `~/.scrutiny/config.toml`).
 
 ## Usage
 
-- `/forge <Jira-URL|KEY-123>` — Jira (`acli`)
-- `/forge <GitHub-issue-URL|#N|N>` — GitHub (`gh`)
-- `/forge <GitLab-issue-URL>` — GitLab (`glab`)
-- `/forge --inline <description>` — no remote ticket
-- `/forge` — ask for URL or description
-- Branch name with `PROJ-123` → Jira fetch when no arg
-
-## Bulk mode
-
-```bash
-"$SCRUTINY_BIN" forge bulk [--dry] [--concurrency <N>] [--yes]
-```
-
-Many tickets in one run, each on its own branch + worktree, run concurrently.
-
-- Collect: menu (**Paste ticket URL/key** / **Done**), one at a time. Done ends; Done on first prompt exits doing nothing.
-- Validate all (fetch + complexity), then ask **same settings for all** or **per-item** (same questions as single forge).
-- Per item: new branch + git worktree `<type>-<projectkey>-<number>` (e.g. `feat-nero-8729`).
-- Concurrency cap `forge.bulk_concurrency` (default **3**); override `--concurrency <N>`.
-- Non-headless (claude/cursor + tmux/zellij/iTerm2/Terminal.app): each item = own terminal container named by ticket key; panes named by role (PO/developer/tester/reviewer/evangelist/tdd-plan/implement) in that item's worktree; TDD plan validated in that item's pane.
-- Ship step (confirm commit subject, PR title/body, draft PR) serialized on main terminal, one item at a time.
-- Requires a git repo. tmux most reliable; Terminal.app best-effort.
-
-Flags:
-
-- `--yes` — headless: newline-separated keys/URLs from stdin, auto-answer from complexity, auto-commit + auto draft PR, no prompts.
-- `--dry` — full flow, **no** agents, **no** real PR. Branches + worktrees still created; panes shown but never auto-closed; offered to delete created branches + worktrees at end.
-- `--concurrency <N>` — override cap.
+- `/forge <jira-urls…>` — multi-ticket kickoff
+- `/forge --here <Jira-URL|KEY-123>` — cwd implement (Jira / `acli`)
+- `/forge --here <GitHub-issue-URL|#N|N>` — GitHub (`gh`)
+- `/forge --here <GitLab-issue-URL>` — GitLab (`glab`)
+- `/forge --here --inline <description>` — no remote ticket
+- `/forge --here` — ask for URL or description / detect from branch
 
 ## Binary
 

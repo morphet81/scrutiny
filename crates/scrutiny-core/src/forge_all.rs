@@ -1,5 +1,5 @@
-//! `scrutiny forge-all` — for each Jira URL: assign → In Progress → worktree →
-//! tmux/zellij tab → `scrutiny forge --yes` with config knobs.
+//! Multi-ticket `scrutiny forge` — for each Jira URL: assign → In Progress → worktree →
+//! tmux/zellij tab → `scrutiny forge --here --yes` with config knobs.
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
@@ -49,7 +49,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     let fa = cfg.forge.all.clone();
 
     if input.tickets.is_empty() {
-        bail!("forge-all needs at least one Jira URL or key");
+        bail!("forge needs at least one Jira URL or key");
     }
 
     // Fail before any assign / worktree / tab work.
@@ -71,26 +71,26 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
         },
     )?;
 
-    let repo = git::discover_repo(&cwd).context("forge-all needs a git repo")?;
+    let repo = git::discover_repo(&cwd).context("forge needs a git repo")?;
     let parent = resolve_worktree_parent(&repo.root, &fa.worktree_parent_folder)?;
 
-    // Always try to open tmux/zellij tabs (forge-all's point), even when
+    // Always try to open tmux/zellij tabs (multi-ticket forge point), even when
     // `headless = true` for spawned implement agents.
-    let term = resolve_terminal(false, &detected.client, "forge-all")
+    let term = resolve_terminal(false, &detected.client, "forge")
         .or_else(|| force_multiplexer_terminal());
 
     let scrutiny_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scrutiny"));
     let from_json = forge_all_answers_json(&fa, &detected.client)?;
 
     eprintln!(
-        "scrutiny forge-all: {} ticket(s), prefix={}, worktrees under {}",
+        "scrutiny forge: {} ticket(s), prefix={}, worktrees under {}",
         input.tickets.len(),
         fa.branch_prefix,
         parent.display()
     );
     if zellij_needs_serial_launches() {
         eprintln!(
-            "scrutiny forge-all: zellij lacks --near-current-pane/--tab-id \
+            "scrutiny forge: zellij lacks --near-current-pane/--tab-id \
              (upgrade to ≥0.44) — launching forge drivers one at a time to avoid session thrash"
         );
     }
@@ -124,7 +124,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     }
 
     if prepared.is_empty() {
-        bail!("forge-all: no tickets prepared");
+        bail!("forge: no tickets prepared");
     }
 
     let paths = run_forge_pool(&prepared, &scrutiny_bin, term.is_none())?;
@@ -145,11 +145,11 @@ fn prepare_one(
 ) -> Result<PreparedItem> {
     let key = jira_key_from_url_or_raw(raw)?;
 
-    eprintln!("scrutiny forge-all [{key}]: assign → {}", fa.jira_assignee);
+    eprintln!("scrutiny forge [{key}]: assign → {}", fa.jira_assignee);
     jira_assign(cwd, &key, &fa.jira_assignee)?;
 
     eprintln!(
-        "scrutiny forge-all [{key}]: transition → {}",
+        "scrutiny forge [{key}]: transition → {}",
         fa.in_progress_status
     );
     jira_transition(cwd, &key, &fa.in_progress_status)?;
@@ -226,7 +226,7 @@ fn run_init_commands(worktree: &Path, commands: &[String]) -> Result<()> {
             continue;
         }
         eprintln!(
-            "scrutiny forge-all: init-commands[{i}] in {} — {cmd}",
+            "scrutiny forge: init-commands[{i}] in {} — {cmd}",
             worktree.display()
         );
         let status = Command::new("sh")
@@ -300,7 +300,7 @@ fn run_forge_pool(
                 paths[idx] = p;
                 done += 1;
                 eprintln!(
-                    "scrutiny forge-all: finished {} ({}/{})",
+                    "scrutiny forge: finished {} ({}/{})",
                     items[idx].key,
                     done,
                     items.len()
@@ -309,20 +309,20 @@ fn run_forge_pool(
             Ok((idx, Err(e))) => {
                 done += 1;
                 let msg = format!("{}: {e:#}", items[idx].key);
-                eprintln!("scrutiny forge-all: FAIL {msg}");
+                eprintln!("scrutiny forge: FAIL {msg}");
                 if first_err.is_none() {
                     first_err = Some(msg);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                bail!("forge-all: timed out waiting for forge workers");
+                bail!("forge: timed out waiting for forge workers");
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
     if let Some(e) = first_err {
-        bail!("forge-all completed with failures — first: {e}");
+        bail!("forge completed with failures — first: {e}");
     }
     Ok(paths
         .into_iter()
@@ -339,6 +339,7 @@ fn run_forge_headless(
 ) -> Result<()> {
     let status = Command::new(bin)
         .arg("forge")
+        .arg("--here")
         .arg("--yes")
         .arg("--from-json")
         .arg(from_json)
@@ -399,7 +400,7 @@ fn write_forge_script(
     };
     let body = format!(
         "#!/usr/bin/env bash\nset -euo pipefail\ncd '{wt}'\n{surface}\
-         '{bin}' forge --yes --from-json '{fj}' --cwd '{wt}' '{key}'\n\
+         '{bin}' forge --here --yes --from-json '{fj}' --cwd '{wt}' '{key}'\n\
          printf 'ok\\n' > '{done}'\n",
         wt = esc(&worktree.display().to_string()),
         surface = surface_export,
@@ -582,9 +583,9 @@ mod tests {
         let body = std::fs::read_to_string(&script).unwrap();
         assert!(
             !body.contains("SCRUTINY_FORCE_HEADLESS"),
-            "forge-all must not force headless (custom models need visible/non-first-output path)"
+            "forge must not force headless (custom models need visible/non-first-output path)"
         );
-        assert!(body.contains("forge --yes --from-json"));
+        assert!(body.contains("forge --here --yes --from-json"));
         assert!(
             body.contains(ITEM_SURFACE_ENV),
             "driver must export item surface for nested forge: {body}"

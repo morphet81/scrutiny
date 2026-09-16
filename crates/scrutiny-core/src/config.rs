@@ -59,7 +59,7 @@ pub struct Config {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimeoutsConfig {
     /// Base wall for one agent. Unset → 600. Every stage below with no explicit
-    /// value derives from this (implement/fix ×2, non-headless ×3, bulk item ×8).
+    /// value derives from this (implement/fix ×2, non-headless ×3, forge item ×8).
     #[serde(default)]
     pub agent_wall_secs: Option<u64>,
     /// How often "still running" ticks print. Unset → 15.
@@ -96,7 +96,7 @@ pub struct TimeoutsConfig {
     /// Verify-gate fix agent.
     #[serde(default)]
     pub forge_fix_wall_secs: Option<u64>,
-    /// One item of a `forge-bulk` run.
+    /// One multi-ticket forge item (worktree tab / headless child).
     #[serde(default)]
     pub forge_bulk_item_wall_secs: Option<u64>,
     /// Unset → falls back to `[parley] agent_wall_secs`.
@@ -408,9 +408,6 @@ pub struct ForgeConfig {
     /// Headless branch behavior: "auto" (follow detection) | "never" (use current).
     #[serde(default = "default_branch_headless")]
     pub branch_headless: String,
-    /// Max items `forge bulk` runs concurrently (CLI `--concurrency` overrides).
-    #[serde(default = "default_bulk_concurrency")]
-    pub bulk_concurrency: usize,
     /// Optional. When set, a dedicated headless agent writes the PR description
     /// from this prompt + the diff, overriding the implement agent's pr_body.
     #[serde(default)]
@@ -455,9 +452,6 @@ fn default_verify_loops() -> u32 {
 }
 fn default_branch_headless() -> String {
     "auto".into()
-}
-fn default_bulk_concurrency() -> usize {
-    3
 }
 
 /// Common binary / opaque extensions excluded from forge LOC counting by default.
@@ -504,7 +498,6 @@ impl Default for ForgeConfig {
             skip_ship: true,
             enable_branch: true,
             branch_headless: default_branch_headless(),
-            bulk_concurrency: default_bulk_concurrency(),
             pr_description_prompt: None,
             max_loc: None,
             loc_exclude_test: true,
@@ -516,7 +509,7 @@ impl Default for ForgeConfig {
     }
 }
 
-/// Defaults for `scrutiny forge-all` (list of Jira URLs → assign / progress / worktree / forge).
+/// Defaults for multi-ticket `scrutiny forge` (Jira URLs → assign / progress / worktree / implement).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeAllConfig {
     /// Prefix for new branches (`feat-nero-123`).

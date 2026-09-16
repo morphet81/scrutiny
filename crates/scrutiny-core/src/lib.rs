@@ -9,7 +9,6 @@ pub mod eval;
 pub mod findings;
 pub mod forge;
 pub mod forge_all;
-pub mod forge_bulk;
 pub mod forge_cmd;
 pub mod gh;
 pub mod git;
@@ -58,7 +57,6 @@ pub use forge::{
     ForgePlanWriteInput, ForgeSessionPlan, TicketReport,
 };
 pub use forge_all::{run_forge_all, ForgeAllInput};
-pub use forge_bulk::{run_forge_bulk, run_forge_bulk_item, ForgeBulkInput};
 pub use forge_cmd::{run_forge, ForgeCmdInput};
 pub use info_cmd::{run_info, InfoCmdInput};
 pub use map::{run_map, MapReport};

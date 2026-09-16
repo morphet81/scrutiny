@@ -404,10 +404,10 @@ pub fn zellij_needs_serial_launches() -> bool {
     !caps.near_current_pane && !caps.tab_id
 }
 
-/// Env var pointing at a JSON [`ItemSurface`] for nested `scrutiny forge` (forge-all / bulk).
+/// Env var pointing at a JSON [`ItemSurface`] for nested `scrutiny forge --here`.
 pub const ITEM_SURFACE_ENV: &str = "SCRUTINY_ITEM_SURFACE";
 
-/// Load a per-item surface written by forge-all / bulk drivers, if present.
+/// Load a per-item surface written by multi-ticket forge drivers, if present.
 pub fn load_item_surface_from_env() -> Option<ItemSurface> {
     let path = std::env::var(ITEM_SURFACE_ENV).ok()?;
     if path.is_empty() {
@@ -1222,7 +1222,7 @@ fn iterm_open_script(key: &str, cwd: &str) -> String {
     format!(
         "tell application \"iTerm\"\n\
          \tset w to (create window with default profile)\n\
-         \ttell current session of w to write text \"cd '{cwd}'; clear; echo 'scrutiny forge bulk: {key}'\"\n\
+         \ttell current session of w to write text \"cd '{cwd}'; clear; echo 'scrutiny forge: {key}'\"\n\
          \treturn id of w\n\
          end tell"
     )
@@ -1243,7 +1243,7 @@ fn iterm_launch_script(window_id: &str, role: &str, run_cmd: &str) -> String {
 fn apple_open_script(key: &str, cwd: &str) -> String {
     format!(
         "tell application \"Terminal\"\n\
-         \tset w to do script \"cd '{cwd}'; clear; echo 'scrutiny forge bulk: {key}'\"\n\
+         \tset w to do script \"cd '{cwd}'; clear; echo 'scrutiny forge: {key}'\"\n\
          \tset custom title of w to \"{key}\"\n\
          \treturn id of (window 1 whose tabs contains w)\n\
          end tell"

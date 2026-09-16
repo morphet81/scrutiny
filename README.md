@@ -80,41 +80,25 @@ Global **`-y` / `--yes`**: every command that prompts takes the suggested/defaul
 ### Forge — implement
 
 ```bash
+# Multi-ticket (default): assign → In Progress → worktree → tab → implement
 scrutiny forge PROJ-123
-scrutiny forge "https://…/browse/PROJ-123"
-scrutiny forge --inline --input "Add dark mode toggle"
+scrutiny forge https://…/browse/PROJ-1 https://…/browse/PROJ-2
+
+# Current folder only (prompts unless -y / --from-json)
+scrutiny forge --here PROJ-123
+scrutiny forge --here --inline --input "Add dark mode toggle"
 ```
 
-Flow: fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
-
-**Bulk** (many tickets, each on its own branch/worktree):
-
-```bash
-scrutiny forge bulk
-scrutiny forge bulk --dry
-scrutiny forge bulk -y < tickets.txt
-scrutiny forge bulk --concurrency 5
-```
-
-- `-y` / `--yes` — stdin keys/URLs, no prompts, auto draft PRs  
-- `--dry` — no agents / no real PRs; still creates worktrees; offers cleanup at end  
-- `--concurrency N` — overrides `forge.bulk_concurrency`
-
-### Forge-all — many Jira tickets
-
-```bash
-scrutiny forge-all https://…/browse/PROJ-1 https://…/browse/PROJ-2
-scrutiny forge all PROJ-1 PROJ-2
-```
-
-For each ticket (see `[forge_all]` in config):
+**Default `forge <jira…>`** (see `[forge.all]` / `[forge_all]` in config):
 
 1. Assign (`jira_assignee`, default `@me`)
 2. Transition to `in_progress_status` (default `In Progress`)
 3. Create branch `{branch_prefix}-…` + worktree under `worktree_parent_folder`
 4. Open a tmux/zellij tab in that worktree
-5. Run `[forge_all].init_commands` in the worktree (if any)
-6. Run `scrutiny forge --yes` with knobs from `[forge_all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`)
+5. Run `[forge.all].init_commands` in the worktree (if any)
+6. Run `scrutiny forge --here --yes` with knobs from `[forge.all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`)
+
+**`--here`:** fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement in the current folder. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
 
 ### Info — colorful ticket card
 
@@ -150,7 +134,7 @@ scrutiny parley stack 2
 - Requires `gh stack`
 
 Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
-Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback and **`forge-all` runs drivers one at a time**. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux non-bulk splits into the origin window (`$TMUX_PANE`).
+Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback and **multi-ticket `forge` runs drivers one at a time**. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
 
@@ -362,12 +346,11 @@ Bounded agent exploration beyond the pack.
 | `skip_ship` | `true` (temporary) | Skip commit + draft PR; use `scrutiny pr` after; set `false` to restore |
 | `prepush_cmd` | unset | Override pre-push checks in the verify gate; empty → `git hook run pre-push` if a hook exists |
 | `branch_headless` | `"auto"` | `"auto"` follow detection \| `"never"` stay on current branch |
-| `bulk_concurrency` | `3` | Max concurrent `forge bulk` items (`--concurrency` overrides) |
 | `pr_description_prompt` | unset | If set, dedicated agent writes PR body from this prompt + diff |
 
-### `[forge_all]`
+### `[forge_all]` / `[forge.all]`
 
-Used by `scrutiny forge-all` / `scrutiny forge all`.
+Used by multi-ticket `scrutiny forge <jira…>`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -447,7 +430,7 @@ Seconds. `agent_wall_secs` is the base; unset stages derive from it (`0` = unset
 | `forge_pr_description_wall_secs` | base | PR description agent |
 | `forge_implement_wall_secs` | base ×2 (`1200`) | Implement agent |
 | `forge_fix_wall_secs` | base ×2 (`1200`) | Verify-gate fix agent |
-| `forge_bulk_item_wall_secs` | base ×8 (`4800`) | One bulk-forge item |
+| `forge_bulk_item_wall_secs` | base ×8 (`4800`) | One multi-ticket forge item |
 | `parley_agent_wall_secs` | base | Member / verifier / evangelist |
 | `parley_prepush_plan_wall_secs` | `120` | Pre-push plan agent (split log → chunks) |
 | `parley_prepush_fix_wall_secs` | base ×2 (`1200`) | Pre-push fix agent (per chunk) |
