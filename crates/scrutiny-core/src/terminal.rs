@@ -353,6 +353,7 @@ struct ZellijCaps {
     tab_id: bool,
     no_focus: bool,
     current_tab_info: bool,
+    list_panes: bool,
 }
 
 fn zellij_caps() -> ZellijCaps {
@@ -391,6 +392,7 @@ fn probe_zellij_caps() -> ZellijCaps {
         tab_id: new_pane_help.contains("--tab-id") || new_pane_help.contains("tab-id"),
         no_focus: new_pane_help.contains("no-focus") || run_help.contains("no-focus"),
         current_tab_info: action_help.contains("current-tab-info"),
+        list_panes: action_help.contains("list-panes"),
     }
 }
 
@@ -597,16 +599,7 @@ fn zellij_dump_layout() -> Option<String> {
 }
 
 fn focused_tab_name_from_layout() -> Option<String> {
-    let layout = zellij_dump_layout()?;
-    for line in layout.lines() {
-        let t = line.trim();
-        if t.starts_with("tab ") && t.contains("focus=true") {
-            if let Some(name) = tab_name_from_header(t) {
-                return Some(name);
-            }
-        }
-    }
-    None
+    focused_tab_name_from_layout_str(&zellij_dump_layout()?)
 }
 
 /// Parse dump-layout for the tab that hosts a pane whose cwd matches `cwd`.
@@ -1134,16 +1127,56 @@ fn close_tmux_sibling_panes() -> Result<u32> {
 }
 
 fn close_zellij_sibling_panes() -> Result<u32> {
-    // focus-next + close-pane closes the *other* pane and returns focus here.
-    let Some(initial) = zellij_pane_count_focused_tab() else {
+    // Prefer list-panes --json: close other *terminal* panes in the same tab by
+    // id — never focus-next across the session (that wiped Main / Scrutiny).
+    if zellij_caps().list_panes {
+        if let Some(raw) = zellij_list_panes_json() {
+            if let Some(ids) = sibling_terminal_pane_ids_from_json(&raw) {
+                let mut closed = 0u32;
+                for id in ids {
+                    let pane = format!("terminal_{id}");
+                    run_zellij_argv(&[
+                        "action".into(),
+                        "close-pane".into(),
+                        "--pane-id".into(),
+                        pane,
+                    ])
+                    .with_context(|| format!("zellij close-pane --pane-id terminal_{id}"))?;
+                    closed += 1;
+                }
+                return Ok(closed);
+            }
+        }
+    }
+
+    // Legacy fallback: focused-tab dump-layout count + focus-next/close.
+    let layout = match zellij_dump_layout() {
+        Some(l) => l,
+        None => return Ok(0),
+    };
+    let Some(initial) = pane_count_in_focused_tab(&layout) else {
         return Ok(0);
     };
     if initial <= 1 {
         return Ok(0);
     }
+    let origin_tab = focused_tab_name_from_layout_str(&layout);
     let mut closed = 0u32;
-    for _ in 0..32 {
-        let n = zellij_pane_count_focused_tab().unwrap_or(1);
+    let max_close = (initial - 1).min(32);
+    for _ in 0..max_close {
+        let layout = match zellij_dump_layout() {
+            Some(l) => l,
+            None => break,
+        };
+        if let (Some(want), Some(got)) = (&origin_tab, focused_tab_name_from_layout_str(&layout)) {
+            if got != *want {
+                bail!(
+                    "zellij sibling close aborted: focused tab `{got}` != start `{want}` \
+                     (refusing to close panes in other tabs)"
+                );
+            }
+        }
+        let n = pane_count_in_focused_tab(&layout).unwrap_or(1);
         if n <= 1 {
             break;
         }
@@ -1155,28 +1188,94 @@ fn close_zellij_sibling_panes() -> Result<u32> {
     Ok(closed)
 }
 
-fn zellij_pane_count_focused_tab() -> Option<usize> {
-    let layout = zellij_dump_layout()?;
-    // Prefer explicit pane id markers; fall back to `pane ` nodes.
-    let count = layout
-        .matches("pane_id")
-        .count()
-        .max(layout.matches("PaneId").count());
-    if count > 0 {
-        return Some(count);
+fn zellij_list_panes_json() -> Option<String> {
+    let mut args = zellij_session_args();
+    args.extend(["action".into(), "list-panes".into(), "--json".into()]);
+    let out = Command::new("zellij").args(&args).output().ok()?;
+    if !out.status.success() {
+        return None;
     }
-    let rough = layout
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            t.starts_with("pane ") || t.starts_with("pane\t") || t == "pane"
-        })
-        .count();
-    if rough > 0 {
-        Some(rough)
-    } else {
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.trim().is_empty() {
         None
+    } else {
+        Some(text)
     }
+}
+
+/// Non-plugin, non-floating terminal pane ids in the focused terminal's tab,
+/// excluding the focused pane itself.
+fn sibling_terminal_pane_ids_from_json(raw: &str) -> Option<Vec<u64>> {
+    let panes: Vec<serde_json::Value> = serde_json::from_str(raw).ok()?;
+    let focused = panes.iter().find(|p| {
+        p.get("is_plugin").and_then(|v| v.as_bool()) == Some(false)
+            && p.get("is_floating").and_then(|v| v.as_bool()) != Some(true)
+            && p.get("is_focused").and_then(|v| v.as_bool()) == Some(true)
+    })?;
+    let tab_id = focused.get("tab_id")?;
+    let focused_id = focused.get("id").and_then(|v| v.as_u64())?;
+    let mut ids: Vec<u64> = panes
+        .iter()
+        .filter(|p| {
+            p.get("tab_id") == Some(tab_id)
+                && p.get("is_plugin").and_then(|v| v.as_bool()) == Some(false)
+                && p.get("is_floating").and_then(|v| v.as_bool()) != Some(true)
+                && p.get("id").and_then(|v| v.as_u64()) != Some(focused_id)
+        })
+        .filter_map(|p| p.get("id").and_then(|v| v.as_u64()))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Some(ids)
+}
+
+/// Panes inside the dump-layout tab marked `focus=true` only (not the whole session).
+fn pane_count_in_focused_tab(layout: &str) -> Option<usize> {
+    let mut in_focused = false;
+    let mut count = 0usize;
+    let mut saw_focused_tab = false;
+    for line in layout.lines() {
+        let t = line.trim();
+        if t.starts_with("tab ") {
+            in_focused = t.contains("focus=true");
+            if in_focused {
+                saw_focused_tab = true;
+            }
+            continue;
+        }
+        if !in_focused {
+            continue;
+        }
+        if is_layout_pane_line(t) {
+            count += 1;
+        }
+    }
+    if !saw_focused_tab {
+        return None;
+    }
+    Some(count)
+}
+
+fn is_layout_pane_line(t: &str) -> bool {
+    // KDL dump: `pane …` / bare `pane` / `pane{`. Not `tab` / `panel` / attrs.
+    let t = t.trim_start();
+    let Some(rest) = t.strip_prefix("pane") else {
+        return t.starts_with("PaneId");
+    };
+    rest.is_empty()
+        || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '=')
+}
+
+fn focused_tab_name_from_layout_str(layout: &str) -> Option<String> {
+    for line in layout.lines() {
+        let t = line.trim();
+        if t.starts_with("tab ") && t.contains("focus=true") {
+            if let Some(name) = tab_name_from_header(t) {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 /// Close the current multiplexer tab / window / session when no [`ItemSurface`] is known.
@@ -1606,5 +1705,59 @@ layout {
 "#;
         let origin = origin_tab_from_layout(layout, Path::new("/Users/me/dev/scrutiny"));
         assert_eq!(origin.as_deref(), Some("Right"));
+    }
+
+    #[test]
+    fn pane_count_in_focused_tab_ignores_other_tabs() {
+        let layout = r#"
+layout {
+    tab name="Main" {
+        pane cwd="/a"
+        pane cwd="/b"
+        pane cwd="/c"
+    }
+    tab name="Scrutiny" {
+        pane cwd="/s1"
+        pane cwd="/s2"
+    }
+    tab name="chore-release" focus=true {
+        pane cwd="/wt" focus=true size="50%"
+        pane command="agent" cwd="/wt" size="50%"
+    }
+}
+"#;
+        assert_eq!(pane_count_in_focused_tab(layout), Some(2));
+        assert_eq!(
+            focused_tab_name_from_layout_str(layout).as_deref(),
+            Some("chore-release")
+        );
+    }
+
+    #[test]
+    fn pane_count_in_focused_tab_none_without_focus() {
+        let layout = r#"
+layout {
+    tab name="Main" {
+        pane cwd="/a"
+    }
+}
+"#;
+        assert_eq!(pane_count_in_focused_tab(layout), None);
+    }
+
+    #[test]
+    fn sibling_terminal_pane_ids_same_tab_only() {
+        let raw = r#"
+[
+  {"id": 1, "is_plugin": false, "is_floating": false, "is_focused": false, "tab_id": 0, "tab_name": "Main"},
+  {"id": 2, "is_plugin": false, "is_floating": false, "is_focused": false, "tab_id": 0, "tab_name": "Main"},
+  {"id": 10, "is_plugin": true, "is_floating": false, "is_focused": false, "tab_id": 1, "tab_name": "task"},
+  {"id": 11, "is_plugin": false, "is_floating": false, "is_focused": true, "tab_id": 1, "tab_name": "task"},
+  {"id": 12, "is_plugin": false, "is_floating": false, "is_focused": false, "tab_id": 1, "tab_name": "task"},
+  {"id": 13, "is_plugin": false, "is_floating": true, "is_focused": false, "tab_id": 1, "tab_name": "task"},
+  {"id": 20, "is_plugin": false, "is_floating": false, "is_focused": false, "tab_id": 2, "tab_name": "Scrutiny"}
+]
+"#;
+        assert_eq!(sibling_terminal_pane_ids_from_json(raw), Some(vec![12]));
     }
 }
