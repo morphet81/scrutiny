@@ -1046,7 +1046,8 @@ fn build_evangelist_prompt(plan: &ParleyPlan, _comments: &ParleyCommentsFile) ->
 const FIXES_PROTOCOL: &str = "\
 ## Required output
 
-Update the fixes JSON file (read-merge-write; keep other members' entries). For EACH assigned thread id, ensure an object with:
+Update the fixes JSON file (read-merge-write; keep other members' entries). \
+Keep top-level `version` and `pr_number` — never strip them. For EACH assigned thread id, ensure an object with:
 
 ```json
 {

@@ -37,6 +37,9 @@ pub struct FixEntry {
 pub struct ParleyFixesFile {
     #[serde(default = "default_version")]
     pub version: u32,
+    /// Agents often rewrite the file and drop this — tolerate missing and recover
+    /// from `.scrutiny/<pr>/parley-fixes.json` on load.
+    #[serde(default)]
     pub pr_number: u64,
     pub fixes: Vec<FixEntry>,
 }
@@ -83,7 +86,24 @@ pub fn init_fixes_file(path: &Path, pr_number: u64) -> Result<()> {
 
 pub fn load_fixes(path: &Path) -> Result<ParleyFixesFile> {
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    let mut file: ParleyFixesFile =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    if file.pr_number == 0 {
+        if let Some(n) = pr_number_from_fixes_path(path) {
+            file.pr_number = n;
+        }
+    }
+    Ok(file)
+}
+
+/// `.scrutiny/<pr>/parley-fixes.json` → `<pr>` when numeric.
+fn pr_number_from_fixes_path(path: &Path) -> Option<u64> {
+    path.parent()?
+        .file_name()?
+        .to_str()?
+        .parse::<u64>()
+        .ok()
+        .filter(|&n| n > 0)
 }
 
 pub fn save_fixes(path: &Path, file: &ParleyFixesFile) -> Result<()> {
@@ -337,6 +357,23 @@ Done.
         let legacy = r#"{"pr_number":1,"fixes":[{"comment_id":"x","addressed":true}]}"#;
         let f: ParleyFixesFile = serde_json::from_str(legacy).unwrap();
         assert!(!f.fixes[0].stub);
+    }
+
+    #[test]
+    fn load_fixes_recovers_missing_pr_number_from_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pr_dir = dir.path().join("2577");
+        std::fs::create_dir_all(&pr_dir).unwrap();
+        let path = pr_dir.join("parley-fixes.json");
+        // Agent rewrite: dropped pr_number (real failure mode).
+        std::fs::write(
+            &path,
+            r#"{"version":1,"fixes":[{"comment_id":"PRRT_x","addressed":true,"reply_body":"ok"}]}"#,
+        )
+        .unwrap();
+        let file = load_fixes(&path).unwrap();
+        assert_eq!(file.pr_number, 2577);
+        assert_eq!(file.fixes.len(), 1);
     }
 
     #[test]
