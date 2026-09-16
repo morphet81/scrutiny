@@ -222,23 +222,39 @@ pub fn create_worktree(root: &Path, name: &str, dir: &Path) -> Result<PathBuf> {
 }
 
 /// Remove the worktree at `dir` (force, to drop any uncommitted files).
+/// Caller should `chdir` out of `dir` first when possible — some git builds
+/// refuse remove while the process cwd is inside the worktree.
 pub fn remove_worktree(root: &Path, dir: &Path) -> Result<()> {
     let dir_str = dir.to_string_lossy().to_string();
-    if !git_ok(root, &["worktree", "remove", "--force", &dir_str]) {
-        bail!("git worktree remove failed for {}", dir.display());
+    // Best-effort unlock (ignore failure if not locked).
+    let _ = Command::new("git")
+        .args(["worktree", "unlock", &dir_str])
+        .current_dir(root)
+        .output();
+    let out = Command::new("git")
+        .args(["worktree", "remove", "--force", &dir_str])
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("spawn git worktree remove for {}", dir.display()))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        bail!(
+            "git worktree remove --force {} failed: {detail}",
+            dir.display()
+        );
     }
     Ok(())
 }
 
 /// True when `dir` is a registered linked worktree of `root` (not the primary checkout).
 pub fn is_linked_worktree(root: &Path, dir: &Path) -> bool {
-    let Ok(want) = dir.canonicalize() else {
-        return false;
-    };
-    let Ok(main) = root.canonicalize() else {
-        return false;
-    };
-    if want == main {
+    if paths_eq(root, dir) {
         return false;
     }
     let Ok(out) = git_stdout(root, &["worktree", "list", "--porcelain"]) else {
@@ -249,11 +265,25 @@ pub fn is_linked_worktree(root: &Path, dir: &Path) -> bool {
             continue;
         };
         let p = PathBuf::from(path.trim());
-        if p.canonicalize().ok().as_ref() == Some(&want) {
+        if paths_eq(&p, dir) {
             return true;
         }
     }
     false
+}
+
+fn paths_eq(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => {
+            let sa = a.to_string_lossy();
+            let sb = b.to_string_lossy();
+            sa.trim_end_matches('/') == sb.trim_end_matches('/')
+        }
+    }
 }
 
 /// Branch names we never force-delete (primary integration branches).

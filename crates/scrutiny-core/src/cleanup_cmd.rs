@@ -40,22 +40,20 @@ pub fn run_cleanup(input: CleanupCmdInput) -> Result<()> {
     let linked = is_linked_worktree(&main_root, &worktree);
 
     eprintln!("scrutiny cleanup:");
-    eprintln!("  worktree: {}", worktree.display());
-    if linked {
-        eprintln!("  main:     {}", main_root.display());
-    } else {
-        eprintln!("  main:     (same checkout — will NOT remove worktree or branch)");
+    eprintln!("  this worktree: {}", worktree.display());
+    if !linked {
+        eprintln!("  (not a linked worktree — will NOT remove worktree or branch)");
     }
-    eprintln!("  branch:   {branch}");
+    eprintln!("  branch to drop: {branch}");
     if is_protected_branch(&branch) {
-        eprintln!("  note:     protected branch — will NOT delete it");
+        eprintln!("  note:          protected branch — will NOT delete it");
     }
     match &surface {
-        Some(s) => eprintln!("  surface:  {}", surface_label(s)),
-        None => eprintln!("  surface:  (none — will close current mux tab/window if any)"),
+        Some(s) => eprintln!("  terminal:      {}", surface_label(s)),
+        None => eprintln!("  terminal:      (none — will close current mux tab/window if any)"),
     }
 
-    if !confirm_cleanup(input.non_interactive)? {
+    if !confirm_cleanup(input.non_interactive, &branch)? {
         eprintln!("scrutiny cleanup: aborted");
         return Ok(());
     }
@@ -67,10 +65,18 @@ pub fn run_cleanup(input: CleanupCmdInput) -> Result<()> {
         Err(e) => eprintln!("scrutiny cleanup: skip sibling panes: {e:#}"),
     }
 
-    // 2–3) Linked worktree only: remove THIS path, then ITS HEAD branch.
+    // 2–3) Linked worktree only: leave the worktree cwd, remove THIS path, then
+    // ITS HEAD branch. Bail before tab close if remove fails (keep error visible).
     if linked {
         if worktree_paths_equal(&worktree, &main_root) {
             bail!("internal: refusing to remove primary checkout as a worktree");
+        }
+        // Process cwd often still sits inside the worktree — leave it first.
+        if let Err(e) = std::env::set_current_dir(&main_root) {
+            eprintln!(
+                "scrutiny cleanup: warn: could not cd to primary repo: {e} \
+                 (worktree remove may fail while cwd is inside it)"
+            );
         }
         match remove_worktree(&main_root, &worktree) {
             Ok(()) => {
@@ -90,9 +96,10 @@ pub fn run_cleanup(input: CleanupCmdInput) -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("scrutiny cleanup: skip worktree remove: {e:#}");
-                eprintln!(
-                    "scrutiny cleanup: skip branch delete (worktree still present)"
+                eprintln!("scrutiny cleanup: worktree remove FAILED: {e:#}");
+                bail!(
+                    "cleanup stopped before closing tab — worktree still present; \
+                     fix the error above and re-run"
                 );
             }
         }
@@ -115,7 +122,7 @@ pub fn run_cleanup(input: CleanupCmdInput) -> Result<()> {
     Ok(())
 }
 
-fn confirm_cleanup(non_interactive: bool) -> Result<bool> {
+fn confirm_cleanup(non_interactive: bool, branch: &str) -> Result<bool> {
     if non_interactive {
         eprintln!("scrutiny cleanup: --yes — proceeding");
         return Ok(true);
@@ -125,7 +132,9 @@ fn confirm_cleanup(non_interactive: bool) -> Result<bool> {
         bail!("scrutiny cleanup needs a TTY to confirm (or pass -y / --yes)");
     }
     Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Close panes, delete this worktree + branch, and close the tab?")
+        .with_prompt(format!(
+            "Close panes, delete worktree + branch `{branch}`, and close the tab?"
+        ))
         .default(false)
         .interact()
         .context("cleanup confirm")
