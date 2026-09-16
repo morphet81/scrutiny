@@ -4,17 +4,17 @@ use scrutiny_core::run_probe_stack;
 use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, resolve_parley_fixes_path,
-    run_agent_prompt, run_bench, run_eval, run_findings_init, run_findings_resolve,
+    run_agent_prompt, run_bench, run_cleanup, run_eval, run_findings_init, run_findings_resolve,
     run_findings_triage, run_findings_validate, run_forge, run_forge_all, run_forge_brief,
     run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map, run_pack,
     run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply, run_parley_stack,
     run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
     run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
-    BenchCmdInput, BenchWorkload, EvalInput, FindingsInitInput, ForgeAllInput, ForgeCmdInput,
-    ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers, ParleyCmdInput,
-    ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput, PlanConfirmInput,
-    PlanWriteInput, PostCommentsInput, PrCmdInput, ProbeStackInput, ReviewCmdInput,
-    ReviewSessionWriteInput, SkillsInstallInput,
+    BenchCmdInput, BenchWorkload, CleanupCmdInput, EvalInput, FindingsInitInput, ForgeAllInput,
+    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers,
+    ParleyCmdInput, ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput,
+    PlanConfirmInput, PlanWriteInput, PostCommentsInput, PrCmdInput, ProbeStackInput,
+    ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -30,6 +30,7 @@ use std::process::ExitCode;
 Main commands:
   probe   Orchestrate full probe: analyze → plan → headless agents → triage → post
   forge   Jira URLs → assign / In Progress / worktree / tab / implement (`--here` = cwd)
+  cleanup Close panes + delete this worktree/branch + close tab
   info    Show colorful Jira ticket summary (+ related GitHub PRs)
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
   bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
@@ -59,6 +60,11 @@ enum Commands {
         /// Jira browse URL or key (default: detect from current branch)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
+    },
+    /// Close sibling panes, delete this forge worktree + branch, close the tab
+    Cleanup {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
     },
     /// Evaluate change complexity vs base branch; write eval JSON; print path
     Eval {
@@ -523,6 +529,14 @@ fn run() -> Result<()> {
             };
             let key = run_info(InfoCmdInput { cwd, input })?;
             println!("{key}");
+        }
+        Commands::Cleanup { cwd } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
+            run_cleanup(CleanupCmdInput {
+                cwd,
+                non_interactive: yes,
+            })?;
         }
         Commands::Eval {
             cwd,

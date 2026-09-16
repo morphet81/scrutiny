@@ -588,7 +588,12 @@ fn zellij_dump_layout() -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn focused_tab_name_from_layout() -> Option<String> {
@@ -1082,6 +1087,128 @@ pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
                 ],
             )
             .context("Terminal.app close window")
+        }
+    }
+}
+
+/// Close every pane in the current tmux window / zellij tab except the focused one.
+/// Returns how many panes were closed. No-op (Ok(0)) outside tmux/zellij.
+pub fn close_sibling_panes() -> Result<u32> {
+    match detect_terminal() {
+        Some(TerminalContext::Tmux) => close_tmux_sibling_panes(),
+        Some(TerminalContext::Zellij) => close_zellij_sibling_panes(),
+        _ => Ok(0),
+    }
+}
+
+fn close_tmux_sibling_panes() -> Result<u32> {
+    let current = match std::env::var("TMUX_PANE") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return Ok(0),
+    };
+    let out = Command::new("tmux")
+        .args(["list-panes", "-F", "#{pane_id}"])
+        .output()
+        .context("tmux list-panes")?;
+    if !out.status.success() {
+        bail!(
+            "tmux list-panes failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut closed = 0u32;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let pane = line.trim();
+        if pane.is_empty() || pane == current {
+            continue;
+        }
+        let status = Command::new("tmux")
+            .args(["kill-pane", "-t", pane])
+            .status()
+            .with_context(|| format!("tmux kill-pane -t {pane}"))?;
+        if status.success() {
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
+fn close_zellij_sibling_panes() -> Result<u32> {
+    // focus-next + close-pane closes the *other* pane and returns focus here.
+    let Some(initial) = zellij_pane_count_focused_tab() else {
+        return Ok(0);
+    };
+    if initial <= 1 {
+        return Ok(0);
+    }
+    let mut closed = 0u32;
+    for _ in 0..32 {
+        let n = zellij_pane_count_focused_tab().unwrap_or(1);
+        if n <= 1 {
+            break;
+        }
+        run_zellij_argv(&["action".into(), "focus-next-pane".into()])
+            .context("zellij focus-next-pane")?;
+        run_zellij_argv(&["action".into(), "close-pane".into()]).context("zellij close-pane")?;
+        closed += 1;
+    }
+    Ok(closed)
+}
+
+fn zellij_pane_count_focused_tab() -> Option<usize> {
+    let layout = zellij_dump_layout()?;
+    // Prefer explicit pane id markers; fall back to `pane ` nodes.
+    let count = layout
+        .matches("pane_id")
+        .count()
+        .max(layout.matches("PaneId").count());
+    if count > 0 {
+        return Some(count);
+    }
+    let rough = layout
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("pane ") || t.starts_with("pane\t") || t == "pane"
+        })
+        .count();
+    if rough > 0 {
+        Some(rough)
+    } else {
+        None
+    }
+}
+
+/// Close the current multiplexer tab / window / session when no [`ItemSurface`] is known.
+pub fn close_current_mux_container() -> Result<()> {
+    match detect_terminal() {
+        Some(TerminalContext::Tmux) => {
+            // Forge items use a dedicated session; kill-window is enough for one window.
+            // If this is the last window, the session exits too.
+            run_argv("tmux", &["kill-window".into()]).context("tmux kill-window")
+        }
+        Some(TerminalContext::Zellij) => {
+            run_zellij_argv(&["action".into(), "close-tab".into()]).context("zellij close-tab")
+        }
+        Some(TerminalContext::ITerm2) => run_argv(
+            "osascript",
+            &[
+                "-e".to_string(),
+                "tell application \"iTerm\" to close (current window)".into(),
+            ],
+        )
+        .context("iTerm2 close current window"),
+        Some(TerminalContext::AppleTerminal) => run_argv(
+            "osascript",
+            &[
+                "-e".to_string(),
+                "tell application \"Terminal\" to close front window".into(),
+            ],
+        )
+        .context("Terminal.app close front window"),
+        None => {
+            eprintln!("scrutiny cleanup: not inside tmux/zellij/iTerm/Terminal — skip tab close");
+            Ok(())
         }
     }
 }

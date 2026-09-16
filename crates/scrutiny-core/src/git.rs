@@ -230,8 +230,45 @@ pub fn remove_worktree(root: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// True when `dir` is a registered linked worktree of `root` (not the primary checkout).
+pub fn is_linked_worktree(root: &Path, dir: &Path) -> bool {
+    let Ok(want) = dir.canonicalize() else {
+        return false;
+    };
+    let Ok(main) = root.canonicalize() else {
+        return false;
+    };
+    if want == main {
+        return false;
+    }
+    let Ok(out) = git_stdout(root, &["worktree", "list", "--porcelain"]) else {
+        return false;
+    };
+    for line in out.lines() {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let p = PathBuf::from(path.trim());
+        if p.canonicalize().ok().as_ref() == Some(&want) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Branch names we never force-delete (primary integration branches).
+pub fn is_protected_branch(name: &str) -> bool {
+    matches!(
+        name.trim(),
+        "main" | "master" | "develop" | "development" | "trunk" | "HEAD" | ""
+    )
+}
+
 /// Delete branch `name` (force). Not an error if it does not exist.
 pub fn delete_branch(root: &Path, name: &str) -> Result<()> {
+    if is_protected_branch(name) {
+        bail!("refusing to delete protected branch {name}");
+    }
     if !ref_exists(root, name) {
         return Ok(());
     }

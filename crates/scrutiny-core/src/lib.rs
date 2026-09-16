@@ -3,6 +3,7 @@
 pub mod agent_runner;
 pub mod bench_cmd;
 pub mod caveman;
+pub mod cleanup_cmd;
 pub mod config;
 pub mod diff_loc;
 pub mod eval;
@@ -42,6 +43,7 @@ pub use agent_runner::{
     build_isolated_prompt, build_team_lead_prompt, run_agent_prompt, AgentPromptInput,
 };
 pub use bench_cmd::{run_bench, BenchArm, BenchCmdInput, BenchWorkload};
+pub use cleanup_cmd::{run_cleanup, CleanupCmdInput};
 pub use config::{
     ensure_config, find_shipped_default, load_config, resolve_prompt_prefix, Config, PromptsConfig,
 };

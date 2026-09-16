@@ -100,6 +100,22 @@ scrutiny forge --here --inline --input "Add dark mode toggle"
 
 **`--here`:** fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement in the current folder. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
 
+### Cleanup — tear down forge task tab
+
+From inside a multi-ticket forge worktree / tab:
+
+```bash
+scrutiny cleanup      # confirm first
+scrutiny cleanup -y   # no prompt
+```
+
+1. Close other panes in the current tmux window / zellij tab  
+2. `git worktree remove --force` this folder (if it is a linked worktree)  
+3. Delete the task branch  
+4. Close the tab / session (uses `item-surface.json` when present)
+
+Steps that do not apply are skipped.
+
 ### Info — colorful ticket card
 
 ```bash
