@@ -309,6 +309,86 @@ pub enum ItemSurface {
 /// Intra-process half of the focus serialization (see [`focus_guard`]).
 static TERM_LAUNCH: Mutex<()> = Mutex::new(());
 
+/// Optional override for [`zellij_session_args`] (e.g. multi-ticket forge uses a
+/// dedicated session so EMFILE panics cannot wipe the user's main session).
+static ZELLIJ_SESSION_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Default dedicated session for multi-ticket `scrutiny forge` tabs.
+pub const FORGE_ZELLIJ_SESSION: &str = "scrutiny-forge";
+
+/// RAII: push a zellij `--session` override; restore previous on drop.
+pub struct ZellijSessionOverrideGuard {
+    prev: Option<String>,
+}
+
+impl Drop for ZellijSessionOverrideGuard {
+    fn drop(&mut self) {
+        if let Ok(mut g) = ZELLIJ_SESSION_OVERRIDE.lock() {
+            *g = self.prev.take();
+        }
+    }
+}
+
+/// Direct all subsequent zellij CLI calls at `name` until the guard drops.
+pub fn push_zellij_session_override(name: &str) -> ZellijSessionOverrideGuard {
+    let prev = ZELLIJ_SESSION_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|mut g| g.replace(name.to_string()));
+    ZellijSessionOverrideGuard { prev }
+}
+
+/// Create `name` as a detached zellij session if missing (own server process).
+pub fn ensure_zellij_background_session(name: &str) -> Result<()> {
+    if zellij_session_exists(name) {
+        return Ok(());
+    }
+    eprintln!("scrutiny: creating zellij session `{name}` (background)");
+    let status = Command::new("zellij")
+        .args(["attach", "--create-background", name])
+        .status()
+        .context("spawn zellij attach --create-background")?;
+    if !status.success() {
+        bail!("zellij attach --create-background {name} exited {status}");
+    }
+    // Brief settle — session name appears in list-sessions shortly after create.
+    for _ in 0..20 {
+        if zellij_session_exists(name) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    bail!("zellij session `{name}` did not appear after create-background");
+}
+
+fn zellij_session_exists(name: &str) -> bool {
+    let Ok(out) = Command::new("zellij")
+        .args(["list-sessions", "-n"])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().any(|line| zellij_session_name_from_ls_line(line) == Some(name))
+}
+
+/// Parse `zellij list-sessions -n` line → session name (`New TC Manager [Created …]`).
+fn zellij_session_name_from_ls_line(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let name = line.split(" [Created").next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 /// Serializes focus-dependent launches (zellij tab focus, Terminal.app) so a
 /// pane never lands in the wrong container when items launch concurrently.
 ///
@@ -404,6 +484,18 @@ pub fn zellij_needs_serial_launches() -> bool {
     }
     let caps = zellij_caps();
     !caps.near_current_pane && !caps.tab_id
+}
+
+/// Multi-ticket forge always serializes on zellij: even with `--tab-id`, a burst of
+/// parallel `new-pane` / nested agents can push a crowded session over EMFILE and
+/// panic the **entire** zellij server (wiping unrelated tabs).
+pub fn zellij_forge_all_serial_launches() -> bool {
+    detect_terminal() == Some(TerminalContext::Zellij)
+        || ZELLIJ_SESSION_OVERRIDE
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some()
 }
 
 /// Env var pointing at a JSON [`ItemSurface`] for nested `scrutiny forge --here`.
@@ -521,6 +613,11 @@ pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<Reso
 }
 
 fn zellij_session_args() -> Vec<String> {
+    if let Ok(g) = ZELLIJ_SESSION_OVERRIDE.lock() {
+        if let Some(s) = g.as_ref().filter(|s| !s.is_empty()) {
+            return vec!["--session".into(), s.clone()];
+        }
+    }
     match std::env::var("ZELLIJ_SESSION_NAME") {
         Ok(s) if !s.is_empty() => vec!["--session".into(), s],
         _ => Vec::new(),
@@ -1517,6 +1614,28 @@ mod tests {
     fn empty_and_unknown_are_none() {
         assert_eq!(detect_from_env(Some(""), Some(""), Some("vscode")), None);
         assert_eq!(detect_from_env(None, None, None), None);
+    }
+
+    #[test]
+    fn zellij_ls_line_parses_spaced_session_names() {
+        assert_eq!(
+            zellij_session_name_from_ls_line("New TC Manager [Created 7m 35s ago] (current)"),
+            Some("New TC Manager")
+        );
+        assert_eq!(
+            zellij_session_name_from_ls_line("Tools [Created 1day 14h 9m 2s ago]"),
+            Some("Tools")
+        );
+        assert_eq!(zellij_session_name_from_ls_line(""), None);
+    }
+
+    #[test]
+    fn zellij_session_override_wins_over_empty() {
+        let _g = push_zellij_session_override("scrutiny-forge");
+        assert_eq!(
+            zellij_session_args(),
+            vec!["--session".to_string(), "scrutiny-forge".into()]
+        );
     }
 
     #[test]

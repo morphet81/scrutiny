@@ -20,9 +20,10 @@ use crate::git;
 use crate::paths::{prepare_artifacts, slug};
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{
-    detect_terminal, launch_agent_in_surface, open_item_surface, resolve_terminal,
-    write_item_surface, zellij_needs_serial_launches, ItemSurface, ResolvedTerminal,
-    TerminalContext, ITEM_SURFACE_ENV,
+    detect_terminal, ensure_zellij_background_session, launch_agent_in_surface, open_item_surface,
+    push_zellij_session_override, resolve_terminal, write_item_surface,
+    zellij_forge_all_serial_launches, zellij_needs_serial_launches, ItemSurface, ResolvedTerminal,
+    TerminalContext, FORGE_ZELLIJ_SESSION, ITEM_SURFACE_ENV,
 };
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,23 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     let term = resolve_terminal(false, &detected.client, "forge")
         .or_else(|| force_multiplexer_terminal());
 
+    // Isolate forge tabs in a dedicated zellij session. Crowded user sessions
+    // (soft maxfiles often 256 via launchctl) hit EMFILE → zellij server panic
+    // → full session wipe. A fresh session has its own server + FD budget.
+    let _zellij_session_guard = if term.as_ref().map(|t| t.kind) == Some(TerminalContext::Zellij)
+        || detect_terminal() == Some(TerminalContext::Zellij)
+    {
+        ensure_zellij_background_session(FORGE_ZELLIJ_SESSION)?;
+        let g = push_zellij_session_override(FORGE_ZELLIJ_SESSION);
+        eprintln!(
+            "scrutiny forge: zellij tabs → session `{FORGE_ZELLIJ_SESSION}` \
+             (attach: zellij attach {FORGE_ZELLIJ_SESSION})"
+        );
+        Some(g)
+    } else {
+        None
+    };
+
     let scrutiny_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scrutiny"));
     let from_json = forge_all_answers_json(&fa, &detected.client)?;
 
@@ -92,7 +110,11 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
         fa.branch_prefix,
         parent.display()
     );
-    if zellij_needs_serial_launches() {
+    if zellij_forge_all_serial_launches() {
+        eprintln!(
+            "scrutiny forge: serializing zellij launches (protect session from EMFILE thrash)"
+        );
+    } else if zellij_needs_serial_launches() {
         eprintln!(
             "scrutiny forge: zellij lacks --near-current-pane/--tab-id \
              (upgrade to ≥0.44) — launching forge drivers one at a time to avoid session thrash"
@@ -313,7 +335,7 @@ fn run_forge_pool(
     scrutiny_bin: &Path,
     headless: bool,
 ) -> Result<Vec<PathBuf>> {
-    let serial = !headless && zellij_needs_serial_launches();
+    let serial = !headless && (zellij_forge_all_serial_launches() || zellij_needs_serial_launches());
     let (tx, rx) = mpsc::channel::<(usize, Result<PathBuf>)>();
     let mut paths = vec![PathBuf::new(); items.len()];
     let mut first_err: Option<String> = None;
