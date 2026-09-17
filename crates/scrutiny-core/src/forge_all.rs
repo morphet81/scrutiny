@@ -20,10 +20,9 @@ use crate::git;
 use crate::paths::{prepare_artifacts, slug};
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{
-    detect_terminal, ensure_zellij_background_session, launch_agent_in_surface, open_item_surface,
-    push_zellij_session_override, resolve_terminal, write_item_surface,
-    zellij_forge_all_serial_launches, zellij_needs_serial_launches, ItemSurface, ResolvedTerminal,
-    TerminalContext, FORGE_ZELLIJ_SESSION, ITEM_SURFACE_ENV,
+    detect_terminal, launch_agent_in_surface, open_item_surface, preflight_zellij_open_files,
+    resolve_terminal, write_item_surface, zellij_forge_all_serial_launches,
+    zellij_needs_serial_launches, ItemSurface, ResolvedTerminal, TerminalContext, ITEM_SURFACE_ENV,
 };
 
 #[derive(Debug, Clone)]
@@ -84,22 +83,13 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     let term = resolve_terminal(false, &detected.client, "forge")
         .or_else(|| force_multiplexer_terminal());
 
-    // Isolate forge tabs in a dedicated zellij session. Crowded user sessions
-    // (soft maxfiles often 256 via launchctl) hit EMFILE → zellij server panic
-    // → full session wipe. A fresh session has its own server + FD budget.
-    let _zellij_session_guard = if term.as_ref().map(|t| t.kind) == Some(TerminalContext::Zellij)
+    // Current session only. Bail early if zellij server is near EMFILE — that
+    // panic wipes the whole session (not just forge tabs).
+    if term.as_ref().map(|t| t.kind) == Some(TerminalContext::Zellij)
         || detect_terminal() == Some(TerminalContext::Zellij)
     {
-        ensure_zellij_background_session(FORGE_ZELLIJ_SESSION)?;
-        let g = push_zellij_session_override(FORGE_ZELLIJ_SESSION);
-        eprintln!(
-            "scrutiny forge: zellij tabs → session `{FORGE_ZELLIJ_SESSION}` \
-             (attach: zellij attach {FORGE_ZELLIJ_SESSION})"
-        );
-        Some(g)
-    } else {
-        None
-    };
+        preflight_zellij_open_files(input.tickets.len())?;
+    }
 
     let scrutiny_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scrutiny"));
     let from_json = forge_all_answers_json(&fa, &detected.client)?;
@@ -112,7 +102,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     );
     if zellij_forge_all_serial_launches() {
         eprintln!(
-            "scrutiny forge: stagger zellij launches (EMFILE-safe); wait in parallel"
+            "scrutiny forge: stagger zellij launches in current session (EMFILE-safe); wait in parallel"
         );
     } else if zellij_needs_serial_launches() {
         eprintln!(

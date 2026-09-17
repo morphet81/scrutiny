@@ -309,12 +309,8 @@ pub enum ItemSurface {
 /// Intra-process half of the focus serialization (see [`focus_guard`]).
 static TERM_LAUNCH: Mutex<()> = Mutex::new(());
 
-/// Optional override for [`zellij_session_args`] (e.g. multi-ticket forge uses a
-/// dedicated session so EMFILE panics cannot wipe the user's main session).
+/// Optional override for [`zellij_session_args`] (tests / rare cross-session ops).
 static ZELLIJ_SESSION_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
-
-/// Default dedicated session for multi-ticket `scrutiny forge` tabs.
-pub const FORGE_ZELLIJ_SESSION: &str = "scrutiny-forge";
 
 /// RAII: push a zellij `--session` override; restore previous on drop.
 pub struct ZellijSessionOverrideGuard {
@@ -338,44 +334,134 @@ pub fn push_zellij_session_override(name: &str) -> ZellijSessionOverrideGuard {
     ZellijSessionOverrideGuard { prev }
 }
 
-/// Create `name` as a detached zellij session if missing (own server process).
-pub fn ensure_zellij_background_session(name: &str) -> Result<()> {
-    if zellij_session_exists(name) {
+/// Measured ~10 FDs per new tab (plugins + placeholder); keep headroom for
+/// driver pane + one agent pane per item.
+const ZELLIJ_FDS_PER_FORGE_TAB: u64 = 16;
+/// Keep this many FDs free under the soft limit.
+const ZELLIJ_FD_SAFETY_MARGIN: u64 = 24;
+
+/// Refuse multi-tab forge when the **current** zellij server is near EMFILE.
+///
+/// Zellij panics on "Too many open files" and restarts the whole session — that
+/// is how unrelated tabs/tasks get wiped. Better to stop before opening tabs.
+pub fn preflight_zellij_open_files(extra_tabs: usize) -> Result<()> {
+    if extra_tabs == 0 || detect_terminal() != Some(TerminalContext::Zellij) {
         return Ok(());
     }
-    eprintln!("scrutiny: creating zellij session `{name}` (background)");
-    let status = Command::new("zellij")
-        .args(["attach", "--create-background", name])
-        .status()
-        .context("spawn zellij attach --create-background")?;
-    if !status.success() {
-        bail!("zellij attach --create-background {name} exited {status}");
+    let Some(pid) = zellij_current_server_pid() else {
+        eprintln!(
+            "scrutiny forge: warn: could not find zellij server pid — skip EMFILE preflight"
+        );
+        return Ok(());
+    };
+    let used = count_process_open_files(pid).unwrap_or(0);
+    let (limit, limit_src) = process_nofile_soft_limit();
+    let need = (extra_tabs as u64).saturating_mul(ZELLIJ_FDS_PER_FORGE_TAB);
+    let free = limit.saturating_sub(used);
+    let ceiling = limit.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+    eprintln!(
+        "scrutiny forge: zellij server pid={pid} — {used} file descriptors open \
+         / soft limit {limit} from {limit_src} ({free} free; ~{need} needed for \
+         {extra_tabs} new tabs). Note: FDs (sockets/pipes/files), NOT tab count."
+    );
+    if used.saturating_add(need) > ceiling {
+        bail!(
+            "refusing to open {extra_tabs} forge tabs: near open-file limit (EMFILE). \
+             {used} file descriptors open (not tabs!) / soft limit {limit} ({limit_src}); \
+             need ~{need} more. Do NOT kill this session from inside a pane. Open a \
+             normal iTerm/Terminal window outside zellij, run: \
+             `ulimit -n 10240 && zellij kill-session \"$SESSION\"` then start zellij \
+             again from that same outside shell. (launchctl system soft can stay 256.)"
+        );
     }
-    // Brief settle — session name appears in list-sessions shortly after create.
-    for _ in 0..20 {
-        if zellij_session_exists(name) {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    bail!("zellij session `{name}` did not appear after create-background");
+    Ok(())
 }
 
-fn zellij_session_exists(name: &str) -> bool {
-    let Ok(out) = Command::new("zellij")
-        .args(["list-sessions", "-n"])
-        .output()
-    else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
+fn zellij_current_server_pid() -> Option<u32> {
+    let session = std::env::var("ZELLIJ_SESSION_NAME").ok()?;
+    if session.is_empty() {
+        return None;
     }
+    let out = Command::new("ps")
+        .args(["-ax", "-o", "pid=,command="])
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().any(|line| zellij_session_name_from_ls_line(line) == Some(name))
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.contains("zellij --server") {
+            continue;
+        }
+        // Server argv ends with the session name (may contain spaces).
+        if !(line.ends_with(&session) || line.contains(&format!("/{session}"))) {
+            continue;
+        }
+        let pid = line.split_whitespace().next()?.parse().ok()?;
+        return Some(pid);
+    }
+    None
+}
+
+fn count_process_open_files(pid: u32) -> Option<u64> {
+    let out = Command::new("lsof")
+        .args(["-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    // lsof prints a header line; count remaining non-empty lines.
+    let n = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count() as u64;
+    Some(n)
+}
+
+/// Soft RLIMIT_NOFILE for **this** process (forge runs inside the zellij client).
+///
+/// Do **not** use `launchctl limit maxfiles` as the process ceiling — on macOS that
+/// often stays at soft 256 even when the shell/`zellij` process has `ulimit -n 10240`.
+/// Prefer `getrlimit`; fall back to launchctl only if getrlimit fails.
+fn process_nofile_soft_limit() -> (u64, &'static str) {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 && lim.rlim_cur > 0 {
+            let soft = lim.rlim_cur as u64;
+            // RLIM_INFINITY is huge; treat as "effectively unlimited" for math.
+            if soft >= 1_000_000_000 {
+                return (65_536, "getrlimit(infinity→65536)");
+            }
+            return (soft, "getrlimit");
+        }
+    }
+    if let Some(n) = launchctl_maxfiles_soft() {
+        return (n, "launchctl");
+    }
+    (256, "default")
+}
+
+fn launchctl_maxfiles_soft() -> Option<u64> {
+    // `launchctl limit maxfiles` → "maxfiles    256            unlimited"
+    let out = Command::new("launchctl")
+        .args(["limit", "maxfiles"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next()? != "maxfiles" {
+            continue;
+        }
+        return parts.next()?.parse().ok();
+    }
+    None
 }
 
 /// Parse `zellij list-sessions -n` line → session name (`New TC Manager [Created …]`).
+#[cfg(test)]
 fn zellij_session_name_from_ls_line(line: &str) -> Option<&str> {
     let line = line.trim();
     if line.is_empty() {
@@ -486,16 +572,10 @@ pub fn zellij_needs_serial_launches() -> bool {
     !caps.near_current_pane && !caps.tab_id
 }
 
-/// Multi-ticket forge always serializes on zellij: even with `--tab-id`, a burst of
-/// parallel `new-pane` / nested agents can push a crowded session over EMFILE and
-/// panic the **entire** zellij server (wiping unrelated tabs).
+/// Multi-ticket forge staggers zellij pane launches in the **current** session
+/// to avoid EMFILE bursts (even when `--tab-id` is available).
 pub fn zellij_forge_all_serial_launches() -> bool {
     detect_terminal() == Some(TerminalContext::Zellij)
-        || ZELLIJ_SESSION_OVERRIDE
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .is_some()
 }
 
 /// Env var pointing at a JSON [`ItemSurface`] for nested `scrutiny forge --here`.
@@ -877,12 +957,7 @@ fn launch_zellij_in_origin(
     // Best path: open beside the invoking pane without following user focus.
     if caps.near_current_pane {
         let args = zellij_run_near_argv(label, script, cwd, close_on_exit);
-        let status = zellij_cmd(&args)
-            .status()
-            .context("spawn zellij run --near-current-pane")?;
-        if !status.success() {
-            bail!("zellij run for {label} exited with {status}");
-        }
+        run_zellij_argv(&args).context("zellij run --near-current-pane")?;
         return Ok(());
     }
 
@@ -898,12 +973,7 @@ fn launch_zellij_in_origin(
                     close_on_exit,
                     caps.no_focus,
                 );
-                let status = zellij_cmd(&args)
-                    .status()
-                    .context("spawn zellij action new-pane --tab-id")?;
-                if !status.success() {
-                    bail!("zellij new-pane for {label} exited with {status}");
-                }
+                run_zellij_argv(&args).context("zellij new-pane --tab-id")?;
                 return Ok(());
             }
         }
@@ -926,9 +996,17 @@ fn launch_zellij_in_origin(
 }
 
 fn run_zellij_argv(args: &[String]) -> Result<()> {
-    let status = zellij_cmd(args).status().context("spawn zellij")?;
-    if !status.success() {
-        bail!("zellij exited with {status}");
+    // Capture stdout so pane/tab ids (`terminal_12`) do not spam the host TTY.
+    let out = zellij_cmd(args)
+        .output()
+        .context("spawn zellij")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "zellij exited with {}: {}",
+            out.status,
+            err.trim()
+        );
     }
     Ok(())
 }
@@ -1502,10 +1580,13 @@ fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
 /// Do **not** pass a bare `layout { pane … }` via `--layout`: that creates a
 /// chrome-less tab (no tab-bar plugin) that looks like fullscreen. Plain
 /// `new-tab --cwd` inherits the session template. Agent panes pin cwd via
-/// `zellij run --cwd` — no `write-chars` into the focused PTY (racey / session-toxic).
+/// `zellij run --cwd`.
 ///
-/// Returns the new tab's stable id when the CLI prints it (needed for background
-/// sessions where `current-tab-info` has no client).
+/// `--cwd` alone is not enough: interactive shell profiles often `cd` away
+/// during startup (same as tmux). After the tab exists we `write-chars` an
+/// explicit `cd` into the placeholder pane (targeted by pane id when possible).
+///
+/// Returns the new tab's stable id when the CLI prints it.
 fn open_zellij_tab(tab: &str, cwd: &str) -> Result<Option<u32>> {
     let args = zellij_open_argv(tab, cwd);
     let out = zellij_cmd(&args)
@@ -1519,7 +1600,6 @@ fn open_zellij_tab(tab: &str, cwd: &str) -> Result<Option<u32>> {
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let tab_id = parse_new_tab_id(&stdout).or_else(focused_tab_id_after_open);
-    // Background sessions sometimes ignore --name; force rename by id.
     if let Some(id) = tab_id {
         let mut rename = zellij_session_args();
         rename.extend([
@@ -1529,9 +1609,61 @@ fn open_zellij_tab(tab: &str, cwd: &str) -> Result<Option<u32>> {
             id.to_string(),
             tab.into(),
         ]);
-        let _ = zellij_cmd(&rename).status();
+        let _ = zellij_cmd(&rename).output();
+        // Let the interactive shell finish profile init (often cds to ~ or ~/dev).
+        thread::sleep(Duration::from_millis(350));
+        if let Err(e) = zellij_cd_placeholder(id, tab, cwd) {
+            eprintln!(
+                "scrutiny: warn: could not cd placeholder tab `{tab}` to worktree: {e:#}"
+            );
+        }
     }
     Ok(tab_id)
+}
+
+/// Force the placeholder shell in `tab_id` into `cwd` (profile may have left `--cwd`).
+fn zellij_cd_placeholder(tab_id: u32, tab_name: &str, cwd: &str) -> Result<()> {
+    let cmd = shell_cd_clear_line(cwd);
+    if let Some(pane) = zellij_first_terminal_pane_in_tab(tab_id) {
+        let mut args = zellij_session_args();
+        args.extend([
+            "action".into(),
+            "write-chars".into(),
+            "--pane-id".into(),
+            format!("terminal_{pane}"),
+            cmd,
+        ]);
+        return run_zellij_argv(&args).context("zellij write-chars --pane-id cd");
+    }
+    // Fallback: focus the tab by name, write into focused pane, no pane-id.
+    let _g = focus_guard();
+    run_zellij_argv(&zellij_goto_argv(tab_name)).context("zellij go-to-tab-name for cd")?;
+    let mut args = zellij_session_args();
+    args.extend(["action".into(), "write-chars".into(), cmd]);
+    run_zellij_argv(&args).context("zellij write-chars cd")
+}
+
+fn shell_cd_clear_line(cwd: &str) -> String {
+    // Match tmux placeholder: cd + clear so the idle pane shows the worktree.
+    let esc = cwd.replace('\'', "'\\''");
+    format!("cd '{esc}'; clear\n")
+}
+
+/// Lowest-id non-plugin terminal pane in `tab_id` (the placeholder after new-tab).
+fn zellij_first_terminal_pane_in_tab(tab_id: u32) -> Option<u64> {
+    let raw = zellij_list_panes_json()?;
+    let panes: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    let mut ids: Vec<u64> = panes
+        .iter()
+        .filter(|p| {
+            p.get("tab_id").and_then(|v| v.as_u64()) == Some(u64::from(tab_id))
+                && p.get("is_plugin").and_then(|v| v.as_bool()) != Some(true)
+                && p.get("is_floating").and_then(|v| v.as_bool()) != Some(true)
+        })
+        .filter_map(|p| p.get("id").and_then(|v| v.as_u64()))
+        .collect();
+    ids.sort_unstable();
+    ids.into_iter().next()
 }
 
 fn zellij_goto_argv(tab: &str) -> Vec<String> {
@@ -1665,6 +1797,15 @@ mod tests {
     }
 
     #[test]
+    fn soft_maxfiles_parses_launchctl_line() {
+        // Mirror launchctl output shape without spawning.
+        let line = "\tmaxfiles    256            unlimited";
+        let mut parts = line.split_whitespace();
+        assert_eq!(parts.next(), Some("maxfiles"));
+        assert_eq!(parts.next().unwrap().parse::<u64>().unwrap(), 256);
+    }
+
+    #[test]
     fn zellij_ls_line_parses_spaced_session_names() {
         assert_eq!(
             zellij_session_name_from_ls_line("New TC Manager [Created 7m 35s ago] (current)"),
@@ -1753,6 +1894,15 @@ mod tests {
                 "Enter"
             ]
         );
+    }
+
+    #[test]
+    fn shell_cd_clear_line_escapes_quotes() {
+        assert_eq!(
+            shell_cd_clear_line("/tmp/o's"),
+            "cd '/tmp/o'\\''s'; clear\n"
+        );
+        assert_eq!(shell_cd_clear_line("/tmp/wt"), "cd '/tmp/wt'; clear\n");
     }
 
     #[test]
