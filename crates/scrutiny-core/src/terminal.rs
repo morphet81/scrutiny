@@ -969,14 +969,8 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
             Ok(ItemSurface::Tmux { session })
         }
         TerminalContext::Zellij => {
-            let caps = zellij_caps();
             let _g = focus_guard();
-            open_zellij_tab(key, &cwd).context("zellij new-tab")?;
-            let tab_id = if caps.tab_id || caps.current_tab_info {
-                focused_tab_id_after_open()
-            } else {
-                None
-            };
+            let tab_id = open_zellij_tab(key, &cwd).context("zellij new-tab")?;
             Ok(ItemSurface::Zellij {
                 tab: key.to_string(),
                 tab_id,
@@ -996,6 +990,8 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
 }
 
 /// Read the focused tab id after we just opened a tab (no second new-tab).
+/// Prefer [`open_zellij_tab`]'s stdout id — `current-tab-info` fails on background
+/// sessions with no attached client ("No active tab found for current client").
 fn focused_tab_id_after_open() -> Option<u32> {
     let mut args = zellij_session_args();
     args.extend(["action".into(), "current-tab-info".into()]);
@@ -1003,14 +999,40 @@ fn focused_tab_id_after_open() -> Option<u32> {
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    parse_tab_id_from_info(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_tab_id_from_info(text: &str) -> Option<u32> {
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("id:") {
             return rest.trim().parse().ok();
         }
     }
-    None
+    // Newer zellij may print a bare number (same as new-tab).
+    text.lines()
+        .find_map(|l| {
+            let t = l.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse().ok()
+            }
+        })
+}
+
+/// Parse `zellij action new-tab` stdout ("Returns: The created tab's ID as a single number").
+fn parse_new_tab_id(stdout: &str) -> Option<u32> {
+    stdout
+        .lines()
+        .find_map(|l| {
+            let t = l.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse().ok()
+            }
+        })
 }
 
 /// Launch `bash <script_path>` as a new pane/tab named `role` inside `surface`.
@@ -1481,9 +1503,35 @@ fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
 /// chrome-less tab (no tab-bar plugin) that looks like fullscreen. Plain
 /// `new-tab --cwd` inherits the session template. Agent panes pin cwd via
 /// `zellij run --cwd` — no `write-chars` into the focused PTY (racey / session-toxic).
-fn open_zellij_tab(tab: &str, cwd: &str) -> Result<()> {
-    run_zellij_argv(&zellij_open_argv(tab, cwd)).context("zellij new-tab")?;
-    Ok(())
+///
+/// Returns the new tab's stable id when the CLI prints it (needed for background
+/// sessions where `current-tab-info` has no client).
+fn open_zellij_tab(tab: &str, cwd: &str) -> Result<Option<u32>> {
+    let args = zellij_open_argv(tab, cwd);
+    let out = zellij_cmd(&args)
+        .output()
+        .context("spawn zellij new-tab")?;
+    if !out.status.success() {
+        bail!(
+            "zellij new-tab failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let tab_id = parse_new_tab_id(&stdout).or_else(focused_tab_id_after_open);
+    // Background sessions sometimes ignore --name; force rename by id.
+    if let Some(id) = tab_id {
+        let mut rename = zellij_session_args();
+        rename.extend([
+            "action".into(),
+            "rename-tab".into(),
+            "--tab-id".into(),
+            id.to_string(),
+            tab.into(),
+        ]);
+        let _ = zellij_cmd(&rename).status();
+    }
+    Ok(tab_id)
 }
 
 fn zellij_goto_argv(tab: &str) -> Vec<String> {
@@ -1636,6 +1684,19 @@ mod tests {
             zellij_session_args(),
             vec!["--session".to_string(), "scrutiny-forge".into()]
         );
+    }
+
+    #[test]
+    fn parse_new_tab_id_from_stdout() {
+        assert_eq!(parse_new_tab_id("1\n"), Some(1));
+        assert_eq!(parse_new_tab_id("  42  \n"), Some(42));
+        assert_eq!(parse_new_tab_id("not-a-number\n"), None);
+    }
+
+    #[test]
+    fn parse_tab_id_from_info_formats() {
+        assert_eq!(parse_tab_id_from_info("name: NERO-1\nid: 7\n"), Some(7));
+        assert_eq!(parse_tab_id_from_info("3\n"), Some(3));
     }
 
     #[test]

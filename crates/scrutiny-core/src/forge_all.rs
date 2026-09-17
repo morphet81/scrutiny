@@ -112,7 +112,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     );
     if zellij_forge_all_serial_launches() {
         eprintln!(
-            "scrutiny forge: serializing zellij launches (protect session from EMFILE thrash)"
+            "scrutiny forge: stagger zellij launches (EMFILE-safe); wait in parallel"
         );
     } else if zellij_needs_serial_launches() {
         eprintln!(
@@ -335,12 +335,26 @@ fn run_forge_pool(
     scrutiny_bin: &Path,
     headless: bool,
 ) -> Result<Vec<PathBuf>> {
-    let serial = !headless && (zellij_forge_all_serial_launches() || zellij_needs_serial_launches());
+    // Full serial (launch+wait): only when zellij must steal focus and we lack tab ids.
+    let need_focus_serial = zellij_needs_serial_launches()
+        && items.iter().any(|i| {
+            matches!(
+                &i.surface,
+                Some(ItemSurface::Zellij { tab_id: None, .. })
+            )
+        });
+    // Stagger launches (still wait in parallel): avoid EMFILE bursts on zellij.
+    let stagger_ms: u64 = if !need_focus_serial && zellij_forge_all_serial_launches() {
+        750
+    } else {
+        0
+    };
+
     let (tx, rx) = mpsc::channel::<(usize, Result<PathBuf>)>();
     let mut paths = vec![PathBuf::new(); items.len()];
     let mut first_err: Option<String> = None;
 
-    if serial {
+    if need_focus_serial {
         // One driver at a time: legacy zellij focus-steals on every pane spawn.
         for (idx, item) in items.iter().enumerate() {
             let bin = scrutiny_bin.to_path_buf();
@@ -350,6 +364,12 @@ fn run_forge_pool(
             let done_path = item.done_sentinel.clone();
             let script = item.script_path.clone();
             let surface = item.surface.clone();
+            eprintln!(
+                "scrutiny forge: starting {} ({}/{})",
+                key,
+                idx + 1,
+                items.len()
+            );
             let res = if headless || surface.is_none() {
                 run_forge_headless(&bin, &worktree, &key, &from_json, &done_path)
             } else {
@@ -359,6 +379,13 @@ fn run_forge_pool(
             let _ = tx.send((idx, res));
         }
     } else {
+        if stagger_ms > 0 {
+            eprintln!(
+                "scrutiny forge: launching {} driver(s) with {stagger_ms}ms stagger \
+                 (wait in parallel)",
+                items.len()
+            );
+        }
         for (idx, item) in items.iter().enumerate() {
             let bin = scrutiny_bin.to_path_buf();
             let tx = tx.clone();
@@ -368,7 +395,12 @@ fn run_forge_pool(
             let done_path = item.done_sentinel.clone();
             let script = item.script_path.clone();
             let surface = item.surface.clone();
+            let delay = stagger_ms.saturating_mul(idx as u64);
             std::thread::spawn(move || {
+                if delay > 0 {
+                    std::thread::sleep(Duration::from_millis(delay));
+                }
+                eprintln!("scrutiny forge: launching {key}");
                 let res = if headless || surface.is_none() {
                     run_forge_headless(&bin, &worktree, &key, &from_json, &done_path)
                 } else {
@@ -450,14 +482,28 @@ fn run_forge_in_surface(
     cwd: &Path,
     done: &Path,
 ) -> Result<()> {
+    if let ItemSurface::Zellij { tab, tab_id: None } = surface {
+        eprintln!(
+            "scrutiny forge: warn: no tab_id for `{tab}` — pane may land in wrong tab"
+        );
+    }
     launch_agent_in_surface(surface, "forge", script, cwd, /* close_on_exit */ false)?;
     // Poll done sentinel (forge script touches it).
     let wall_secs = crate::timeouts::get().forge_bulk_item;
     let wall = Duration::from_secs(wall_secs);
     let start = std::time::Instant::now();
+    let mut last_report = start;
     while start.elapsed() < wall {
         if done.is_file() {
             return Ok(());
+        }
+        if last_report.elapsed() >= Duration::from_secs(60) {
+            eprintln!(
+                "scrutiny forge: still waiting for {} ({}s / {wall_secs}s)",
+                done.display(),
+                start.elapsed().as_secs()
+            );
+            last_report = std::time::Instant::now();
         }
         std::thread::sleep(Duration::from_millis(500));
     }
