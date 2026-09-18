@@ -94,9 +94,10 @@ scrutiny forge --here --inline --input "Add dark mode toggle"
 1. Assign (`jira_assignee`, default `@me`)
 2. Transition to `in_progress_status` (default `In Progress`)
 3. Create branch `{branch_prefix}-…` + worktree under `worktree_parent_folder`
-4. Open a tmux/zellij tab in that worktree
+4. Copy `[forge.all].copy_files` from forge cwd into the worktree (if any)
 5. Run `[forge.all].init_commands` in the worktree (if any)
-6. Run `scrutiny forge --here --yes` with knobs from `[forge.all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`)
+6. Open a tmux/zellij tab in that worktree
+7. Run `scrutiny forge --here --yes` with knobs from `[forge.all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`)
 
 **`--here`:** fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement in the current folder. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
 
@@ -381,6 +382,7 @@ Used by multi-ticket `scrutiny forge <jira…>`.
 | `model` | `sonnet` | Model id / tier |
 | `jira_assignee` | `@me` | `acli jira workitem assign` target |
 | `in_progress_status` | `In Progress` | Transition status name |
+| `copy_files` | `[]` | Relative paths from forge cwd copied into each worktree before init (files or dirs) |
 | `init_commands` | `[]` | Shell commands run in each worktree before forge (`sh -c`, cwd = worktree) |
 
 ### `[forge.complexity]`

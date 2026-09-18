@@ -232,6 +232,9 @@ agent_cli = "claude"
 model = "sonnet"
 jira_assignee = "@me"
 in_progress_status = "In Progress"
+# Relative to forge cwd; copied into each worktree before init_commands.
+# copy_files = [".env", ".npmrc", "local/"]
+init_commands = []
 
 [forge.complexity]
 story_point_fields = ["story_points", "customfield_10016", "customfield_10028", "customfield_10034"]

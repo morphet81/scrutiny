@@ -562,6 +562,10 @@ pub struct ForgeAllConfig {
         alias = "in-progress-status"
     )]
     pub in_progress_status: String,
+    /// Relative paths (from forge cwd) copied into each worktree before init.
+    /// Files or directories; `..` and absolute paths rejected.
+    #[serde(default, alias = "copy-files", alias = "worktree_copy_files")]
+    pub copy_files: Vec<String>,
     /// Shell commands run in each worktree (cwd = worktree) before `scrutiny forge`.
     #[serde(default, alias = "init-commands")]
     pub init_commands: Vec<String>,
@@ -606,6 +610,7 @@ impl Default for ForgeAllConfig {
             model: default_forge_all_model(),
             jira_assignee: default_forge_all_assignee(),
             in_progress_status: default_forge_all_in_progress(),
+            copy_files: Vec::new(),
             init_commands: Vec::new(),
         }
     }

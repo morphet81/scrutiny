@@ -184,23 +184,23 @@ fn prepare_one(
     let (worktree, created) = resolve_or_create_worktree(repo_root, &branch, &worktree_path)
         .with_context(|| format!("worktree for {key}"))?;
 
-    if let Err(e) = ensure_init_commands(&worktree, &fa.init_commands)
-        .with_context(|| format!("init-commands in {}", worktree.display()))
+    if let Err(e) = setup_worktree(cwd, &worktree, fa)
+        .with_context(|| format!("worktree setup in {}", worktree.display()))
     {
         if created {
             eprintln!(
-                "scrutiny forge [{key}]: init failed — removing worktree {} so retry can recreate",
+                "scrutiny forge [{key}]: setup failed — removing worktree {} so retry can recreate",
                 worktree.display()
             );
             if let Err(rm) = git::remove_worktree(repo_root, &worktree) {
                 eprintln!(
-                    "scrutiny forge [{key}]: warn: could not remove worktree after init fail: {rm:#}"
+                    "scrutiny forge [{key}]: warn: could not remove worktree after setup fail: {rm:#}"
                 );
             }
         } else {
             eprintln!(
-                "scrutiny forge [{key}]: init failed on reused worktree — \
-                 fix auth/deps then re-run (no init stamp written)"
+                "scrutiny forge [{key}]: setup failed on reused worktree — \
+                 fix copy/init then re-run (no init stamp written on init fail)"
             );
         }
         return Err(e);
@@ -250,6 +250,73 @@ fn prepare_one(
 /// Stamp written after successful `[forge.all].init_commands` (or empty list).
 fn init_stamp_path(worktree: &Path) -> PathBuf {
     worktree.join(".scrutiny").join("forge-init.ok")
+}
+
+/// Copy configured files then run init commands.
+fn setup_worktree(cwd: &Path, worktree: &Path, fa: &ForgeAllConfig) -> Result<()> {
+    copy_setup_files(cwd, worktree, &fa.copy_files)?;
+    ensure_init_commands(worktree, &fa.init_commands)
+}
+
+/// Copy relative paths from `cwd` into `worktree` (files or directories).
+fn copy_setup_files(cwd: &Path, worktree: &Path, paths: &[String]) -> Result<()> {
+    for raw in paths {
+        let rel = raw.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let rel_path = Path::new(rel);
+        if rel_path.is_absolute() {
+            bail!("copy_files entry must be relative to forge cwd: {rel}");
+        }
+        if rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            bail!("copy_files entry must not contain '..': {rel}");
+        }
+        let src = cwd.join(rel_path);
+        let dest = worktree.join(rel_path);
+        if !src.exists() {
+            bail!("copy_files source missing: {}", src.display());
+        }
+        eprintln!(
+            "scrutiny forge: copy {} → {}",
+            src.display(),
+            dest.display()
+        );
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dest)
+                .with_context(|| format!("copy dir {} → {}", src.display(), dest.display()))?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            std::fs::copy(&src, &dest)
+                .with_context(|| format!("copy {} → {}", src.display(), dest.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src).with_context(|| format!("read_dir {}", src.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let to = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), &to)?;
+        }
+        // skip symlinks / other
+    }
+    Ok(())
 }
 
 /// Create worktree, or reuse an existing linked one. Returns `(path, created_now)`.
@@ -711,6 +778,49 @@ mod tests {
             "{err:#}"
         );
         assert!(!init_stamp_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn copy_setup_files_copies_file_and_dir() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join(".env"), "A=1\n").unwrap();
+        std::fs::create_dir_all(src.path().join("local")).unwrap();
+        std::fs::write(src.path().join("local/x.json"), "{}").unwrap();
+
+        copy_setup_files(
+            src.path(),
+            dest.path(),
+            &[".env".into(), "local".into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join(".env")).unwrap(),
+            "A=1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("local/x.json")).unwrap(),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn copy_setup_files_rejects_parent_and_absolute() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let err = copy_setup_files(src.path(), dest.path(), &["../secret".into()]).unwrap_err();
+        assert!(err.to_string().contains(".."), "{err:#}");
+        let err = copy_setup_files(src.path(), dest.path(), &["/etc/passwd".into()]).unwrap_err();
+        assert!(err.to_string().contains("relative"), "{err:#}");
+    }
+
+    #[test]
+    fn copy_setup_files_missing_source_errors() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let err = copy_setup_files(src.path(), dest.path(), &[".env".into()]).unwrap_err();
+        assert!(err.to_string().contains("missing"), "{err:#}");
     }
 
     fn git(cwd: &Path, args: &[&str]) {
