@@ -4,12 +4,16 @@
 //! Worktree reuse: if the path already exists as a linked worktree, resume (re-run
 //! init only when `.scrutiny/forge-init.ok` is missing). Fresh create + init fail
 //! removes the worktree so a retry is not blocked by "path already exists".
+//!
+//! Kickoff is sequential and fire-and-forget on mux: start one ticket at a time,
+//! stop before EMFILE, launch drivers in panes, then exit the host (no wait for
+//! forge completion).
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use crate::config::{ensure_config, find_shipped_default, load_config, ForgeAllConfig};
@@ -20,10 +24,13 @@ use crate::git;
 use crate::paths::{prepare_artifacts, slug};
 use crate::runtime::{resolve_client, ResolveClientInput};
 use crate::terminal::{
-    detect_terminal, launch_agent_in_surface, open_item_surface, preflight_zellij_open_files,
-    resolve_terminal, write_item_surface, zellij_forge_all_serial_launches,
-    zellij_needs_serial_launches, ItemSurface, ResolvedTerminal, TerminalContext, ITEM_SURFACE_ENV,
+    detect_terminal, is_zellij_emfile_limit_error, launch_agent_in_surface, open_item_surface,
+    preflight_zellij_open_files_budget, resolve_terminal, write_item_surface,
+    zellij_fds_per_forge_tab, ItemSurface, ResolvedTerminal, TerminalContext, ITEM_SURFACE_ENV,
 };
+
+/// Settle after each zellij tab so the next EMFILE preflight sees updated FDs.
+const ZELLIJ_TAB_SETTLE_MS: u64 = 750;
 
 #[derive(Debug, Clone)]
 pub struct ForgeAllInput {
@@ -83,13 +90,10 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     let term = resolve_terminal(false, &detected.client, "forge")
         .or_else(|| force_multiplexer_terminal());
 
-    // Current session only. Bail early if zellij server is near EMFILE — that
-    // panic wipes the whole session (not just forge tabs).
-    if term.as_ref().map(|t| t.kind) == Some(TerminalContext::Zellij)
-        || detect_terminal() == Some(TerminalContext::Zellij)
-    {
-        preflight_zellij_open_files(input.tickets.len())?;
-    }
+    let in_zellij = term.as_ref().map(|t| t.kind) == Some(TerminalContext::Zellij)
+        || detect_terminal() == Some(TerminalContext::Zellij);
+    // Match forge_all_answers_json: team_size agents + 1 tester.
+    let fds_per_tab = zellij_fds_per_forge_tab(fa.team_size.max(1), 1);
 
     let scrutiny_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("scrutiny"));
     let from_json = forge_all_answers_json(&fa, &detected.client)?;
@@ -100,19 +104,32 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
         fa.branch_prefix,
         parent.display()
     );
-    if zellij_forge_all_serial_launches() {
+    if in_zellij {
         eprintln!(
-            "scrutiny forge: stagger zellij launches in current session (EMFILE-safe); wait in parallel"
-        );
-    } else if zellij_needs_serial_launches() {
-        eprintln!(
-            "scrutiny forge: zellij lacks --near-current-pane/--tab-id \
-             (upgrade to ≥0.44) — launching forge drivers one at a time to avoid session thrash"
+            "scrutiny forge: start tickets one-by-one (stop before EMFILE); \
+             host exits after launching drivers (~{fds_per_tab} FDs reserved per tab)"
         );
     }
 
-    let mut prepared: Vec<PreparedItem> = Vec::new();
-    for raw in &input.tickets {
+    let mut started_paths: Vec<PathBuf> = Vec::new();
+    let mut started_keys: Vec<String> = Vec::new();
+    let mut skipped_raw: Vec<String> = Vec::new();
+    let mut stopped_emfile = false;
+
+    for (idx, raw) in input.tickets.iter().enumerate() {
+        if in_zellij {
+            if let Err(e) = preflight_zellij_open_files_budget(1, fds_per_tab) {
+                if is_zellij_emfile_limit_error(&e) {
+                    skipped_raw.extend(input.tickets[idx..].iter().cloned());
+                    stopped_emfile = true;
+                    eprintln!("scrutiny forge: stop before EMFILE — {e:#}");
+                    break;
+                }
+                // Fail closed: cannot measure → do not open more tabs.
+                return Err(e).context("zellij EMFILE preflight");
+            }
+        }
+
         match prepare_one(
             &cwd,
             &repo.root,
@@ -131,7 +148,18 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
                     p.branch,
                     p.worktree.display()
                 );
-                prepared.push(p);
+                match launch_prepared(&p, &scrutiny_bin, term.is_none()) {
+                    Ok(()) => {
+                        started_keys.push(p.key.clone());
+                        started_paths.push(p.worktree.clone());
+                        if in_zellij && idx + 1 < input.tickets.len() {
+                            thread::sleep(Duration::from_millis(ZELLIJ_TAB_SETTLE_MS));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  ERR {}: launch failed: {e:#}", p.key);
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("  ERR {raw}: {e:#}");
@@ -139,12 +167,43 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
         }
     }
 
-    if prepared.is_empty() {
+    if stopped_emfile || !skipped_raw.is_empty() {
+        let started = if started_keys.is_empty() {
+            "(none)".to_string()
+        } else {
+            started_keys.join(", ")
+        };
+        let skipped = if skipped_raw.is_empty() {
+            "(none)".to_string()
+        } else {
+            skipped_raw.join(", ")
+        };
+        eprintln!(
+            "scrutiny forge: started: {started}\n\
+             scrutiny forge: skipped (EMFILE / not started): {skipped}\n\
+             Raise soft maxfiles outside zellij, restart the session from that shell, \
+             then re-run only the skipped keys."
+        );
+    }
+
+    if started_paths.is_empty() {
+        if stopped_emfile {
+            bail!(
+                "forge: no tickets started — zellij server near EMFILE before the first tab. \
+                 Raise ulimit outside zellij, restart the session, retry."
+            );
+        }
         bail!("forge: no tickets prepared");
     }
 
-    let paths = run_forge_pool(&prepared, &scrutiny_bin, term.is_none())?;
-    Ok(paths)
+    if term.is_some() {
+        eprintln!(
+            "scrutiny forge: launched {} driver(s) — host exiting (work continues in tabs)",
+            started_paths.len()
+        );
+    }
+
+    Ok(started_paths)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -387,124 +446,32 @@ fn run_init_commands(worktree: &Path, commands: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn run_forge_pool(
-    items: &[PreparedItem],
-    scrutiny_bin: &Path,
-    headless: bool,
-) -> Result<Vec<PathBuf>> {
-    // Full serial (launch+wait): only when zellij must steal focus and we lack tab ids.
-    let need_focus_serial = zellij_needs_serial_launches()
-        && items.iter().any(|i| {
-            matches!(
-                &i.surface,
-                Some(ItemSurface::Zellij { tab_id: None, .. })
-            )
-        });
-    // Stagger launches (still wait in parallel): avoid EMFILE bursts on zellij.
-    let stagger_ms: u64 = if !need_focus_serial && zellij_forge_all_serial_launches() {
-        750
-    } else {
-        0
-    };
-
-    let (tx, rx) = mpsc::channel::<(usize, Result<PathBuf>)>();
-    let mut paths = vec![PathBuf::new(); items.len()];
-    let mut first_err: Option<String> = None;
-
-    if need_focus_serial {
-        // One driver at a time: legacy zellij focus-steals on every pane spawn.
-        for (idx, item) in items.iter().enumerate() {
-            let bin = scrutiny_bin.to_path_buf();
-            let key = item.key.clone();
-            let worktree = item.worktree.clone();
-            let from_json = item.from_json.clone();
-            let done_path = item.done_sentinel.clone();
-            let script = item.script_path.clone();
-            let surface = item.surface.clone();
-            eprintln!(
-                "scrutiny forge: starting {} ({}/{})",
-                key,
-                idx + 1,
-                items.len()
-            );
-            let res = if headless || surface.is_none() {
-                run_forge_headless(&bin, &worktree, &key, &from_json, &done_path)
-            } else {
-                run_forge_in_surface(surface.as_ref().unwrap(), &script, &worktree, &done_path)
-            }
-            .map(|_| worktree);
-            let _ = tx.send((idx, res));
-        }
-    } else {
-        if stagger_ms > 0 {
-            eprintln!(
-                "scrutiny forge: launching {} driver(s) with {stagger_ms}ms stagger \
-                 (wait in parallel)",
-                items.len()
-            );
-        }
-        for (idx, item) in items.iter().enumerate() {
-            let bin = scrutiny_bin.to_path_buf();
-            let tx = tx.clone();
-            let key = item.key.clone();
-            let worktree = item.worktree.clone();
-            let from_json = item.from_json.clone();
-            let done_path = item.done_sentinel.clone();
-            let script = item.script_path.clone();
-            let surface = item.surface.clone();
-            let delay = stagger_ms.saturating_mul(idx as u64);
-            std::thread::spawn(move || {
-                if delay > 0 {
-                    std::thread::sleep(Duration::from_millis(delay));
-                }
-                eprintln!("scrutiny forge: launching {key}");
-                let res = if headless || surface.is_none() {
-                    run_forge_headless(&bin, &worktree, &key, &from_json, &done_path)
-                } else {
-                    run_forge_in_surface(surface.as_ref().unwrap(), &script, &worktree, &done_path)
-                }
-                .map(|_| worktree);
-                let _ = tx.send((idx, res));
-            });
-        }
+fn launch_prepared(item: &PreparedItem, scrutiny_bin: &Path, headless: bool) -> Result<()> {
+    if headless || item.surface.is_none() {
+        return run_forge_headless(
+            scrutiny_bin,
+            &item.worktree,
+            &item.key,
+            &item.from_json,
+            &item.done_sentinel,
+        );
     }
-    drop(tx);
-
-    let mut done = 0usize;
-    while done < items.len() {
-        match rx.recv_timeout(Duration::from_secs(3600)) {
-            Ok((idx, Ok(p))) => {
-                paths[idx] = p;
-                done += 1;
-                eprintln!(
-                    "scrutiny forge: finished {} ({}/{})",
-                    items[idx].key,
-                    done,
-                    items.len()
-                );
-            }
-            Ok((idx, Err(e))) => {
-                done += 1;
-                let msg = format!("{}: {e:#}", items[idx].key);
-                eprintln!("scrutiny forge: FAIL {msg}");
-                if first_err.is_none() {
-                    first_err = Some(msg);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                bail!("forge: timed out waiting for forge workers");
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
+    let surface = item.surface.as_ref().unwrap();
+    if let ItemSurface::Zellij { tab, tab_id: None } = surface {
+        eprintln!(
+            "scrutiny forge: warn: no tab_id for `{tab}` — pane may land in wrong tab"
+        );
     }
-
-    if let Some(e) = first_err {
-        bail!("forge completed with failures — first: {e}");
-    }
-    Ok(paths
-        .into_iter()
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect())
+    // Fire-and-forget: driver runs in the pane; host does not wait on done.
+    launch_agent_in_surface(
+        surface,
+        "forge",
+        &item.script_path,
+        &item.worktree,
+        /* close_on_exit */ false,
+    )?;
+    eprintln!("scrutiny forge: launched driver for {}", item.key);
+    Ok(())
 }
 
 fn run_forge_headless(
@@ -531,43 +498,6 @@ fn run_forge_headless(
         bail!("scrutiny forge exited {status}");
     }
     Ok(())
-}
-
-fn run_forge_in_surface(
-    surface: &ItemSurface,
-    script: &Path,
-    cwd: &Path,
-    done: &Path,
-) -> Result<()> {
-    if let ItemSurface::Zellij { tab, tab_id: None } = surface {
-        eprintln!(
-            "scrutiny forge: warn: no tab_id for `{tab}` — pane may land in wrong tab"
-        );
-    }
-    launch_agent_in_surface(surface, "forge", script, cwd, /* close_on_exit */ false)?;
-    // Poll done sentinel (forge script touches it).
-    let wall_secs = crate::timeouts::get().forge_bulk_item;
-    let wall = Duration::from_secs(wall_secs);
-    let start = std::time::Instant::now();
-    let mut last_report = start;
-    while start.elapsed() < wall {
-        if done.is_file() {
-            return Ok(());
-        }
-        if last_report.elapsed() >= Duration::from_secs(60) {
-            eprintln!(
-                "scrutiny forge: still waiting for {} ({}s / {wall_secs}s)",
-                done.display(),
-                start.elapsed().as_secs()
-            );
-            last_report = std::time::Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    bail!(
-        "forge tab did not signal done within {wall_secs}s ({})",
-        done.display()
-    )
 }
 
 fn write_forge_script(
@@ -733,6 +663,22 @@ mod tests {
         assert_eq!(v["agents"], 4);
         assert_eq!(v["spawn_mode"], "team");
         assert_eq!(v["model"], "composer");
+    }
+
+    #[test]
+    fn emfile_stop_lists_remaining_as_skipped() {
+        let tickets = ["A", "B", "C", "D"];
+        let idx = 2; // stop before C
+        let skipped: Vec<&str> = tickets[idx..].to_vec();
+        assert_eq!(skipped, ["C", "D"]);
+        let started = ["A", "B"];
+        let msg = format!(
+            "started: {}\nskipped: {}",
+            started.join(", "),
+            skipped.join(", ")
+        );
+        assert!(msg.contains("started: A, B"));
+        assert!(msg.contains("skipped: C, D"));
     }
 
     #[test]

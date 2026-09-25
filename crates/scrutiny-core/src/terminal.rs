@@ -334,39 +334,78 @@ pub fn push_zellij_session_override(name: &str) -> ZellijSessionOverrideGuard {
     ZellijSessionOverrideGuard { prev }
 }
 
-/// Measured ~10 FDs per new tab (plugins + placeholder); keep headroom for
-/// driver pane + one agent pane per item.
-const ZELLIJ_FDS_PER_FORGE_TAB: u64 = 16;
+/// Fallback FD budget per forge tab when caller does not pass a computed budget.
+/// Prefer [`zellij_fds_per_forge_tab`].
+const ZELLIJ_FDS_PER_FORGE_TAB_DEFAULT: u64 = 48;
 /// Keep this many FDs free under the soft limit.
 const ZELLIJ_FD_SAFETY_MARGIN: u64 = 24;
+/// Tab-bar plugins + idle placeholder shell.
+const ZELLIJ_FD_TAB_OVERHEAD: u64 = 12;
+/// Rough FDs per terminal pane (driver / agent) on the zellij server.
+const ZELLIJ_FD_PER_PANE: u64 = 8;
 
-/// Refuse multi-tab forge when the **current** zellij server is near EMFILE.
+/// FD headroom to reserve for one multi-ticket forge tab (placeholder + driver +
+/// nested `--here` agent panes).
+pub fn zellij_fds_per_forge_tab(agents: u32, testers: u32) -> u64 {
+    let panes = 1u64 // driver
+        .saturating_add(u64::from(agents.max(1)))
+        .saturating_add(u64::from(testers));
+    ZELLIJ_FD_TAB_OVERHEAD.saturating_add(panes.saturating_mul(ZELLIJ_FD_PER_PANE))
+}
+
+/// True when [`preflight_zellij_open_files`] failed because the next tab would
+/// push the **server** near EMFILE (safe to stop remaining tickets).
+pub fn is_zellij_emfile_limit_error(err: &anyhow::Error) -> bool {
+    let s = err.to_string();
+    s.contains("near open-file limit (EMFILE)") || s.contains("near open-file limit")
+}
+
+/// Refuse opening `extra_tabs` when the **current** zellij **server** is near EMFILE.
 ///
 /// Zellij panics on "Too many open files" and restarts the whole session — that
 /// is how unrelated tabs/tasks get wiped. Better to stop before opening tabs.
+///
+/// Compares server FD count to the **server** soft limit (not this process's
+/// getrlimit — a pane often has a raised ulimit while the server stays at 256).
 pub fn preflight_zellij_open_files(extra_tabs: usize) -> Result<()> {
+    preflight_zellij_open_files_budget(extra_tabs, ZELLIJ_FDS_PER_FORGE_TAB_DEFAULT)
+}
+
+/// Like [`preflight_zellij_open_files`] with an explicit per-tab FD budget.
+pub fn preflight_zellij_open_files_budget(extra_tabs: usize, fds_per_tab: u64) -> Result<()> {
     if extra_tabs == 0 || detect_terminal() != Some(TerminalContext::Zellij) {
         return Ok(());
     }
-    let Some(pid) = zellij_current_server_pid() else {
-        eprintln!(
-            "scrutiny forge: warn: could not find zellij server pid — skip EMFILE preflight"
-        );
-        return Ok(());
-    };
-    let used = count_process_open_files(pid).unwrap_or(0);
-    let (limit, limit_src) = process_nofile_soft_limit();
-    let need = (extra_tabs as u64).saturating_mul(ZELLIJ_FDS_PER_FORGE_TAB);
+    let pid = zellij_current_server_pid().ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not find zellij server pid for EMFILE preflight — refuse to open tabs \
+             (set ZELLIJ_SESSION_NAME / run inside the session)"
+        )
+    })?;
+    let used = count_process_open_files(pid).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not count open files for zellij server pid={pid} (lsof failed) — \
+             refuse to open tabs"
+        )
+    })?;
+    let (self_soft, _) = process_nofile_soft_limit();
+    let launchctl = launchctl_maxfiles_soft();
+    let proc_soft = server_nofile_soft_from_proc(pid);
+    let (limit, limit_src) =
+        effective_server_nofile_limit(used, self_soft, launchctl, proc_soft);
+    let per = fds_per_tab.max(1);
+    let need = (extra_tabs as u64).saturating_mul(per);
     let free = limit.saturating_sub(used);
     let ceiling = limit.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
     eprintln!(
         "scrutiny forge: zellij server pid={pid} — {used} file descriptors open \
          / soft limit {limit} from {limit_src} ({free} free; ~{need} needed for \
-         {extra_tabs} new tabs). Note: FDs (sockets/pipes/files), NOT tab count."
+         {extra_tabs} new tab(s) @ {per} FDs each). Note: FDs (sockets/pipes/files), \
+         NOT tab count."
     );
     if used.saturating_add(need) > ceiling {
         bail!(
-            "refusing to open {extra_tabs} forge tabs: near open-file limit (EMFILE). \
+            "refusing to open {extra_tabs} forge tab(s): near open-file limit (EMFILE). \
              {used} file descriptors open (not tabs!) / soft limit {limit} ({limit_src}); \
              need ~{need} more. Do NOT kill this session from inside a pane. Open a \
              normal iTerm/Terminal window outside zellij, run: \
@@ -375,6 +414,69 @@ pub fn preflight_zellij_open_files(extra_tabs: usize) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Pick the soft nofile ceiling that applies to the **zellij server**.
+///
+/// `proc_soft`: Linux `/proc/<pid>/limits` when available.
+/// Otherwise on macOS we cannot read another process's rlimit; use launchctl
+/// soft as a conservative ceiling until `used` proves the server was raised
+/// (`used > launchctl_soft` → trust `self_soft`).
+pub(crate) fn effective_server_nofile_limit(
+    used: u64,
+    self_soft: u64,
+    launchctl_soft: Option<u64>,
+    proc_soft: Option<u64>,
+) -> (u64, &'static str) {
+    if let Some(n) = proc_soft.filter(|&n| n > 0) {
+        let n = if n >= 1_000_000_000 { 65_536 } else { n };
+        return (n, "proc_limits");
+    }
+    match launchctl_soft {
+        Some(l) if l > 0 && used > l => {
+            let n = if self_soft >= 1_000_000_000 {
+                65_536
+            } else {
+                self_soft.max(used)
+            };
+            (n, "self_getrlimit(proven_raised)")
+        }
+        Some(l) if l > 0 => (self_soft.min(l), "min(self,launchctl)"),
+        _ => {
+            let n = if self_soft >= 1_000_000_000 {
+                65_536
+            } else {
+                self_soft
+            };
+            (n, "self_getrlimit")
+        }
+    }
+}
+
+/// Linux: soft Max open files from `/proc/<pid>/limits`.
+fn server_nofile_soft_from_proc(pid: u32) -> Option<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/limits")).ok()?;
+    parse_proc_limits_nofile_soft(&text)
+}
+
+fn parse_proc_limits_nofile_soft(text: &str) -> Option<u64> {
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("Max open files") {
+            continue;
+        }
+        // "Max open files            1024                 4096                 files"
+        let mut parts = line.split_whitespace();
+        let _ = parts.next()?; // Max
+        let _ = parts.next()?; // open
+        let _ = parts.next()?; // files
+        let soft = parts.next()?;
+        if soft.eq_ignore_ascii_case("unlimited") {
+            return Some(65_536);
+        }
+        return soft.parse().ok();
+    }
+    None
 }
 
 fn zellij_current_server_pid() -> Option<u32> {
@@ -407,20 +509,24 @@ fn count_process_open_files(pid: u32) -> Option<u64> {
         .args(["-p", &pid.to_string()])
         .output()
         .ok()?;
-    // lsof prints a header line; count remaining non-empty lines.
+    // lsof often exits non-zero on macOS when some FDs are unreadable, but still
+    // prints useful rows. Fail only when stdout has no data rows.
     let n = String::from_utf8_lossy(&out.stdout)
         .lines()
         .skip(1)
         .filter(|l| !l.trim().is_empty())
         .count() as u64;
+    if n == 0 {
+        return None;
+    }
     Some(n)
 }
 
-/// Soft RLIMIT_NOFILE for **this** process (forge runs inside the zellij client).
+/// Soft RLIMIT_NOFILE for **this** process (input to [`effective_server_nofile_limit`]).
 ///
-/// Do **not** use `launchctl limit maxfiles` as the process ceiling — on macOS that
-/// often stays at soft 256 even when the shell/`zellij` process has `ulimit -n 10240`.
-/// Prefer `getrlimit`; fall back to launchctl only if getrlimit fails.
+/// Do **not** treat launchctl alone as the zellij **server** ceiling — see
+/// [`effective_server_nofile_limit`]. Prefer `getrlimit` for self; fall back to
+/// launchctl only if getrlimit fails.
 fn process_nofile_soft_limit() -> (u64, &'static str) {
     #[cfg(unix)]
     {
@@ -564,18 +670,13 @@ fn probe_zellij_caps() -> ZellijCaps {
 
 /// True when zellij must steal focus for every pane spawn (&lt;0.44).
 /// Callers should serialize multi-item launches to avoid session thrash/crashes.
+#[allow(dead_code)] // retained for mux callers / future serial paths
 pub fn zellij_needs_serial_launches() -> bool {
     if detect_terminal() != Some(TerminalContext::Zellij) {
         return false;
     }
     let caps = zellij_caps();
     !caps.near_current_pane && !caps.tab_id
-}
-
-/// Multi-ticket forge staggers zellij pane launches in the **current** session
-/// to avoid EMFILE bursts (even when `--tab-id` is available).
-pub fn zellij_forge_all_serial_launches() -> bool {
-    detect_terminal() == Some(TerminalContext::Zellij)
 }
 
 /// Env var pointing at a JSON [`ItemSurface`] for nested `scrutiny forge --here`.
@@ -1803,6 +1904,63 @@ mod tests {
         let mut parts = line.split_whitespace();
         assert_eq!(parts.next(), Some("maxfiles"));
         assert_eq!(parts.next().unwrap().parse::<u64>().unwrap(), 256);
+    }
+
+    #[test]
+    fn effective_server_limit_uses_proc_when_present() {
+        let (n, src) = effective_server_nofile_limit(100, 1_000_000, Some(256), Some(10240));
+        assert_eq!(n, 10240);
+        assert_eq!(src, "proc_limits");
+    }
+
+    #[test]
+    fn effective_server_limit_conservative_when_used_under_launchctl() {
+        // Client getrlimit is huge; server likely still at launchctl soft 256.
+        let (n, src) = effective_server_nofile_limit(237, 1_048_575, Some(256), None);
+        assert_eq!(n, 256);
+        assert_eq!(src, "min(self,launchctl)");
+        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+        assert!(237 + 48 > ceiling, "must refuse crowded soft-256 server");
+    }
+
+    #[test]
+    fn effective_server_limit_unlocks_when_used_proves_raised() {
+        let (n, src) = effective_server_nofile_limit(300, 10_240, Some(256), None);
+        assert_eq!(n, 10_240);
+        assert_eq!(src, "self_getrlimit(proven_raised)");
+    }
+
+    #[test]
+    fn effective_server_limit_allows_fresh_session_under_256() {
+        let (n, _) = effective_server_nofile_limit(95, 1_048_575, Some(256), None);
+        assert_eq!(n, 256);
+        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+        let need = zellij_fds_per_forge_tab(2, 1);
+        assert!(95 + need <= ceiling, "one tab should fit on fresh soft-256");
+    }
+
+    #[test]
+    fn parse_proc_limits_nofile_soft_line() {
+        let text = "Limit                     Soft Limit           Hard Limit           Units\n\
+Max open files            1024                 4096                 files\n";
+        assert_eq!(parse_proc_limits_nofile_soft(text), Some(1024));
+    }
+
+    #[test]
+    fn zellij_fds_budget_scales_with_agents() {
+        let one = zellij_fds_per_forge_tab(1, 0);
+        let team = zellij_fds_per_forge_tab(2, 1);
+        assert!(team > one);
+        assert!(team >= ZELLIJ_FD_TAB_OVERHEAD + 4 * ZELLIJ_FD_PER_PANE);
+    }
+
+    #[test]
+    fn is_zellij_emfile_limit_error_detects_bail_text() {
+        let err = anyhow::anyhow!(
+            "refusing to open 1 forge tab(s): near open-file limit (EMFILE). more"
+        );
+        assert!(is_zellij_emfile_limit_error(&err));
+        assert!(!is_zellij_emfile_limit_error(&anyhow::anyhow!("lsof failed")));
     }
 
     #[test]
