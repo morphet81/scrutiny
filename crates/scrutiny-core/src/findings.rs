@@ -980,15 +980,18 @@ pub fn run_findings_triage(
                         }
                     };
 
-                    let ask_model = if model.is_empty() {
+                    let session_model = if model.is_empty() {
                         match client.client.as_str() {
                             "claude" => "sonnet",
                             "codex" => "o4-mini",
                             _ => "composer-2-fast",
                         }
+                        .to_string()
                     } else {
-                        model.as_str()
+                        model
                     };
+                    let ask_cwd = cwd.unwrap_or_else(|| Path::new("."));
+                    let ask_model = resolve_ask_model(ask_cwd, &client.client, &session_model);
 
                     let context = {
                         let mut c =
@@ -1003,8 +1006,8 @@ pub fn run_findings_triage(
                     let prompt = crate::agent_runner::build_ask_revise_prompt(&context, &question);
                     let out = crate::agent_runner::run_headless(
                         &client,
-                        ask_model,
-                        cwd.unwrap_or_else(|| Path::new(".")),
+                        &ask_model,
+                        ask_cwd,
                         &prompt,
                         crate::agent_runner::HeadlessKind::Ask,
                         &format!("ask-{}", f.id),
@@ -1306,15 +1309,19 @@ fn print_finding_block(
     }
 }
 
-fn resolve_ask_client(
-    cwd: &Path,
-    client_override: Option<&str>,
-) -> Result<crate::runtime::DetectedClient> {
+fn load_ask_config(cwd: &Path) -> Result<crate::config::Config> {
     let shipped = crate::config::find_shipped_default(
         &std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()),
     );
     let cfg_path = crate::config::ensure_config(&shipped)?;
-    let cfg = crate::config::load_config(&cfg_path)?;
+    crate::config::load_config(&cfg_path)
+}
+
+fn resolve_ask_client(
+    cwd: &Path,
+    client_override: Option<&str>,
+) -> Result<crate::runtime::DetectedClient> {
+    let cfg = load_ask_config(cwd)?;
     crate::runtime::resolve_client(
         &cfg,
         crate::runtime::ResolveClientInput {
@@ -1322,6 +1329,22 @@ fn resolve_ask_client(
             skip_prompt: true,
         },
     )
+}
+
+/// Session model with optional `[probe.agent_models] ask` / catch-all override.
+fn resolve_ask_model(cwd: &Path, client: &str, session_model: &str) -> String {
+    match load_ask_config(cwd) {
+        Ok(cfg) => {
+            let model = cfg.resolve_agent_model(client, "ask", session_model);
+            if model != session_model {
+                eprintln!(
+                    "  ask model override `{model}` (session was `{session_model}`)"
+                );
+            }
+            model
+        }
+        Err(_) => session_model.to_string(),
+    }
 }
 
 fn extract_ask_text(stdout: &str) -> String {

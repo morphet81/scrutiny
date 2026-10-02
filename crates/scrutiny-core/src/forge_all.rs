@@ -122,7 +122,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
                 if is_zellij_emfile_limit_error(&e) {
                     skipped_raw.extend(input.tickets[idx..].iter().cloned());
                     stopped_emfile = true;
-                    eprintln!("scrutiny forge: stop before EMFILE — {e:#}");
+                    // Colorful explanation already printed by preflight.
                     break;
                 }
                 // Fail closed: cannot measure → do not open more tabs.
@@ -189,8 +189,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
     if started_paths.is_empty() {
         if stopped_emfile {
             bail!(
-                "forge: no tickets started — zellij server near EMFILE before the first tab. \
-                 Raise ulimit outside zellij, restart the session, retry."
+                "forge: no tickets started — near open-file limit (EMFILE) before the first tab"
             );
         }
         bail!("forge: no tickets prepared");

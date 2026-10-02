@@ -81,6 +81,7 @@ headless_first_output_secs = 90    # 0 = disable
 # ask_wall_secs = 600
 
 [probe.agent_models]
+# default = "m"                    # catch-all for all probe roles below
 # reviewer = "m"
 # evangelist = "m"
 # summary = "m"
@@ -88,6 +89,8 @@ headless_first_output_secs = 90    # 0 = disable
 # performance = "l"
 # error_handling = "m"
 # lead = "l"
+# consolidator = "m"               # always headless (even when headless=false)
+# ask = "m"                        # triage ask; always headless
 
 [probe.prompts]
 # global = ""
@@ -283,6 +286,7 @@ branch_headless = "auto"
 # loc_estimate = "m"               # special default: always m when unset
 # test_plan = "m"
 # po_team = "l"
+# pr_description = "m"             # custom PR body agent; always headless
 
 [forge.prompts]
 # global = ""

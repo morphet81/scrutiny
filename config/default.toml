@@ -140,6 +140,14 @@ max_agents_total = 4
 max_reviewers = 2
 max_evangelists = 1
 
+[probe.agent_models]
+# default = "m"
+# consolidator = "m"
+# ask = "m"
+# reviewer = "m"
+# summary = "m"
+# lead = "l"
+
 [probe.agents.reviewers_by_tier]
 XS = 0
 S = 1
@@ -264,4 +272,7 @@ prepush_plan_wall_secs = 120
 # parley = "l"
 # parley_prepush_plan = "xs"
 # forge_loc_estimate = "m"
+# forge_pr_description = "m"
 # parley_push_fix = "m"
+# consolidator = "m"
+# ask = "m"

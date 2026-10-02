@@ -151,7 +151,7 @@ scrutiny parley stack 2
 - Requires `gh stack`
 
 Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
-Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). Preflight compares server FD count to the **server** soft limit (a raised `ulimit` in a pane does not raise an already-running server — restart the session from an outside shell after `ulimit -n 10240`). Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
+Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with fix steps). Preflight compares server FD count to the **server** soft limit (a raised `ulimit` in a pane does not raise an already-running server — restart the session from an outside shell after `ulimit -n 10240`). Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
 
@@ -421,9 +421,19 @@ Also scored (not configurable lists): AC count, description size, issue type, Fi
 
 Per-role model override. Key = agent label with `-` → `_` (same as `[prompts.agents]`). Value = tier `xs` \| `s` \| `m` \| `l` \| `xl` (resolved via `[models.<client>]`) **or** a raw model id. Unset → session model.
 
-Prefix catch-all: `parley = "l"` covers every `parley_*` role. Exact role still wins (`parley_prepush_plan = "xs"` after `parley = "l"` keeps the plan agent cheap). Special defaults when neither family nor role is set: `parley_prepush_plan` → client `xs`; `forge_loc_estimate` → `m`. Same prefix pattern works for `forge`.
+Prefer per-command maps (`[probe.agent_models]`, `[forge.agent_models]`, `[parley.agent_models]`); they merge into this flat table. Prefix catch-all: `parley = "l"` covers every `parley_*` role; probe `default = "m"` (flat key `probe`) covers bare probe roles (`reviewer`, `consolidator`, `error_handling`, …). Exact role still wins. Special defaults when neither family nor role is set: `parley_prepush_plan` → client `xs`; `forge_loc_estimate` → `m`.
+
+Always-headless agents (run headless even when `headless = false`) honor the same overrides: probe `consolidator`, probe `ask`, forge `pr_description`.
 
 ```toml
+[probe.agent_models]
+consolidator = "m"
+ask = "m"
+# default = "m"
+
+[forge.agent_models]
+# pr_description = "m"
+
 [agent_models]
 parley = "l"
 # parley_prepush_plan = "xs"

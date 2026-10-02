@@ -537,8 +537,19 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
     if let Some(tmpl) = cfg.forge.pr_description_prompt.as_deref() {
         let tmpl = tmpl.trim();
         if !tmpl.is_empty() {
+            let pr_model = cfg.resolve_agent_model(
+                &detected.client,
+                "forge_pr_description",
+                &session.model,
+            );
+            if pr_model != session.model {
+                eprintln!(
+                    "scrutiny forge: pr_description model override `{pr_model}` (session was `{}`)",
+                    session.model
+                );
+            }
             if let Err(e) =
-                generate_custom_pr_body(detected, &session.model, &cwd, ticket, tmpl, &pr_meta_path)
+                generate_custom_pr_body(detected, &pr_model, &cwd, ticket, tmpl, &pr_meta_path)
             {
                 eprintln!("scrutiny forge: custom PR description skipped: {e:#}");
             }

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::config::Config;
 use crate::paths::{artifact_path, artifact_path_unique, temp_artifact_path, write_json_pretty};
 use crate::plan::ConfirmedPlan;
 use crate::review_session::{partition_pack_paths, ReviewAgentRecord};
@@ -22,6 +23,17 @@ use crate::terminal::{
     kill_cmd_for_terminal, launch_agent_in_surface, launch_agent_window, register_agent_pane,
     ItemSurface, ResolvedTerminal,
 };
+
+/// Resolve `[agent_models]` override for `role`; log when it differs from session.
+fn agent_model_for(cfg: &Config, client: &str, role: &str, session_model: &str) -> String {
+    let model = cfg.resolve_agent_model(client, role, session_model);
+    if model != session_model {
+        eprintln!(
+            "scrutiny: {role} model override `{model}` (session was `{session_model}`)"
+        );
+    }
+    model
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessKind {
@@ -1575,18 +1587,20 @@ fn parse_pr_summary_raw(client: &str, raw: &str) -> Result<ProbePrSummary> {
 /// Headless: `--json-schema` + parse stdout. One retry on parse failure either way.
 pub fn run_pr_summary_agent(
     client: &DetectedClient,
-    model: &str,
+    cfg: &Config,
+    session_model: &str,
     pack_path: &Path,
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
 ) -> Result<(ProbePrSummary, PathBuf)> {
+    let model = agent_model_for(cfg, &client.client, "summary", session_model);
     let prompt = build_pr_summary_prompt(pack_path);
     eprintln!("scrutiny probe: pr summary agent…");
 
     if let Some(ctx) = term {
-        return run_pr_summary_nonheadless(client, model, cwd, &prompt, ctx);
+        return run_pr_summary_nonheadless(client, &model, cwd, &prompt, ctx);
     }
-    run_pr_summary_headless(client, model, cwd, &prompt)
+    run_pr_summary_headless(client, &model, cwd, &prompt)
 }
 
 fn run_pr_summary_headless(
@@ -1729,7 +1743,8 @@ pub fn collate_review_report(
     agents: Vec<AgentRunResult>,
     spawn_mode: &str,
     client: &DetectedClient,
-    model: &str,
+    cfg: &Config,
+    session_model: &str,
     pack_path: &Path,
     cwd: &Path,
     extra: Vec<AgentFinding>,
@@ -1739,7 +1754,7 @@ pub fn collate_review_report(
     let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
     all.extend(extra);
     let deduped = dedupe_findings(&mut all);
-    let findings = consolidate_findings(client, model, pack_path, cwd, deduped);
+    let findings = consolidate_findings(client, cfg, session_model, pack_path, cwd, deduped);
     let usage_total = {
         let mut t = TokenUsage::default();
         let mut any = false;
@@ -1754,7 +1769,7 @@ pub fn collate_review_report(
     let report = ReviewReport {
         version: 1,
         spawn_mode: spawn_mode.to_string(),
-        model: model.to_string(),
+        model: session_model.to_string(),
         findings,
         agents,
         deduped_from: raw_count,
@@ -1770,7 +1785,8 @@ pub fn collate_review_report(
 /// when `SCRUTINY_NO_CONSOLIDATE` is set. No-op for <=1 finding.
 fn consolidate_findings(
     client: &DetectedClient,
-    model: &str,
+    cfg: &Config,
+    session_model: &str,
     pack_path: &Path,
     cwd: &Path,
     findings: Vec<AgentFinding>,
@@ -1787,11 +1803,12 @@ fn consolidate_findings(
             return findings;
         }
     };
+    let model = agent_model_for(cfg, &client.client, "consolidator", session_model);
     let prompt = build_consolidation_prompt(&findings_json, pack_path);
     eprintln!("scrutiny: consolidating {} findings…", findings.len());
     match run_headless(
         client,
-        model,
+        &model,
         cwd,
         &prompt,
         HeadlessKind::Consolidate,
@@ -2061,6 +2078,7 @@ fn parse_pr_summary_value(v: &Value) -> ProbePrSummary {
 
 pub fn run_isolated_agents(
     client: &DetectedClient,
+    cfg: &Config,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
@@ -2102,11 +2120,12 @@ pub fn run_isolated_agents(
         let mut entries: Vec<(PathBuf, PathBuf, String, u32, Vec<String>)> = Vec::new();
         for (role, index, paths) in &jobs {
             let label = format!("{role}#{index}");
+            let model = agent_model_for(cfg, &client.client, role, &plan.model);
             let findings_path =
                 artifact_path(&format!("review-agent-findings-{role}-{index}"));
             let prompt = build_isolated_prompt(role, pack_path, paths, plan)
                 + &nonheadless_findings_suffix(&findings_path);
-            let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, &label, ctx)?;
+            let sentinel = run_nonheadless(client, &model, cwd, &prompt, &label, ctx)?;
             entries.push((sentinel, findings_path, role.clone(), *index, paths.clone()));
         }
         let sentinel_paths: Vec<PathBuf> =
@@ -2173,7 +2192,7 @@ pub fn run_isolated_agents(
     for (role, index, paths) in jobs {
         let tx = tx.clone();
         let client = client.clone();
-        let model = plan.model.clone();
+        let model = agent_model_for(cfg, &client.client, &role, &plan.model);
         let pack = pack_path.to_path_buf();
         let cwd = cwd.to_path_buf();
         let plan_c = plan.clone();
@@ -2335,16 +2354,18 @@ pub fn run_isolated_agents(
 /// Spawn isolated agents, then collate (+ optional extras) into a report.
 pub fn run_isolated_review(
     client: &DetectedClient,
+    cfg: &Config,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
 ) -> Result<(ReviewReport, PathBuf)> {
-    let agents = run_isolated_agents(client, plan, pack_path, cwd, term)?;
+    let agents = run_isolated_agents(client, cfg, plan, pack_path, cwd, term)?;
     collate_review_report(
         agents,
         "isolated",
         client,
+        cfg,
         &plan.model,
         pack_path,
         cwd,
@@ -2354,17 +2375,19 @@ pub fn run_isolated_review(
 
 pub fn run_team_agents(
     client: &DetectedClient,
+    cfg: &Config,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
 ) -> Result<Vec<AgentRunResult>> {
     let prompt_base = build_team_lead_prompt(pack_path, plan);
+    let model = agent_model_for(cfg, &client.client, "lead", &plan.model);
 
     if let Some(ctx) = term {
         let findings_path = artifact_path("review-lead-findings");
         let prompt = prompt_base + &nonheadless_findings_suffix(&findings_path);
-        let sentinel = run_nonheadless(client, &plan.model, cwd, &prompt, "lead#1", ctx)?;
+        let sentinel = run_nonheadless(client, &model, cwd, &prompt, "lead#1", ctx)?;
         let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
         if !missing.is_empty() {
             eprintln!(
@@ -2403,7 +2426,7 @@ pub fn run_team_agents(
     let wall = crate::timeouts::probe_team();
     let out = run_headless(
         client,
-        &plan.model,
+        &model,
         cwd,
         &prompt_base,
         HeadlessKind::TeamLead,
@@ -2440,13 +2463,23 @@ pub fn run_team_agents(
 /// Spawn team lead, then collate (+ optional extras) into a report.
 pub fn run_team_review(
     client: &DetectedClient,
+    cfg: &Config,
     plan: &ConfirmedPlan,
     pack_path: &Path,
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
 ) -> Result<(ReviewReport, PathBuf)> {
-    let agents = run_team_agents(client, plan, pack_path, cwd, term)?;
-    collate_review_report(agents, "team", client, &plan.model, pack_path, cwd, Vec::new())
+    let agents = run_team_agents(client, cfg, plan, pack_path, cwd, term)?;
+    collate_review_report(
+        agents,
+        "team",
+        client,
+        cfg,
+        &plan.model,
+        pack_path,
+        cwd,
+        Vec::new(),
+    )
 }
 
 pub fn session_records_from_report(report: &ReviewReport) -> Vec<ReviewAgentRecord> {

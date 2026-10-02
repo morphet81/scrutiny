@@ -344,6 +344,9 @@ const ZELLIJ_FD_TAB_OVERHEAD: u64 = 12;
 /// Rough FDs per terminal pane (driver / agent) on the zellij server.
 const ZELLIJ_FD_PER_PANE: u64 = 8;
 
+/// Marker substring kept in the bail message so [`is_zellij_emfile_limit_error`] works.
+const EMFILE_BAIL_MARKER: &str = "near open-file limit (EMFILE)";
+
 /// FD headroom to reserve for one multi-ticket forge tab (placeholder + driver +
 /// nested `--here` agent panes).
 pub fn zellij_fds_per_forge_tab(agents: u32, testers: u32) -> u64 {
@@ -353,11 +356,37 @@ pub fn zellij_fds_per_forge_tab(agents: u32, testers: u32) -> u64 {
     ZELLIJ_FD_TAB_OVERHEAD.saturating_add(panes.saturating_mul(ZELLIJ_FD_PER_PANE))
 }
 
-/// True when [`preflight_zellij_open_files`] failed because the next tab would
-/// push the **server** near EMFILE (safe to stop remaining tickets).
+/// FD headroom to reserve for `panes` agent windows in the current tab
+/// (probe / parley / single-ticket forge).
+pub fn zellij_fds_for_panes(panes: u32) -> u64 {
+    u64::from(panes.max(1)).saturating_mul(ZELLIJ_FD_PER_PANE)
+}
+
+/// True when [`preflight_zellij_open_files`] failed because the next spawn would
+/// push the **server** near EMFILE (safe to stop remaining work).
 pub fn is_zellij_emfile_limit_error(err: &anyhow::Error) -> bool {
     let s = err.to_string();
-    s.contains("near open-file limit (EMFILE)") || s.contains("near open-file limit")
+    s.contains(EMFILE_BAIL_MARKER) || s.contains("near open-file limit")
+}
+
+/// Refuse opening more agent panes when the zellij server is near EMFILE.
+///
+/// No-op when `term` is `None` (headless) or not Zellij. Call once before a
+/// batch of [`run_nonheadless`] spawns with the full pane count.
+pub fn preflight_zellij_agent_panes(
+    term: Option<&ResolvedTerminal>,
+    tool: &str,
+    panes: u32,
+) -> Result<()> {
+    if panes == 0 || term.is_none() {
+        return Ok(());
+    }
+    if detect_terminal() != Some(TerminalContext::Zellij)
+        && term.map(|t| t.kind) != Some(TerminalContext::Zellij)
+    {
+        return Ok(());
+    }
+    preflight_zellij_open_files_budget_ex(tool, "pane", panes as usize, zellij_fds_for_panes(1))
 }
 
 /// Refuse opening `extra_tabs` when the **current** zellij **server** is near EMFILE.
@@ -371,21 +400,36 @@ pub fn preflight_zellij_open_files(extra_tabs: usize) -> Result<()> {
     preflight_zellij_open_files_budget(extra_tabs, ZELLIJ_FDS_PER_FORGE_TAB_DEFAULT)
 }
 
-/// Like [`preflight_zellij_open_files`] with an explicit per-tab FD budget.
+/// Like [`preflight_zellij_open_files`] with an explicit per-tab FD budget (forge).
 pub fn preflight_zellij_open_files_budget(extra_tabs: usize, fds_per_tab: u64) -> Result<()> {
-    if extra_tabs == 0 || detect_terminal() != Some(TerminalContext::Zellij) {
+    preflight_zellij_open_files_budget_ex("forge", "tab", extra_tabs, fds_per_tab)
+}
+
+/// Shared EMFILE preflight for forge tabs or probe/parley panes.
+pub fn preflight_zellij_open_files_budget_ex(
+    tool: &str,
+    unit: &str, // "tab" | "pane"
+    count: usize,
+    fds_per_unit: u64,
+) -> Result<()> {
+    if count == 0 || detect_terminal() != Some(TerminalContext::Zellij) {
         return Ok(());
     }
+    let unit_plural = if count == 1 {
+        unit.to_string()
+    } else {
+        format!("{unit}s")
+    };
     let pid = zellij_current_server_pid().ok_or_else(|| {
         anyhow::anyhow!(
-            "could not find zellij server pid for EMFILE preflight — refuse to open tabs \
+            "could not find zellij server pid for EMFILE preflight — refuse to open {unit_plural} \
              (set ZELLIJ_SESSION_NAME / run inside the session)"
         )
     })?;
     let used = count_process_open_files(pid).ok_or_else(|| {
         anyhow::anyhow!(
             "could not count open files for zellij server pid={pid} (lsof failed) — \
-             refuse to open tabs"
+             refuse to open {unit_plural}"
         )
     })?;
     let (self_soft, _) = process_nofile_soft_limit();
@@ -393,27 +437,202 @@ pub fn preflight_zellij_open_files_budget(extra_tabs: usize, fds_per_tab: u64) -
     let proc_soft = server_nofile_soft_from_proc(pid);
     let (limit, limit_src) =
         effective_server_nofile_limit(used, self_soft, launchctl, proc_soft);
-    let per = fds_per_tab.max(1);
-    let need = (extra_tabs as u64).saturating_mul(per);
+    let per = fds_per_unit.max(1);
+    let need = (count as u64).saturating_mul(per);
     let free = limit.saturating_sub(used);
     let ceiling = limit.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+    let session = zellij_session_name_hint();
+
     eprintln!(
-        "scrutiny forge: zellij server pid={pid} — {used} file descriptors open \
+        "scrutiny {tool}: zellij server pid={pid} — {used} file descriptors open \
          / soft limit {limit} from {limit_src} ({free} free; ~{need} needed for \
-         {extra_tabs} new tab(s) @ {per} FDs each). Note: FDs (sockets/pipes/files), \
+         {count} new {unit_plural} @ {per} FDs each). Note: FDs (sockets/pipes/files), \
          NOT tab count."
     );
     if used.saturating_add(need) > ceiling {
+        print_zellij_emfile_refusal(ZellijEmfileRefusal {
+            tool,
+            unit,
+            count,
+            used,
+            limit,
+            limit_src,
+            free,
+            need,
+            per,
+            session: &session,
+        });
         bail!(
-            "refusing to open {extra_tabs} forge tab(s): near open-file limit (EMFILE). \
-             {used} file descriptors open (not tabs!) / soft limit {limit} ({limit_src}); \
-             need ~{need} more. Do NOT kill this session from inside a pane. Open a \
-             normal iTerm/Terminal window outside zellij, run: \
-             `ulimit -n 10240 && zellij kill-session \"$SESSION\"` then start zellij \
-             again from that same outside shell. (launchctl system soft can stay 256.)"
+            "scrutiny {tool}: refused to open {count} {unit_plural}: {EMFILE_BAIL_MARKER}"
         );
     }
     Ok(())
+}
+
+struct ZellijEmfileRefusal<'a> {
+    tool: &'a str,
+    unit: &'a str,
+    count: usize,
+    used: u64,
+    limit: u64,
+    limit_src: &'a str,
+    free: u64,
+    need: u64,
+    per: u64,
+    session: &'a str,
+}
+
+fn zellij_session_name_hint() -> String {
+    std::env::var("ZELLIJ_SESSION_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "$SESSION".into())
+}
+
+fn emfile_want_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
+/// Colorful EMFILE refusal: why we stopped + how to free FDs or raise the limit.
+fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
+    use console::Style;
+    let color = emfile_want_color();
+    let bold = if color {
+        Style::new().bold()
+    } else {
+        Style::new()
+    };
+    let red = if color {
+        Style::new().bold().red()
+    } else {
+        Style::new()
+    };
+    let yellow = if color {
+        Style::new().yellow()
+    } else {
+        Style::new()
+    };
+    let cyan = if color {
+        Style::new().cyan()
+    } else {
+        Style::new()
+    };
+    let dim = if color {
+        Style::new().dim()
+    } else {
+        Style::new()
+    };
+    let green = if color {
+        Style::new().green()
+    } else {
+        Style::new()
+    };
+
+    let unit_plural = if r.count == 1 {
+        r.unit.to_string()
+    } else {
+        format!("{}s", r.unit)
+    };
+    let bar = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+
+    eprintln!();
+    eprintln!("{}", red.apply_to(bar));
+    eprintln!(
+        "{}",
+        red.apply_to("  Zellij near open-file limit (EMFILE)")
+    );
+    eprintln!("{}", red.apply_to(bar));
+    eprintln!();
+    eprintln!(
+        "  {} refused to open {} agent {} to avoid crashing this whole zellij session.",
+        bold.apply_to(format!("scrutiny {}", r.tool)),
+        bold.apply_to(r.count.to_string()),
+        unit_plural
+    );
+    eprintln!();
+    eprintln!(
+        "  {}  {} used / {} soft limit ({})",
+        cyan.apply_to("Server FDs:"),
+        bold.apply_to(r.used.to_string()),
+        bold.apply_to(r.limit.to_string()),
+        dim.apply_to(r.limit_src)
+    );
+    eprintln!(
+        "  {}       {}",
+        cyan.apply_to("Free:"),
+        bold.apply_to(r.free.to_string())
+    );
+    eprintln!(
+        "  {}       ~{} more ({} FDs × {} {})",
+        cyan.apply_to("Need:"),
+        bold.apply_to(r.need.to_string()),
+        r.per,
+        r.count,
+        unit_plural
+    );
+    eprintln!(
+        "  {}       These are file descriptors (sockets/pipes/PTYs), {}",
+        cyan.apply_to("Note:"),
+        yellow.apply_to("NOT tab count")
+    );
+    eprintln!();
+    eprintln!("{}", bold.apply_to("  Fix (pick one):"));
+    eprintln!();
+    eprintln!(
+        "  {} Free FDs without killing the session",
+        green.apply_to("1)")
+    );
+    eprintln!("     • Close idle agent panes / finished claude shells");
+    eprintln!(
+        "     • Close done forge tabs ({})",
+        cyan.apply_to("scrutiny cleanup -y")
+    );
+    eprintln!(
+        "     • Re-check: {}",
+        dim.apply_to("lsof -p <zellij-server-pid> | wc -l")
+    );
+    eprintln!();
+    eprintln!(
+        "  {} Raise the server limit (best if you keep hitting this)",
+        green.apply_to("2)")
+    );
+    eprintln!(
+        "     Open a normal Terminal/iTerm {} zellij, then:",
+        yellow.apply_to("OUTSIDE")
+    );
+    eprintln!();
+    eprintln!("{}", cyan.apply_to("       ulimit -n 10240"));
+    eprintln!(
+        "{}",
+        cyan.apply_to(format!("       zellij kill-session \"{}\"", r.session))
+    );
+    eprintln!("{}", cyan.apply_to("       ulimit -n 10240"));
+    eprintln!(
+        "{}",
+        cyan.apply_to(format!("       zellij -s \"{}\"", r.session))
+    );
+    eprintln!();
+    eprintln!(
+        "     {}",
+        dim.apply_to(
+            "Pane ulimit alone does nothing — the server keeps its birth limit."
+        )
+    );
+    eprintln!(
+        "     {}",
+        dim.apply_to("(launchctl system soft can stay 256.)")
+    );
+    eprintln!();
+    eprintln!(
+        "  {}",
+        yellow.apply_to("Do NOT run kill-session from inside a zellij pane.")
+    );
+    eprintln!("{}", red.apply_to(bar));
+    eprintln!();
 }
 
 /// Pick the soft nofile ceiling that applies to the **zellij server**.
@@ -1957,10 +2176,16 @@ Max open files            1024                 4096                 files\n";
     #[test]
     fn is_zellij_emfile_limit_error_detects_bail_text() {
         let err = anyhow::anyhow!(
-            "refusing to open 1 forge tab(s): near open-file limit (EMFILE). more"
+            "scrutiny forge: refused to open 1 tabs: near open-file limit (EMFILE)"
         );
         assert!(is_zellij_emfile_limit_error(&err));
         assert!(!is_zellij_emfile_limit_error(&anyhow::anyhow!("lsof failed")));
+    }
+
+    #[test]
+    fn zellij_fds_for_panes_scales() {
+        assert_eq!(zellij_fds_for_panes(1), ZELLIJ_FD_PER_PANE);
+        assert_eq!(zellij_fds_for_panes(4), 4 * ZELLIJ_FD_PER_PANE);
     }
 
     #[test]

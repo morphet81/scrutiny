@@ -24,7 +24,7 @@ use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteI
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
 use crate::runtime::{resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput};
 use crate::scan::run_scan;
-use crate::terminal::{force_close_agent_panes, resolve_terminal, AgentPaneCleanupGuard};
+use crate::terminal::{force_close_agent_panes, preflight_zellij_agent_panes, resolve_terminal, AgentPaneCleanupGuard};
 
 #[derive(Debug, Clone)]
 pub struct ReviewCmdInput {
@@ -220,9 +220,17 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         // Force-close leftover agent panes on exit / Ctrl-C / unwind (after summary joins).
         let _pane_guard = term.as_ref().map(|_| AgentPaneCleanupGuard::default());
 
+        let summary_on = cfg.probe.pr_summary;
+        preflight_zellij_agent_panes(
+            term.as_ref(),
+            "probe",
+            probe_agent_pane_count(&plan, summary_on),
+        )?;
+
         let summary_handle = spawn_pr_summary_agent(
-            cfg.probe.pr_summary,
+            summary_on,
             &detected,
+            &cfg,
             &plan.model,
             &pack_path,
             &cwd,
@@ -232,10 +240,10 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         let spawn_mode = plan.spawn_mode.as_str();
         let agents = if spawn_mode == "team" {
             eprintln!("scrutiny probe: team lead agent…");
-            run_team_agents(&detected, &plan, &pack_path, &cwd, term.as_ref())?
+            run_team_agents(&detected, &cfg, &plan, &pack_path, &cwd, term.as_ref())?
         } else {
             eprintln!("scrutiny probe: isolated parallel agents…");
-            run_isolated_agents(&detected, &plan, &pack_path, &cwd, term.as_ref())?
+            run_isolated_agents(&detected, &cfg, &plan, &pack_path, &cwd, term.as_ref())?
         };
 
         let pr_summary = join_pr_summary_agent(summary_handle);
@@ -257,6 +265,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
             agents,
             spawn_mode,
             &detected,
+            &cfg,
             &plan.model,
             &pack_path,
             &cwd,
@@ -459,10 +468,31 @@ pub fn run_review_from_report(input: ReportResumeInput) -> Result<(PathBuf, Opti
     Ok((findings_path, Some(input.report_path)))
 }
 
+/// How many visible agent panes probe will open (review wave + optional summary).
+fn probe_agent_pane_count(plan: &crate::plan::ConfirmedPlan, include_summary: bool) -> u32 {
+    let review = if plan.spawn_mode == "team" {
+        1
+    } else {
+        let mut n = plan.reviewers.saturating_add(plan.evangelists);
+        if plan.security {
+            n = n.saturating_add(1);
+        }
+        if plan.performance {
+            n = n.saturating_add(1);
+        }
+        if plan.error_handling {
+            n = n.saturating_add(1);
+        }
+        n
+    };
+    review.saturating_add(u32::from(include_summary))
+}
+
 fn spawn_pr_summary_agent(
     enabled: bool,
     client: &crate::runtime::DetectedClient,
-    model: &str,
+    cfg: &crate::config::Config,
+    session_model: &str,
     pack_path: &Path,
     cwd: &Path,
     term: Option<crate::terminal::ResolvedTerminal>,
@@ -471,11 +501,19 @@ fn spawn_pr_summary_agent(
         return None;
     }
     let client = client.clone();
-    let model = model.to_string();
+    let cfg = cfg.clone();
+    let session_model = session_model.to_string();
     let pack = pack_path.to_path_buf();
     let cwd = cwd.to_path_buf();
     Some(thread::spawn(move || {
-        run_pr_summary_agent(&client, &model, &pack, &cwd, term.as_ref())
+        run_pr_summary_agent(
+            &client,
+            &cfg,
+            &session_model,
+            &pack,
+            &cwd,
+            term.as_ref(),
+        )
     }))
 }
 

@@ -1256,6 +1256,8 @@ impl Config {
     ///
     /// - Explicit `[agent_models.<role>]` wins (tier name or raw model id).
     /// - Else prefix catch-all: `parley_member` reads `[agent_models.parley]`.
+    /// - Probe bare roles (`reviewer`, `consolidator`, `error_handling`, …) also
+    ///   honor flat key `probe` from `[probe.agent_models] default = "…"`.
     /// - `parley_prepush_plan` with neither entry defaults to tier `xs`.
     /// - `forge_loc_estimate` with neither entry defaults to tier `m`.
     /// - Otherwise → `session_model`.
@@ -1267,7 +1269,15 @@ impl Config {
                 .filter(|s| !s.is_empty())
         };
         let family = role.split_once('_').map(|(p, _)| p);
-        let raw = match lookup(role).or_else(|| family.and_then(lookup)) {
+        let raw = match lookup(role)
+            .or_else(|| family.and_then(lookup))
+            .or_else(|| {
+                if is_probe_agent_role(role) {
+                    lookup("probe")
+                } else {
+                    None
+                }
+            }) {
             Some(v) => v,
             None if role == "parley_prepush_plan" => "xs",
             None if role == "forge_loc_estimate" => "m",
@@ -1676,6 +1686,23 @@ fn merge_command_timeouts(cfg: &mut Config) {
 }
 
 /// Expand per-command agent_models maps into the flat agent_models BTreeMap.
+/// Probe agent roles stored as bare keys in the flat `agent_models` map
+/// (see [`merge_agent_models`]). Includes always-headless `consolidator` / `ask`.
+fn is_probe_agent_role(role: &str) -> bool {
+    matches!(
+        role,
+        "reviewer"
+            | "evangelist"
+            | "summary"
+            | "security"
+            | "performance"
+            | "error_handling"
+            | "lead"
+            | "consolidator"
+            | "ask"
+    )
+}
+
 /// Forge/parley keys are prefixed (`forge_implement`, `parley_member`, etc.).
 /// Probe keys stay bare (`reviewer`, `summary`) to match agent labels.
 /// A `default` key in a per-command map acts as the catch-all (e.g. `parley`).
@@ -1851,6 +1878,70 @@ mod tests {
                 .get("cursor")
                 .and_then(|m| m.m.clone())
                 .expect("cursor m")
+        );
+
+        // Probe consolidator / ask: unset → session; exact tier → client model.
+        assert_eq!(
+            cfg.resolve_agent_model("claude", "consolidator", "sonnet"),
+            "sonnet"
+        );
+        assert_eq!(cfg.resolve_agent_model("claude", "ask", "sonnet"), "sonnet");
+        let mut cfg3 = cfg.clone();
+        cfg3.agent_models.insert("consolidator".into(), "m".into());
+        cfg3.agent_models.insert("ask".into(), "xs".into());
+        let expected_m = cfg3
+            .models
+            .get("claude")
+            .and_then(|m| m.m.clone())
+            .expect("claude m");
+        assert_eq!(
+            cfg3.resolve_agent_model("claude", "consolidator", "sonnet"),
+            expected_m
+        );
+        assert_eq!(
+            cfg3.resolve_agent_model("claude", "ask", "sonnet"),
+            "haiku"
+        );
+        // Probe catch-all (`probe` / `[probe.agent_models] default`) covers bare roles
+        // including underscore specialists like error_handling.
+        let mut cfg4 = cfg.clone();
+        cfg4.agent_models.insert("probe".into(), "l".into());
+        let expected_l = cfg4
+            .models
+            .get("claude")
+            .and_then(|m| m.l.clone())
+            .expect("claude l");
+        for role in [
+            "reviewer",
+            "evangelist",
+            "summary",
+            "security",
+            "performance",
+            "error_handling",
+            "lead",
+            "consolidator",
+            "ask",
+        ] {
+            assert_eq!(
+                cfg4.resolve_agent_model("claude", role, "sonnet"),
+                expected_l,
+                "{role}"
+            );
+        }
+        // Exact probe role still beats catch-all.
+        cfg4.agent_models.insert("consolidator".into(), "xs".into());
+        assert_eq!(
+            cfg4.resolve_agent_model("claude", "consolidator", "sonnet"),
+            "haiku"
+        );
+        assert_eq!(
+            cfg4.resolve_agent_model("claude", "reviewer", "sonnet"),
+            expected_l
+        );
+        // Catch-all must not leak onto parley/forge roles.
+        assert_eq!(
+            cfg4.resolve_agent_model("claude", "parley_member", "sonnet"),
+            "sonnet"
         );
     }
 

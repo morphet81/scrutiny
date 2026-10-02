@@ -15,7 +15,6 @@ use crate::agent_runner::{
     claude_error_message, run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind,
     HeadlessOutcome,
 };
-use crate::terminal::force_close_agent_panes;
 use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
     clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
@@ -35,7 +34,9 @@ use crate::parley::reply::{run_parley_reply, ParleyReplyInput};
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
 use crate::prepush;
 use crate::runtime::{resolve_client, ResolveClientInput};
-use crate::terminal::{resolve_terminal, ResolvedTerminal};
+use crate::terminal::{
+    force_close_agent_panes, preflight_zellij_agent_panes, resolve_terminal, ResolvedTerminal,
+};
 
 #[derive(Debug, Clone)]
 pub struct ParleyCmdInput {
@@ -362,6 +363,8 @@ fn run_isolated_parley(
         );
     }
 
+    preflight_zellij_agent_panes(term, "parley", plan.buckets.len() as u32)?;
+
     if let Some(ctx) = term {
         let mut sentinels = Vec::new();
         for (i, bucket) in plan.buckets.iter().enumerate() {
@@ -590,6 +593,8 @@ fn run_team_parley(
     let model = cfg.resolve_agent_model(&client.client, "parley_lead", &plan.model);
     let prompt = build_team_lead_parley_prompt(plan, comments);
 
+    preflight_zellij_agent_panes(term, "parley", 1)?;
+
     if let Some(ctx) = term {
         let sentinel = run_nonheadless(client, &model, cwd, &prompt, "parley-lead", ctx)?;
         let missing = wait_for_sentinels(&[sentinel], crate::timeouts::nonheadless());
@@ -730,6 +735,8 @@ fn run_verify_agents(
     model: &str,
     wall_secs: u64,
 ) -> Result<()> {
+    preflight_zellij_agent_panes(term, "parley", count)?;
+
     if let Some(ctx) = term {
         let mut sentinels = Vec::new();
         for i in 0..count {
@@ -907,6 +914,8 @@ fn run_parley_repair(
     let slice = comments_for_ids(comments, &ids);
     let prompt = build_repair_prompt(&plan.comments_path, &plan.fixes_path, &slice);
     let label = "parley-repair";
+
+    preflight_zellij_agent_panes(term, "parley", 1)?;
 
     if let Some(ctx) = term {
         let sentinel = run_nonheadless(client, &model, cwd, &prompt, label, ctx)?;
