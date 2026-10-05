@@ -33,7 +33,7 @@ use crate::parley::plan::{
 use crate::parley::reply::{run_parley_reply, ParleyReplyInput};
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
 use crate::prepush;
-use crate::runtime::{resolve_client, ResolveClientInput};
+use crate::runtime::{client_from_answers_json, resolve_client, ResolveClientInput};
 use crate::terminal::{
     force_close_agent_panes, preflight_zellij_agent_panes, resolve_terminal, ResolvedTerminal,
 };
@@ -81,10 +81,15 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
-    let detected = resolve_client(
+    let cli_override = input
+        .client
+        .clone()
+        .or_else(|| input.from_json.as_deref().and_then(client_from_answers_json));
+
+    let mut detected = resolve_client(
         &cfg,
         ResolveClientInput {
-            cli_override: input.client.clone(),
+            cli_override,
             skip_prompt: input.non_interactive || input.from_json.is_some(),
         },
     )?;
@@ -134,6 +139,17 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
         input.from_json.as_deref(),
         input.non_interactive,
     )?;
+
+    // Plan answers are authoritative for which CLI binary to spawn.
+    if detected.client != answers.client {
+        detected = resolve_client(
+            &cfg,
+            ResolveClientInput {
+                cli_override: Some(answers.client.clone()),
+                skip_prompt: true,
+            },
+        )?;
+    }
 
     let (plan, plan_path) = run_parley_plan_write(ParleyPlanWriteInput {
         comments: comments.clone(),

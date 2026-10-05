@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::gh::gh_output_retry;
 use crate::git::git_stdout;
 use crate::review_cmd::{run_pending_triage, run_review, ReviewCmdInput};
+use crate::runtime::client_from_answers_json;
 
 pub struct ProbeStackInput {
     pub cwd: PathBuf,
@@ -95,6 +96,11 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
 
     // Phase 1: run all reviews unattended (settings prompted once from PR #1).
     let mut reuse_answers = input.from_json.clone();
+    let mut reuse_client = input.client.clone().or_else(|| {
+        reuse_answers
+            .as_deref()
+            .and_then(client_from_answers_json)
+    });
     let mut paths = Vec::new();
     let mut pending_triages = Vec::new();
     for (i, branch) in open.iter().enumerate() {
@@ -109,7 +115,7 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
         let result = run_review(ReviewCmdInput {
             cwd: input.cwd.clone(),
             pr: Some(pr_number.to_string()),
-            client: input.client.clone(),
+            client: reuse_client.clone(),
             spawn_mode: input.spawn_mode.clone(),
             from_json: reuse_answers.clone(),
             skip_agents: input.skip_agents,
@@ -121,6 +127,11 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
         })?;
         if reuse_answers.is_none() {
             reuse_answers = result.answers_json;
+            if reuse_client.is_none() {
+                reuse_client = reuse_answers
+                    .as_deref()
+                    .and_then(client_from_answers_json);
+            }
         }
         paths.push(result.findings_path);
         if let Some(t) = result.pending_triage {

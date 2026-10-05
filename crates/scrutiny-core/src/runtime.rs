@@ -1,6 +1,7 @@
 //! Detect local headless agent CLIs and resolve which client to use.
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -93,6 +94,19 @@ fn version_ok(bin: &PathBuf) -> bool {
 pub struct ResolveClientInput {
     pub cli_override: Option<String>,
     pub skip_prompt: bool,
+}
+
+/// Pull non-empty `client` from plan-answers / parley-answers JSON (stack reuse, `--from-json`).
+pub fn client_from_answers_json(raw: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ClientField {
+        #[serde(default)]
+        client: String,
+    }
+    serde_json::from_str::<ClientField>(raw)
+        .ok()
+        .map(|c| c.client.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Resolve client + binary path from config / CLI / detection / prompt.
@@ -294,5 +308,15 @@ mod tests {
         assert_eq!(normalize_spawn_mode("isolated").unwrap(), "isolated");
         assert_eq!(normalize_spawn_mode("TEAM").unwrap(), "team");
         assert_eq!(normalize_spawn_mode("full").unwrap(), "team");
+    }
+
+    #[test]
+    fn client_from_answers_json_reads_client() {
+        assert_eq!(
+            client_from_answers_json(r#"{"client":"cursor","model":"auto"}"#).as_deref(),
+            Some("cursor")
+        );
+        assert_eq!(client_from_answers_json(r#"{"client":"  "}"#), None);
+        assert_eq!(client_from_answers_json("not-json"), None);
     }
 }

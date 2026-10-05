@@ -22,7 +22,9 @@ use crate::map::run_map;
 use crate::pack::run_pack;
 use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteInput};
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
-use crate::runtime::{resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput};
+use crate::runtime::{
+    client_from_answers_json, resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput,
+};
 use crate::scan::run_scan;
 use crate::terminal::{force_close_agent_panes, preflight_zellij_agent_panes, resolve_terminal, AgentPaneCleanupGuard};
 
@@ -136,19 +138,32 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
-    let detected = resolve_client(
+    // Stack / --from-json reuses plan answers: honor that client instead of
+    // falling back to default_client when skip_prompt is set.
+    let cli_override = input
+        .client
+        .clone()
+        .or_else(|| input.from_json.as_deref().and_then(client_from_answers_json));
+
+    let mut detected = resolve_client(
         &cfg,
         ResolveClientInput {
-            cli_override: input.client.clone(),
+            cli_override,
             skip_prompt: input.non_interactive || input.from_json.is_some(),
         },
     )?;
 
-    let spawn_mode = resolve_spawn_mode(
-        &cfg,
-        input.spawn_mode.as_deref(),
-        input.non_interactive || input.from_json.is_some(),
-    )?;
+    // With reused answers, keep their spawn_mode unless CLI/config forced one.
+    // resolve_spawn_mode(skip_prompt) would otherwise hardcode "isolated".
+    let spawn_mode_for_plan = if input.from_json.is_some() && input.spawn_mode.is_none() {
+        None
+    } else {
+        Some(resolve_spawn_mode(
+            &cfg,
+            input.spawn_mode.as_deref(),
+            input.non_interactive || input.from_json.is_some(),
+        )?)
+    };
 
     let pr_for_init = pr_refs.number.clone();
 
@@ -190,12 +205,23 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
     let (answers, answers_path) = run_plan_confirm(PlanConfirmInput {
         eval_path: eval_path.clone(),
         client: Some(detected.client.clone()),
-        spawn_mode: Some(spawn_mode.clone()),
+        spawn_mode: spawn_mode_for_plan,
         from_json: input.from_json.clone(),
         accept_suggested: input.non_interactive,
     })?;
     eprintln!("  {}", answers_path.display());
     let answers_json = serde_json::to_string(&answers).ok();
+
+    // Plan answers are authoritative for which CLI binary to spawn.
+    if detected.client != answers.client {
+        detected = resolve_client(
+            &cfg,
+            ResolveClientInput {
+                cli_override: Some(answers.client.clone()),
+                skip_prompt: true,
+            },
+        )?;
+    }
 
     let (plan, plan_path) = run_plan_write(PlanWriteInput {
         client: answers.client.clone(),

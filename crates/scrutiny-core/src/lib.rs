@@ -85,6 +85,8 @@ pub use review_cmd::{
 pub use review_session::{
     partition_pack_paths, run_review_session_write, ReviewSession, ReviewSessionWriteInput,
 };
-pub use runtime::{detect_clients, normalize_spawn_mode, resolve_client, DetectedClient};
+pub use runtime::{
+    client_from_answers_json, detect_clients, normalize_spawn_mode, resolve_client, DetectedClient,
+};
 pub use scan::{normalize_severity, run_scan, ScanReport};
 pub use skills_install::{run_skills_install, SkillsInstallInput};
