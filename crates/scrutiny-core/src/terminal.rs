@@ -63,6 +63,8 @@ static CLEANUP_ONCE: Once = Once::new();
 /// Set by the SIGINT/SIGTERM handler. Real pane teardown runs on Drop / explicit
 /// [`force_close_agent_panes`] — never inside the signal handler (async-unsafe).
 static CLEANUP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Origin zellij tab captured at [`resolve_terminal`] for held/exited agent sweep.
+static AGENT_ORIGIN_TAB: Mutex<Option<ZellijAnchor>> = Mutex::new(None);
 
 /// Register a non-headless agent pane (bash PID written to `pid_path` by the script).
 /// `script_marker` is matched against `ps` cmdline before any kill so a recycled
@@ -85,14 +87,14 @@ pub fn cleanup_requested() -> bool {
 
 /// Kill still-running agent pane processes so `--close-on-exit` panes disappear.
 /// Safe to call multiple times; no-ops when nothing is tracked or PIDs already dead.
+///
+/// After tracked pidfile kills, also closes **held/exited** agent-pattern panes
+/// in the origin zellij tab (where probe/parley started) — not other forge tabs.
 pub fn force_close_agent_panes() {
     let panes = match TRACKED_AGENT_PANES.lock() {
         Ok(mut g) => std::mem::take(&mut *g),
         Err(_) => return,
     };
-    if panes.is_empty() {
-        return;
-    }
     let mut closed = 0u32;
     for pane in &panes {
         if kill_agent_pane_pidfile(&pane.pid_path, &pane.script_marker) {
@@ -106,6 +108,202 @@ pub fn force_close_agent_panes() {
     } else if closed > 1 {
         eprintln!("scrutiny: force-closed {closed} agent pane(s) total");
     }
+
+    match close_held_exited_agent_panes_in_origin_tab() {
+        Ok(n) if n > 0 => {
+            eprintln!("scrutiny: closed {n} held/exited agent pane(s) in origin tab");
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("scrutiny: skip origin-tab agent sweep: {e:#}"),
+    }
+}
+
+/// True when pane command/title looks like a scrutiny/claude/cursor agent pane
+/// (not an interactive shell).
+pub fn is_agent_pane_text(command: &str, title: &str) -> bool {
+    let hay = format!("{command} {title}").to_ascii_lowercase();
+    const PATS: &[&str] = &[
+        "claude",
+        "cursor-agent",
+        "/.local/bin/agent",
+        "/bin/agent ",
+        "/bin/agent\t",
+        "scrutiny probe",
+        "scrutiny parley",
+        "parley-",
+        "parley_repair",
+        "parley-repair",
+        "agent-script",
+        "forge-all-driver",
+        "bulk-driver",
+    ];
+    if PATS.iter().any(|p| hay.contains(p)) {
+        return true;
+    }
+    // Bare `agent` binary argv (cursor) without matching a shell.
+    let cmd = command.trim().to_ascii_lowercase();
+    cmd == "agent"
+        || cmd.starts_with("agent ")
+        || cmd.ends_with("/agent")
+        || cmd.contains("/agent --")
+}
+
+fn set_agent_origin_tab(anchor: &ZellijAnchor) {
+    if let Ok(mut g) = AGENT_ORIGIN_TAB.lock() {
+        *g = Some(anchor.clone());
+    }
+}
+
+fn agent_origin_tab() -> Option<ZellijAnchor> {
+    AGENT_ORIGIN_TAB.lock().ok().and_then(|g| g.clone())
+}
+
+/// Close session-wide agent panes (live + held + exited). Keeps interactive shells.
+/// Returns how many panes were closed.
+pub fn close_agent_panes_session_wide() -> Result<u32> {
+    match detect_terminal() {
+        Some(TerminalContext::Zellij) => close_zellij_agent_panes(AgentPaneCloseScope::SessionWide),
+        Some(TerminalContext::Tmux) => close_tmux_agent_panes_session_wide(),
+        _ => {
+            bail!("scrutiny cleanup --agents needs tmux or zellij");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AgentPaneCloseScope {
+    /// All tabs: live + held + exited agent panes.
+    SessionWide,
+    /// Origin tab only: held/exited agent panes (auto cleanup after probe/parley).
+    OriginHeldExited,
+}
+
+fn close_held_exited_agent_panes_in_origin_tab() -> Result<u32> {
+    if detect_terminal() != Some(TerminalContext::Zellij) {
+        return Ok(0);
+    }
+    if agent_origin_tab().is_none() {
+        return Ok(0);
+    }
+    close_zellij_agent_panes(AgentPaneCloseScope::OriginHeldExited)
+}
+
+fn close_zellij_agent_panes(scope: AgentPaneCloseScope) -> Result<u32> {
+    let raw = zellij_list_panes_json().ok_or_else(|| {
+        anyhow::anyhow!("zellij list-panes --json failed (need zellij ≥0.44)")
+    })?;
+    let targets = agent_pane_ids_from_json(&raw, scope)?;
+    let mut closed = 0u32;
+    for id in targets {
+        let pane = format!("terminal_{id}");
+        match run_zellij_argv(&[
+            "action".into(),
+            "close-pane".into(),
+            "--pane-id".into(),
+            pane,
+        ]) {
+            Ok(()) => closed += 1,
+            Err(e) => eprintln!("scrutiny: skip close-pane terminal_{id}: {e:#}"),
+        }
+    }
+    Ok(closed)
+}
+
+fn agent_pane_ids_from_json(raw: &str, scope: AgentPaneCloseScope) -> Result<Vec<u64>> {
+    let panes: Vec<serde_json::Value> =
+        serde_json::from_str(raw).context("parse zellij list-panes JSON")?;
+    let origin = agent_origin_tab();
+    let mut ids = Vec::new();
+    for p in &panes {
+        if p.get("is_plugin").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
+        if p.get("is_floating").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
+        let id = match p.get("id").and_then(|v| v.as_u64()) {
+            Some(id) => id,
+            None => continue,
+        };
+        let cmd = p
+            .get("terminal_command")
+            .and_then(|v| v.as_str())
+            .or_else(|| p.get("pane_command").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        if !is_agent_pane_text(cmd, title) {
+            continue;
+        }
+        let held = p.get("is_held").and_then(|v| v.as_bool()).unwrap_or(false);
+        let exited = p.get("exited").and_then(|v| v.as_bool()).unwrap_or(false);
+        match scope {
+            AgentPaneCloseScope::SessionWide => {}
+            AgentPaneCloseScope::OriginHeldExited => {
+                if !held && !exited {
+                    continue;
+                }
+                let Some(ref o) = origin else {
+                    continue;
+                };
+                let tab_ok = if let Some(want) = o.tab_id {
+                    p.get("tab_id").and_then(|v| v.as_u64()) == Some(u64::from(want))
+                } else {
+                    p.get("tab_name").and_then(|v| v.as_str()) == Some(o.tab_name.as_str())
+                };
+                if !tab_ok {
+                    continue;
+                }
+            }
+        }
+        ids.push(id);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn close_tmux_agent_panes_session_wide() -> Result<u32> {
+    let out = Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{pane_current_command}\t#{pane_title}",
+        ])
+        .output()
+        .context("tmux list-panes -a")?;
+    if !out.status.success() {
+        bail!(
+            "tmux list-panes failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut closed = 0u32;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut parts = line.splitn(3, '\t');
+        let Some(pane_id) = parts.next() else {
+            continue;
+        };
+        let cmd = parts.next().unwrap_or("");
+        let title = parts.next().unwrap_or("");
+        if !is_agent_pane_text(cmd, title) {
+            continue;
+        }
+        let status = Command::new("tmux")
+            .args(["kill-pane", "-t", pane_id])
+            .status()
+            .with_context(|| format!("tmux kill-pane -t {pane_id}"))?;
+        if status.success() {
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
+/// Zellij server open-file count when inside a session (`None` otherwise).
+pub fn zellij_server_open_file_count() -> Option<u64> {
+    let pid = zellij_current_server_pid()?;
+    count_process_open_files(pid)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,8 +633,9 @@ pub fn preflight_zellij_open_files_budget_ex(
     let (self_soft, _) = process_nofile_soft_limit();
     let launchctl = launchctl_maxfiles_soft();
     let proc_soft = server_nofile_soft_from_proc(pid);
+    let rlimit_floor = server_fd_nfiles(pid);
     let (limit, limit_src) =
-        effective_server_nofile_limit(used, self_soft, launchctl, proc_soft);
+        effective_server_nofile_limit(used, self_soft, launchctl, proc_soft, rlimit_floor);
     let per = fds_per_unit.max(1);
     let need = (count as u64).saturating_mul(per);
     let free = limit.saturating_sub(used);
@@ -586,9 +785,12 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
         "  {} Free FDs without killing the session",
         green.apply_to("1)")
     );
-    eprintln!("     • Close idle agent panes / finished claude shells");
     eprintln!(
-        "     • Close done forge tabs ({})",
+        "     • Close leftover agent panes: {}",
+        cyan.apply_to("scrutiny cleanup --agents -y")
+    );
+    eprintln!(
+        "     • Close done forge tabs: {}",
         cyan.apply_to("scrutiny cleanup -y")
     );
     eprintln!(
@@ -638,37 +840,45 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
 /// Pick the soft nofile ceiling that applies to the **zellij server**.
 ///
 /// `proc_soft`: Linux `/proc/<pid>/limits` when available.
-/// Otherwise on macOS we cannot read another process's rlimit; use launchctl
-/// soft as a conservative ceiling until `used` proves the server was raised
-/// (`used > launchctl_soft` → trust `self_soft`).
+///
+/// macOS cannot read another process's rlimit. `launchctl` soft (often 256) is
+/// a **system default**, not the server's birth ulimit — a pane `ulimit -n`
+/// also does not change the server. Using `min(self, launchctl)` until
+/// `used > launchctl` is a catch-22: we refuse to open panes, so `used` never
+/// crosses 256, even when the server was restarted at 10240.
+///
+/// `rlimit_floor` is Darwin `pbi_nfiles` (`fd_nfiles` — allocated FD table
+/// size). The kernel will not grow that table past the process rlimit, so it
+/// is a lower bound. Conservative ceiling: `min(self, max(launchctl, floor))`.
 pub(crate) fn effective_server_nofile_limit(
     used: u64,
     self_soft: u64,
     launchctl_soft: Option<u64>,
     proc_soft: Option<u64>,
+    rlimit_floor: Option<u64>,
 ) -> (u64, &'static str) {
+    let cap_self = |n: u64| {
+        if n >= 1_000_000_000 {
+            65_536
+        } else {
+            n
+        }
+    };
     if let Some(n) = proc_soft.filter(|&n| n > 0) {
-        let n = if n >= 1_000_000_000 { 65_536 } else { n };
-        return (n, "proc_limits");
+        return (cap_self(n), "proc_limits");
     }
+    let floor = rlimit_floor.filter(|&n| n > 0).unwrap_or(0);
     match launchctl_soft {
         Some(l) if l > 0 && used > l => {
-            let n = if self_soft >= 1_000_000_000 {
-                65_536
-            } else {
-                self_soft.max(used)
-            };
-            (n, "self_getrlimit(proven_raised)")
+            (cap_self(self_soft).max(used), "self_getrlimit(proven_raised)")
         }
-        Some(l) if l > 0 => (self_soft.min(l), "min(self,launchctl)"),
-        _ => {
-            let n = if self_soft >= 1_000_000_000 {
-                65_536
-            } else {
-                self_soft
-            };
-            (n, "self_getrlimit")
+        Some(l) if l > 0 && floor > l => {
+            // Table grew past launchctl ⇒ server rlimit is at least `floor`.
+            let n = cap_self(self_soft).min(floor.max(used));
+            (n, "macos_fd_nfiles")
         }
+        Some(l) if l > 0 => (cap_self(self_soft).min(l), "min(self,launchctl)"),
+        _ => (cap_self(self_soft), "self_getrlimit"),
     }
 }
 
@@ -676,6 +886,76 @@ pub(crate) fn effective_server_nofile_limit(
 fn server_nofile_soft_from_proc(pid: u32) -> Option<u64> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/limits")).ok()?;
     parse_proc_limits_nofile_soft(&text)
+}
+
+/// Darwin `proc_bsdinfo.pbi_nfiles` = kernel FD table size (`fd_nfiles`).
+/// Lower bound on that process's `RLIMIT_NOFILE` (table cannot grow past it).
+fn server_fd_nfiles(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        return macos_proc_bsdinfo_nfiles(pid);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_proc_bsdinfo_nfiles(pid: u32) -> Option<u64> {
+    // sys/proc_info.h — `struct proc_bsdinfo` / PROC_PIDTBSDINFO = 3.
+    const MAXCOMLEN: usize = 16;
+    #[repr(C)]
+    struct ProcBsdInfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [u8; MAXCOMLEN],
+        pbi_name: [u8; 2 * MAXCOMLEN],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
+    extern "C" {
+        fn proc_pidinfo(
+            pid: i32,
+            flavor: i32,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: i32,
+        ) -> i32;
+    }
+    const PROC_PIDTBSDINFO: i32 = 3;
+    let mut info = unsafe { std::mem::zeroed::<ProcBsdInfo>() };
+    let sz = std::mem::size_of::<ProcBsdInfo>() as i32;
+    let n = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut ProcBsdInfo as *mut libc::c_void,
+            sz,
+        )
+    };
+    if n != sz || info.pbi_nfiles == 0 {
+        return None;
+    }
+    Some(u64::from(info.pbi_nfiles))
 }
 
 fn parse_proc_limits_nofile_soft(text: &str) -> Option<u64> {
@@ -983,6 +1263,9 @@ pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<Reso
             match kind {
                 TerminalContext::Zellij => {
                     resolved.zellij = capture_zellij_anchor();
+                    if let Some(ref a) = resolved.zellij {
+                        set_agent_origin_tab(a);
+                    }
                     let caps = zellij_caps();
                     if !caps.near_current_pane && !caps.tab_id {
                         eprintln!(
@@ -2127,7 +2410,7 @@ mod tests {
 
     #[test]
     fn effective_server_limit_uses_proc_when_present() {
-        let (n, src) = effective_server_nofile_limit(100, 1_000_000, Some(256), Some(10240));
+        let (n, src) = effective_server_nofile_limit(100, 1_000_000, Some(256), Some(10240), None);
         assert_eq!(n, 10240);
         assert_eq!(src, "proc_limits");
     }
@@ -2135,7 +2418,7 @@ mod tests {
     #[test]
     fn effective_server_limit_conservative_when_used_under_launchctl() {
         // Client getrlimit is huge; server likely still at launchctl soft 256.
-        let (n, src) = effective_server_nofile_limit(237, 1_048_575, Some(256), None);
+        let (n, src) = effective_server_nofile_limit(237, 1_048_575, Some(256), None, None);
         assert_eq!(n, 256);
         assert_eq!(src, "min(self,launchctl)");
         let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
@@ -2144,18 +2427,30 @@ mod tests {
 
     #[test]
     fn effective_server_limit_unlocks_when_used_proves_raised() {
-        let (n, src) = effective_server_nofile_limit(300, 10_240, Some(256), None);
+        let (n, src) = effective_server_nofile_limit(300, 10_240, Some(256), None, None);
         assert_eq!(n, 10_240);
         assert_eq!(src, "self_getrlimit(proven_raised)");
     }
 
     #[test]
     fn effective_server_limit_allows_fresh_session_under_256() {
-        let (n, _) = effective_server_nofile_limit(95, 1_048_575, Some(256), None);
+        let (n, _) = effective_server_nofile_limit(95, 1_048_575, Some(256), None, None);
         assert_eq!(n, 256);
         let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
         let need = zellij_fds_per_forge_tab(2, 1);
         assert!(95 + need <= ceiling, "one tab should fit on fresh soft-256");
+    }
+
+    #[test]
+    fn effective_server_limit_unlocks_when_fd_table_grew_past_launchctl() {
+        // macOS catch-22: used=250 < launchctl 256 so proven_raised never fires,
+        // but kernel fd table 512 means server rlimit is at least 512.
+        let (n, src) =
+            effective_server_nofile_limit(250, 10_240, Some(256), None, Some(512));
+        assert_eq!(n, 512);
+        assert_eq!(src, "macos_fd_nfiles");
+        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+        assert!(250 + 16 <= ceiling, "two agent panes must fit");
     }
 
     #[test]
@@ -2472,5 +2767,60 @@ layout {
 ]
 "#;
         assert_eq!(sibling_terminal_pane_ids_from_json(raw), Some(vec![12]));
+    }
+
+    #[test]
+    fn is_agent_pane_text_matches_agents_not_shells() {
+        assert!(is_agent_pane_text("claude", ""));
+        assert!(is_agent_pane_text(
+            "/Users/x/.local/bin/agent --use-system-ca index.js --resume",
+            "Stack Scrutiny Probe"
+        ));
+        assert!(is_agent_pane_text("scrutiny parley -y", ""));
+        assert!(is_agent_pane_text("bash /tmp/parley-repair.sh", "parley-repair"));
+        assert!(!is_agent_pane_text("/bin/zsh", "Pane #1"));
+        assert!(!is_agent_pane_text("/bin/bash", ""));
+    }
+
+    #[test]
+    fn agent_pane_ids_session_wide_skips_shells_and_plugins() {
+        let raw = r#"
+[
+  {"id": 0, "is_plugin": false, "is_floating": false, "is_held": false, "exited": false,
+   "tab_id": 0, "tab_name": "Main", "pane_command": "/bin/zsh", "title": "Pane #1"},
+  {"id": 1, "is_plugin": false, "is_floating": false, "is_held": true, "exited": false,
+   "tab_id": 0, "tab_name": "Main", "terminal_command": "claude", "title": "claude"},
+  {"id": 2, "is_plugin": true, "is_floating": false, "is_held": false, "exited": false,
+   "tab_id": 0, "tab_name": "Main", "title": "status"},
+  {"id": 3, "is_plugin": false, "is_floating": false, "is_held": false, "exited": false,
+   "tab_id": 1, "tab_name": "Scrutiny",
+   "terminal_command": "/Users/x/.local/bin/agent --resume", "title": "Probe"}
+]
+"#;
+        let ids = agent_pane_ids_from_json(raw, AgentPaneCloseScope::SessionWide).unwrap();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn agent_pane_ids_origin_held_only() {
+        set_agent_origin_tab(&ZellijAnchor {
+            tab_name: "Scrutiny".into(),
+            tab_id: Some(1),
+            restore_tab_name: None,
+        });
+        let raw = r#"
+[
+  {"id": 1, "is_plugin": false, "is_floating": false, "is_held": true, "exited": false,
+   "tab_id": 0, "tab_name": "Main", "terminal_command": "claude", "title": "claude"},
+  {"id": 3, "is_plugin": false, "is_floating": false, "is_held": false, "exited": false,
+   "tab_id": 1, "tab_name": "Scrutiny",
+   "terminal_command": "/Users/x/.local/bin/agent --resume", "title": "Probe"},
+  {"id": 4, "is_plugin": false, "is_floating": false, "is_held": true, "exited": false,
+   "tab_id": 1, "tab_name": "Scrutiny",
+   "terminal_command": "claude", "title": "claude"}
+]
+"#;
+        let ids = agent_pane_ids_from_json(raw, AgentPaneCloseScope::OriginHeldExited).unwrap();
+        assert_eq!(ids, vec![4]);
     }
 }

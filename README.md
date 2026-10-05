@@ -101,9 +101,18 @@ scrutiny forge --here --inline --input "Add dark mode toggle"
 
 **`--here`:** fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement in the current folder. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
 
-### Cleanup — tear down forge task tab
+### Cleanup — tear down forge task tab (or agent panes)
 
-From inside a multi-ticket forge worktree / tab:
+**Agent panes** (free zellij/tmux FDs without killing the session):
+
+```bash
+scrutiny cleanup --agents      # confirm first
+scrutiny cleanup --agents -y   # no prompt
+```
+
+Closes leftover `claude` / cursor `agent` / `scrutiny probe|parley` panes across the session. Keeps interactive shells. Does not remove worktrees or close tabs. Probe/parley also auto-close held/exited agent panes in the origin tab on exit.
+
+**Forge task tab** (from inside a multi-ticket forge worktree / tab):
 
 ```bash
 scrutiny cleanup      # confirm first
@@ -151,7 +160,7 @@ scrutiny parley stack 2
 - Requires `gh stack`
 
 Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
-Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with fix steps). Preflight compares server FD count to the **server** soft limit (a raised `ulimit` in a pane does not raise an already-running server — restart the session from an outside shell after `ulimit -n 10240`). Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
+Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with fix steps — run `scrutiny cleanup --agents -y` to free FDs). Preflight compares server FD count to the **server** soft limit (a raised `ulimit` in a pane does not raise an already-running server — restart the session from an outside shell after `ulimit -n 10240`). On exit, probe/parley force-close tracked panes and sweep held/exited agent panes in the origin tab. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
 

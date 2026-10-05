@@ -1,4 +1,5 @@
-//! `scrutiny cleanup` — tear down the current forge task tab / worktree / branch.
+//! `scrutiny cleanup` — tear down the current forge task tab / worktree / branch,
+//! or (`--agents`) force-close leftover agent panes session-wide.
 
 use anyhow::{bail, Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm};
@@ -10,14 +11,61 @@ use crate::git::{
     self, delete_branch, is_linked_worktree, is_protected_branch, remove_worktree,
 };
 use crate::terminal::{
-    close_current_mux_container, close_sibling_panes, kill_item_surface,
-    load_item_surface_from_env, ItemSurface,
+    close_agent_panes_session_wide, close_current_mux_container, close_sibling_panes,
+    kill_item_surface, load_item_surface_from_env, zellij_server_open_file_count, ItemSurface,
 };
 
 #[derive(Debug, Clone)]
 pub struct CleanupCmdInput {
     pub cwd: PathBuf,
     pub non_interactive: bool,
+    /// Close leftover agent panes across the tmux/zellij session (no git deletes).
+    pub agents: bool,
+}
+
+/// Confirm (unless `-y`), then either agent-pane sweep or forge tab teardown.
+pub fn run_cleanup(input: CleanupCmdInput) -> Result<()> {
+    if input.agents {
+        return run_cleanup_agents(input.non_interactive);
+    }
+    run_cleanup_forge_tab(input)
+}
+
+fn run_cleanup_agents(non_interactive: bool) -> Result<()> {
+    eprintln!("scrutiny cleanup --agents:");
+    eprintln!("  Close leftover claude/cursor/agent/probe/parley panes across this session.");
+    eprintln!("  Keeps interactive shells. Does not remove worktrees or close tabs.");
+    if let Some(n) = zellij_server_open_file_count() {
+        eprintln!("  zellij server FDs before: {n}");
+    }
+
+    if !confirm_agents_cleanup(non_interactive)? {
+        eprintln!("scrutiny cleanup: aborted");
+        return Ok(());
+    }
+
+    let closed = close_agent_panes_session_wide()?;
+    eprintln!("scrutiny cleanup: closed {closed} agent pane(s)");
+    if let Some(n) = zellij_server_open_file_count() {
+        eprintln!("  zellij server FDs after:  {n}");
+    }
+    Ok(())
+}
+
+fn confirm_agents_cleanup(non_interactive: bool) -> Result<bool> {
+    if non_interactive {
+        eprintln!("scrutiny cleanup: --yes — closing agent panes");
+        return Ok(true);
+    }
+    let tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if !tty {
+        bail!("scrutiny cleanup --agents needs a TTY to confirm (or pass -y / --yes)");
+    }
+    Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Close leftover agent panes across this session?")
+        .default(true)
+        .interact()
+        .context("cleanup --agents confirm")
 }
 
 /// Confirm (unless `-y`), then: sibling panes → worktree → branch → tab.
@@ -28,7 +76,7 @@ pub struct CleanupCmdInput {
 /// - remove only if path is a registered *linked* worktree of the main repo
 /// - never delete protected branches (`main` / `master` / …)
 /// - delete branch only after worktree remove succeeds
-pub fn run_cleanup(input: CleanupCmdInput) -> Result<()> {
+fn run_cleanup_forge_tab(input: CleanupCmdInput) -> Result<()> {
     let cwd = input.cwd;
     git::ensure_git_repo(&cwd)?;
 

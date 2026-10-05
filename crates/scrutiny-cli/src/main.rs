@@ -30,7 +30,7 @@ use std::process::ExitCode;
 Main commands:
   probe   Orchestrate full probe: analyze → plan → headless agents → triage → post
   forge   Jira URLs → assign / In Progress / worktree / tab / implement (`--here` = cwd)
-  cleanup Close panes + delete this worktree/branch + close tab
+  cleanup Forge tab teardown, or `--agents` to close leftover agent panes
   info    Show colorful Jira ticket summary (+ related GitHub PRs)
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
   bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
@@ -62,9 +62,13 @@ enum Commands {
         rest: Vec<String>,
     },
     /// Close sibling panes, delete this forge worktree + branch, close the tab
+    /// (`--agents`: close leftover agent panes session-wide instead)
     Cleanup {
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Close leftover claude/cursor/agent/probe/parley panes across the session
+        #[arg(long)]
+        agents: bool,
     },
     /// Evaluate change complexity vs base branch; write eval JSON; print path
     Eval {
@@ -530,12 +534,15 @@ fn run() -> Result<()> {
             let key = run_info(InfoCmdInput { cwd, input })?;
             println!("{key}");
         }
-        Commands::Cleanup { cwd } => {
+        Commands::Cleanup { cwd, agents } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
-            ensure_git_repo(&cwd)?;
+            if !agents {
+                ensure_git_repo(&cwd)?;
+            }
             run_cleanup(CleanupCmdInput {
                 cwd,
                 non_interactive: yes,
+                agents,
             })?;
         }
         Commands::Eval {
