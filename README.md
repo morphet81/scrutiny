@@ -154,7 +154,8 @@ scrutiny parley stack 2
 
 - Visualizes with `gh stack view --short`
 - Each layer: rebase onto parent → `gh pr view` + unresolved-thread check → skip parley if none → else autonomous parley (commit + reply, **no** push) → `gh stack rebase`
-- Stops on first failure with the branch/PR and reason
+- On rebase conflict (`git rebase` or `gh stack rebase`): spawn a conflict-resolve agent, stage, then `--continue` (up to 5 rounds). Use `--client` / `default_client` for that agent.
+- Stops on first non-conflict failure (or unresolved conflict) with the branch/PR and reason
 - Asks before `gh stack push` at the end
 - Optional stack number runs `gh stack checkout N` first (then restores your branch)
 - Requires `gh stack`

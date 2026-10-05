@@ -174,7 +174,7 @@ enum Commands {
         #[arg(long)]
         pr: Option<String>,
         /// Positional: PR URL/number, or `stack` [N] for gh stack mode
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(num_args = 0..)]
         rest: Vec<String>,
         #[arg(long)]
         client: Option<String>,
@@ -298,7 +298,7 @@ enum Commands {
         #[arg(long)]
         pr: Option<String>,
         /// Positional: PR URL/number, or `stack` [N] for gh stack mode
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(num_args = 0..)]
         rest: Vec<String>,
         #[arg(long)]
         client: Option<String>,
@@ -378,7 +378,7 @@ enum Commands {
         #[arg(long)]
         input: Option<String>,
         /// Jira URLs/keys (multi-ticket), or ticket / description with `--here`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(num_args = 0..)]
         rest: Vec<String>,
         #[arg(long, default_value_t = false)]
         inline: bool,
@@ -1318,4 +1318,49 @@ fn resolve_plan_write_input(
         pack_path: pack,
         scan_path: scan,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parley_stack_honors_client_flag_after_stack() {
+        let cli = Cli::try_parse_from(["scrutiny", "parley", "stack", "--client", "cursor"])
+            .expect("parse");
+        match cli.cmd {
+            Commands::Parley { client, rest, .. } => {
+                assert_eq!(client.as_deref(), Some("cursor"));
+                assert_eq!(rest, vec!["stack"]);
+            }
+            other => panic!("expected Parley, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parley_client_flag_before_stack() {
+        let cli = Cli::try_parse_from(["scrutiny", "parley", "--client", "cursor", "stack", "2"])
+            .expect("parse");
+        match cli.cmd {
+            Commands::Parley { client, rest, .. } => {
+                assert_eq!(client.as_deref(), Some("cursor"));
+                assert_eq!(rest, vec!["stack", "2"]);
+            }
+            other => panic!("expected Parley, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_stack_honors_client_flag_after_stack() {
+        let cli = Cli::try_parse_from(["scrutiny", "probe", "stack", "--client", "claude"])
+            .expect("parse");
+        match cli.cmd {
+            Commands::Probe { client, rest, .. } => {
+                assert_eq!(client.as_deref(), Some("claude"));
+                assert_eq!(rest, vec!["stack"]);
+            }
+            other => panic!("expected Probe, got {other:?}"),
+        }
+    }
 }
