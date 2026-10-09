@@ -28,9 +28,7 @@ use crate::terminal::{
 fn agent_model_for(cfg: &Config, client: &str, role: &str, session_model: &str) -> String {
     let model = cfg.resolve_agent_model(client, role, session_model);
     if model != session_model {
-        eprintln!(
-            "scrutiny: {role} model override `{model}` (session was `{session_model}`)"
-        );
+        eprintln!("scrutiny: {role} model override `{model}` (session was `{session_model}`)");
     }
     model
 }
@@ -54,6 +52,8 @@ pub enum HeadlessKind {
     /// Probe PR overview (purpose, architecture, strengths, anchored concerns, review limits).
     /// Read-only + summary schema. Anchored concerns promoted to findings after merge.
     Summary,
+    /// Evaluate PR review threads and draft responses; read-only + schema.
+    CommentReview,
 }
 
 /// Whether `model` supports Claude Code `--permission-mode auto`. Unsupported
@@ -314,6 +314,27 @@ pub struct PrSummarySession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
 }
+
+pub const COMMENT_REVIEW_JSON_SCHEMA: &str = r#"{
+  "type": "object",
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "comment_id": { "type": "string" },
+          "insight": { "type": "string" },
+          "recommended_action": { "type": "string", "enum": ["accept", "refuse"] },
+          "accept_reply": { "type": "string" },
+          "refuse_reply": { "type": "string" }
+        },
+        "required": ["comment_id", "insight", "recommended_action", "accept_reply", "refuse_reply"]
+      }
+    }
+  },
+  "required": ["reviews"]
+}"#;
 
 pub const ASK_REVISE_JSON_SCHEMA: &str = r#"{
   "type": "object",
@@ -591,28 +612,34 @@ pub fn run_headless(
             }
             match kind {
                 HeadlessKind::Isolated | HeadlessKind::Consolidate => {
-                    cmd.arg("--allowedTools")
+                    cmd.arg("--tools")
                         .arg("Read")
                         .arg("--json-schema")
                         .arg(FINDINGS_JSON_SCHEMA);
                 }
                 HeadlessKind::Ask => {
-                    cmd.arg("--allowedTools")
+                    cmd.arg("--tools")
                         .arg("Read")
                         .arg("--json-schema")
                         .arg(ASK_REVISE_JSON_SCHEMA);
                 }
                 HeadlessKind::Summary => {
-                    cmd.arg("--allowedTools")
+                    cmd.arg("--tools")
                         .arg("Read")
                         .arg("--json-schema")
                         .arg(PR_SUMMARY_JSON_SCHEMA);
+                }
+                HeadlessKind::CommentReview => {
+                    cmd.arg("--tools")
+                        .arg("Read")
+                        .arg("--json-schema")
+                        .arg(COMMENT_REVIEW_JSON_SCHEMA);
                 }
                 HeadlessKind::TeamLead => {
                     cmd.arg("--json-schema").arg(FINDINGS_JSON_SCHEMA);
                 }
                 HeadlessKind::Text => {
-                    cmd.arg("--allowedTools").arg("Read");
+                    cmd.arg("--tools").arg("Read");
                 }
                 HeadlessKind::Forge | HeadlessKind::Parley => {
                     // Full tools; no findings schema (implement / address comments).
@@ -623,9 +650,15 @@ pub fn run_headless(
         "codex" => {
             cmd.arg("exec")
                 .arg("--json")
-                .arg("-m")
-                .arg(model)
-                .arg(prompt);
+                .arg("--sandbox")
+                .arg("read-only");
+            if kind == HeadlessKind::CommentReview {
+                let schema_path = temp_artifact_path("scrutiny", "agent", "comment-review-schema");
+                fs::write(&schema_path, COMMENT_REVIEW_JSON_SCHEMA)
+                    .with_context(|| format!("write {}", schema_path.display()))?;
+                cmd.arg("--output-schema").arg(schema_path);
+            }
+            cmd.arg("-m").arg(model).arg(prompt);
         }
         other => bail!("unsupported client {other}"),
     }
@@ -796,8 +829,15 @@ pub fn run_nonheadless(
 ) -> Result<PathBuf> {
     let kill_cmd = kill_cmd_for_terminal(ctx);
     let pid_path = artifact_path_unique("agent-pane-pid");
-    let (sentinel, script_path) =
-        build_agent_script(client, model, cwd, prompt, label, Some(&kill_cmd), &pid_path)?;
+    let (sentinel, script_path) = build_agent_script(
+        client,
+        model,
+        cwd,
+        prompt,
+        label,
+        Some(&kill_cmd),
+        &pid_path,
+    )?;
     register_agent_pane(label, pid_path, script_path.display().to_string());
     eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
     launch_agent_window(ctx, label, &script_path, cwd)?;
@@ -965,6 +1005,7 @@ pub(crate) fn cursor_headless_flags(model: &str, cwd: &Path, kind: HeadlessKind)
         | HeadlessKind::Consolidate
         | HeadlessKind::Ask
         | HeadlessKind::Summary
+        | HeadlessKind::CommentReview
         | HeadlessKind::Text => {
             args.push("--mode".into());
             args.push("ask".into());
@@ -1153,7 +1194,7 @@ pub fn parse_findings_json(raw: &str, role: &str) -> Result<Vec<AgentFinding>> {
     Ok(out)
 }
 
-fn extract_json_payload(raw: &str) -> Result<String> {
+pub(crate) fn extract_json_payload(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         return Ok(trimmed.to_string());
@@ -1670,10 +1711,7 @@ fn run_pr_summary_nonheadless(
         let raw = match fs::read_to_string(&file_path) {
             Ok(s) => s,
             Err(e) => {
-                let msg = format!(
-                    "could not read summary file {}: {e}",
-                    file_path.display()
-                );
+                let msg = format!("could not read summary file {}: {e}", file_path.display());
                 eprintln!("scrutiny probe: warn: pr summary: {msg}");
                 last_err = Some(anyhow::anyhow!(msg));
                 continue;
@@ -1707,18 +1745,18 @@ pub fn summary_concerns_as_findings(summary: &ProbePrSummary) -> Vec<AgentFindin
                 .filter(|p| !p.is_empty())
                 .unwrap_or_default();
             let line = c.line.unwrap_or(0);
-            let title = if let Some(t) = c.title.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
-            {
-                t.to_string()
-            } else {
-                let first = c.text.lines().next().unwrap_or(c.text.as_str()).trim();
-                if first.chars().count() <= 72 {
-                    first.to_string()
+            let title =
+                if let Some(t) = c.title.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    t.to_string()
                 } else {
-                    let truncated: String = first.chars().take(69).collect();
-                    format!("{truncated}…")
-                }
-            };
+                    let first = c.text.lines().next().unwrap_or(c.text.as_str()).trim();
+                    if first.chars().count() <= 72 {
+                        first.to_string()
+                    } else {
+                        let truncated: String = first.chars().take(69).collect();
+                        format!("{truncated}…")
+                    }
+                };
             AgentFinding {
                 path,
                 line,
@@ -1749,8 +1787,8 @@ pub fn collate_review_report(
     cwd: &Path,
     extra: Vec<AgentFinding>,
 ) -> Result<(ReviewReport, PathBuf)> {
-    let raw_count: u32 = agents.iter().map(|a| a.findings.len() as u32).sum::<u32>()
-        + extra.len() as u32;
+    let raw_count: u32 =
+        agents.iter().map(|a| a.findings.len() as u32).sum::<u32>() + extra.len() as u32;
     let mut all: Vec<AgentFinding> = agents.iter().flat_map(|a| a.findings.clone()).collect();
     all.extend(extra);
     let deduped = dedupe_findings(&mut all);
@@ -2121,8 +2159,7 @@ pub fn run_isolated_agents(
         for (role, index, paths) in &jobs {
             let label = format!("{role}#{index}");
             let model = agent_model_for(cfg, &client.client, role, &plan.model);
-            let findings_path =
-                artifact_path(&format!("review-agent-findings-{role}-{index}"));
+            let findings_path = artifact_path(&format!("review-agent-findings-{role}-{index}"));
             let prompt = build_isolated_prompt(role, pack_path, paths, plan)
                 + &nonheadless_findings_suffix(&findings_path);
             let sentinel = run_nonheadless(client, &model, cwd, &prompt, &label, ctx)?;

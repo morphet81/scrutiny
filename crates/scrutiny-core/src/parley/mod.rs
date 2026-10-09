@@ -4,6 +4,7 @@ pub mod fetch;
 pub mod fixes;
 pub mod plan;
 pub mod reply;
+pub mod review;
 
 pub use fetch::{
     pr_has_unresolved_comments, run_parley_fetch, ParleyComment, ParleyCommentsFile,
@@ -18,6 +19,7 @@ pub use plan::{
     ParleyPlanWriteInput,
 };
 pub use reply::{
-    discover_parley_fixes, resolve_parley_fixes_path, run_parley_reply, ParleyReplyInput,
-    ParleyReplyResult,
+    discover_parley_fixes, post_thread_reply, resolve_parley_fixes_path, run_parley_reply,
+    ParleyReplyInput, ParleyReplyResult,
 };
+pub use review::{run_adjudicate, AdjudicateInput};

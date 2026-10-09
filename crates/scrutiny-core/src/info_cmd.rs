@@ -103,10 +103,7 @@ fn pr_matches_key(pr: &GhPr, key_lower: &str) -> bool {
             .head_ref_name
             .to_ascii_lowercase()
             .contains(&key_lower.replace('-', "/"))
-        || pr
-            .url
-            .to_ascii_lowercase()
-            .contains(key_lower)
+        || pr.url.to_ascii_lowercase().contains(key_lower)
 }
 
 fn gh_pr_list(cwd: &Path, extra: &[&str]) -> Option<Vec<GhPr>> {
@@ -236,7 +233,10 @@ fn print_info_report(ticket: &TicketReport, custom: &[JiraCustomTextField], prs:
             );
             eprintln!("         {}", dim.apply_to(&pr.title));
             if !pr.head_ref_name.is_empty() {
-                eprintln!("         {}", dim.apply_to(format!("branch {}", pr.head_ref_name)));
+                eprintln!(
+                    "         {}",
+                    dim.apply_to(format!("branch {}", pr.head_ref_name))
+                );
             }
         }
     }

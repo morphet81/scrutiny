@@ -10,11 +10,20 @@ argument-hint: "[PR-URL | PR-number | stack [N]]"
 
 # Parley
 
-**Preferred (script-orchestrated):**
+**Review comments without editing code:**
 
 ```bash
 SKILL_ROOT="<absolute-path-to-folder-containing-this-SKILL.md>"
 SCRUTINY_BIN="$(bash "${SKILL_ROOT}/scripts/ensure-bin.sh")"
+"$SCRUTINY_BIN" adjudicate [--pr <url|number>]
+"$SCRUTINY_BIN" adjudicate [--pr <url|number>] -y
+```
+
+Shows each thread, agent insight, and accept/refuse drafts. Choose accept, refuse, or custom reply per thread. `-y` posts each agent-recommended reply. No code edits, commits, pushes, or thread resolution.
+
+**Preferred (script-orchestrated) fix workflow:**
+
+```bash
 "$SCRUTINY_BIN" parley [--pr <url|number>]
 "$SCRUTINY_BIN" parley stack          # every open PR in gh stack, bottom→top
 "$SCRUTINY_BIN" parley stack 2        # checkout stack #2 first

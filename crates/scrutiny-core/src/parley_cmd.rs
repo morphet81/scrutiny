@@ -19,9 +19,9 @@ use crate::config::{ensure_config, find_shipped_default, load_config, Config};
 use crate::git::{
     clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
 };
-use crate::parley::fetch::{run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput};
 #[cfg(test)]
 use crate::parley::fetch::ParleyThreadComment;
+use crate::parley::fetch::{run_parley_fetch, ParleyComment, ParleyCommentsFile, ParleyFetchInput};
 use crate::parley::fixes::{
     init_fixes_file, load_fixes, merge_fix_entries, parse_fixes_from_agent_stdout, save_fixes,
     validate_fixes_complete, FixEntry,
@@ -81,10 +81,12 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
 
-    let cli_override = input
-        .client
-        .clone()
-        .or_else(|| input.from_json.as_deref().and_then(client_from_answers_json));
+    let cli_override = input.client.clone().or_else(|| {
+        input
+            .from_json
+            .as_deref()
+            .and_then(client_from_answers_json)
+    });
 
     let mut detected = resolve_client(
         &cfg,
@@ -999,7 +1001,10 @@ fn build_team_lead_parley_prompt(plan: &ParleyPlan, comments: &ParleyCommentsFil
                     line,
                     truncate(&c.body, 100),
                     if c.comments.len() > 1 {
-                        format!(" (+{} later replies — read full trail)", c.comments.len() - 1)
+                        format!(
+                            " (+{} later replies — read full trail)",
+                            c.comments.len() - 1
+                        )
                     } else {
                         String::new()
                     }

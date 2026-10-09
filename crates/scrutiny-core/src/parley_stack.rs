@@ -79,8 +79,8 @@ pub fn run_parley_stack(input: ParleyStackInput) -> Result<Vec<PathBuf>> {
 
     if let Some(n) = input.stack_number {
         let n = n.to_string();
-        let out = gh_output_retry(cwd, &["stack", "checkout", &n], None)
-            .context("gh stack checkout")?;
+        let out =
+            gh_output_retry(cwd, &["stack", "checkout", &n], None).context("gh stack checkout")?;
         if !out.status.success() {
             bail!(
                 "gh stack checkout {} failed: {}",
@@ -100,8 +100,8 @@ pub fn run_parley_stack(input: ParleyStackInput) -> Result<Vec<PathBuf>> {
         }
     }
 
-    let view_out = gh_output_retry(cwd, &["stack", "view", "--json"], None)
-        .context("gh stack view --json")?;
+    let view_out =
+        gh_output_retry(cwd, &["stack", "view", "--json"], None).context("gh stack view --json")?;
     if !view_out.status.success() {
         // Restore checkout target if we switched stacks.
         let _ = git_stdout(cwd, &["checkout", &orig_branch]);
@@ -396,7 +396,10 @@ fn resolve_rebase_conflicts(
 ) -> Result<()> {
     let mut files = list_unmerged_paths(cwd)?;
     if files.is_empty() && !rebase_in_progress(cwd) {
-        bail!("rebase failed but no unmerged paths / rebase state:\n{}", initial_output.trim());
+        bail!(
+            "rebase failed but no unmerged paths / rebase state:\n{}",
+            initial_output.trim()
+        );
     }
 
     if input.skip_agents {
@@ -421,7 +424,8 @@ fn resolve_rebase_conflicts(
         );
     }
 
-    let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
+    let shipped =
+        find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
     let cfg_path = ensure_config(&shipped)?;
     let cfg = load_config(&cfg_path)?;
     let detected = resolve_client(

@@ -7,9 +7,7 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use crate::git::{
-    self, delete_branch, is_linked_worktree, is_protected_branch, remove_worktree,
-};
+use crate::git::{self, delete_branch, is_linked_worktree, is_protected_branch, remove_worktree};
 use crate::terminal::{
     close_agent_panes_session_wide, close_current_mux_container, close_sibling_panes,
     kill_item_surface, load_item_surface_from_env, zellij_server_open_file_count, ItemSurface,
@@ -128,14 +126,9 @@ fn run_cleanup_forge_tab(input: CleanupCmdInput) -> Result<()> {
         }
         match remove_worktree(&main_root, &worktree) {
             Ok(()) => {
-                eprintln!(
-                    "scrutiny cleanup: removed worktree {}",
-                    worktree.display()
-                );
+                eprintln!("scrutiny cleanup: removed worktree {}", worktree.display());
                 if is_protected_branch(&branch) {
-                    eprintln!(
-                        "scrutiny cleanup: skip branch delete (protected: {branch})"
-                    );
+                    eprintln!("scrutiny cleanup: skip branch delete (protected: {branch})");
                 } else {
                     match delete_branch(&main_root, &branch) {
                         Ok(()) => eprintln!("scrutiny cleanup: deleted branch {branch}"),
@@ -190,10 +183,7 @@ fn confirm_cleanup(non_interactive: bool, branch: &str) -> Result<bool> {
 
 /// `(this_toplevel, main_toplevel)`. Equal when cwd is the primary checkout.
 fn resolve_worktree_and_main(cwd: &Path) -> Result<(PathBuf, PathBuf)> {
-    let this = PathBuf::from(
-        git::git_stdout(cwd, &["rev-parse", "--show-toplevel"])?
-            .trim(),
-    );
+    let this = PathBuf::from(git::git_stdout(cwd, &["rev-parse", "--show-toplevel"])?.trim());
     let common = PathBuf::from(
         git::git_stdout(
             cwd,

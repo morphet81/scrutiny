@@ -76,7 +76,15 @@ pub fn run_pr(input: PrCmdInput) -> Result<PathBuf> {
     )?;
 
     let draft = !input.ready;
-    let url = pr::create_pr(&cwd, &dir, &choice.base, &choice.title, &choice.body, draft, cfg.git.push_no_verify)?;
+    let url = pr::create_pr(
+        &cwd,
+        &dir,
+        &choice.base,
+        &choice.title,
+        &choice.body,
+        draft,
+        cfg.git.push_no_verify,
+    )?;
     eprintln!(
         "scrutiny pr: {} PR → {url}",
         if draft { "draft" } else { "ready" }

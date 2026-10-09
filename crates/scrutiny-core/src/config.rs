@@ -1171,22 +1171,52 @@ pub struct TierCounts {
 
 impl Default for TierBools {
     fn default() -> Self {
-        Self { xs: false, s: false, m: false, l: false, xl: false }
+        Self {
+            xs: false,
+            s: false,
+            m: false,
+            l: false,
+            xl: false,
+        }
     }
 }
 
 impl Default for TierCounts {
     fn default() -> Self {
-        Self { xs: 0, s: 0, m: 0, l: 0, xl: 0 }
+        Self {
+            xs: 0,
+            s: 0,
+            m: 0,
+            l: 0,
+            xl: 0,
+        }
     }
 }
 
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            security_by_tier: TierBools { xs: false, s: false, m: true, l: true, xl: true },
-            performance_by_tier: TierBools { xs: false, s: false, m: false, l: true, xl: true },
-            error_handling_by_tier: TierBools { xs: false, s: true, m: true, l: true, xl: true },
+            security_by_tier: TierBools {
+                xs: false,
+                s: false,
+                m: true,
+                l: true,
+                xl: true,
+            },
+            performance_by_tier: TierBools {
+                xs: false,
+                s: false,
+                m: false,
+                l: true,
+                xl: true,
+            },
+            error_handling_by_tier: TierBools {
+                xs: false,
+                s: true,
+                m: true,
+                l: true,
+                xl: true,
+            },
             signals: ReviewSignalsConfig::default(),
         }
     }
@@ -1195,8 +1225,20 @@ impl Default for ReviewConfig {
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
-            reviewers_by_tier: TierCounts { xs: 0, s: 1, m: 1, l: 2, xl: 2 },
-            evangelists_by_tier: TierCounts { xs: 0, s: 0, m: 0, l: 1, xl: 1 },
+            reviewers_by_tier: TierCounts {
+                xs: 0,
+                s: 1,
+                m: 1,
+                l: 2,
+                xl: 2,
+            },
+            evangelists_by_tier: TierCounts {
+                xs: 0,
+                s: 0,
+                m: 0,
+                l: 1,
+                xl: 1,
+            },
             max_agents_total: default_max_agents_total(),
             max_reviewers: default_max_reviewers_cap(),
             max_evangelists: default_max_evangelists_cap(),
@@ -1344,12 +1386,14 @@ impl Config {
         };
 
         let mut reviewers = self
-            .probe.agents
+            .probe
+            .agents
             .reviewers_by_tier
             .get(tier)
             .min(self.probe.agents.max_reviewers);
         let mut evangelists = self
-            .probe.agents
+            .probe
+            .agents
             .evangelists_by_tier
             .get(tier)
             .min(self.probe.agents.max_evangelists);
@@ -1412,7 +1456,8 @@ impl Config {
             reviewers,
             evangelists,
             prompt_reviewers: reviewers > 0,
-            prompt_evangelists: evangelists > 0 || self.probe.agents.evangelists_by_tier.get(tier) > 0,
+            prompt_evangelists: evangelists > 0
+                || self.probe.agents.evangelists_by_tier.get(tier) > 0,
         }
     }
 
@@ -1673,16 +1718,30 @@ fn merge_command_timeouts(cfg: &mut Config) {
     fill!(forge_implement_wall_secs, ft.implement_wall_secs);
     fill!(forge_fix_wall_secs, ft.fix_wall_secs);
     fill!(forge_test_plan_wall_secs, ft.test_plan_wall_secs);
-    fill!(forge_test_plan_revise_wall_secs, ft.test_plan_revise_wall_secs);
+    fill!(
+        forge_test_plan_revise_wall_secs,
+        ft.test_plan_revise_wall_secs
+    );
     fill!(forge_loc_estimate_wall_secs, ft.loc_estimate_wall_secs);
     fill!(forge_pr_description_wall_secs, ft.pr_description_wall_secs);
     fill!(forge_bulk_item_wall_secs, ft.item_wall_secs);
 
     // Parley — per-command struct wins; legacy [parley] direct fields are fallback
     let parley_t = cfg.parley.timeouts;
-    fill!(parley_agent_wall_secs, parley_t.agent_wall_secs.or(cfg.parley.agent_wall_secs));
-    fill!(parley_prepush_fix_wall_secs, parley_t.prepush_fix_wall_secs.or(cfg.parley.prepush_fix_wall_secs));
-    fill!(parley_prepush_plan_wall_secs, parley_t.prepush_plan_wall_secs);
+    fill!(
+        parley_agent_wall_secs,
+        parley_t.agent_wall_secs.or(cfg.parley.agent_wall_secs)
+    );
+    fill!(
+        parley_prepush_fix_wall_secs,
+        parley_t
+            .prepush_fix_wall_secs
+            .or(cfg.parley.prepush_fix_wall_secs)
+    );
+    fill!(
+        parley_prepush_plan_wall_secs,
+        parley_t.prepush_plan_wall_secs
+    );
 }
 
 /// Expand per-command agent_models maps into the flat agent_models BTreeMap.
@@ -1898,10 +1957,7 @@ mod tests {
             cfg3.resolve_agent_model("claude", "consolidator", "sonnet"),
             expected_m
         );
-        assert_eq!(
-            cfg3.resolve_agent_model("claude", "ask", "sonnet"),
-            "haiku"
-        );
+        assert_eq!(cfg3.resolve_agent_model("claude", "ask", "sonnet"), "haiku");
         // Probe catch-all (`probe` / `[probe.agent_models] default`) covers bare roles
         // including underscore specialists like error_handling.
         let mut cfg4 = cfg.clone();
@@ -2034,9 +2090,7 @@ mod tests {
         // Old shape: [review] pr_summary = false — must land on probe.pr_summary.
         fs::write(
             &path,
-            format!(
-                "{DEFAULT_TOML}\n[review]\npr_summary = false\n"
-            ),
+            format!("{DEFAULT_TOML}\n[review]\npr_summary = false\n"),
         )
         .unwrap();
         let cfg = load_config(&path).unwrap();

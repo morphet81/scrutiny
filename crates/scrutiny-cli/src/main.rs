@@ -4,11 +4,11 @@ use scrutiny_core::run_probe_stack;
 use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, resolve_parley_fixes_path,
-    run_agent_prompt, run_bench, run_cleanup, run_eval, run_findings_init, run_findings_resolve,
-    run_findings_triage, run_findings_validate, run_forge, run_forge_all, run_forge_brief,
-    run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map, run_pack,
-    run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply, run_parley_stack,
-    run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
+    run_adjudicate, run_agent_prompt, run_bench, run_cleanup, run_eval, run_findings_init,
+    run_findings_resolve, run_findings_triage, run_findings_validate, run_forge, run_forge_all,
+    run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map,
+    run_pack, run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply,
+    run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
     run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
     BenchCmdInput, BenchWorkload, CleanupCmdInput, EvalInput, FindingsInitInput, ForgeAllInput,
     ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers,
@@ -349,6 +349,19 @@ enum Commands {
         from_json: String,
         #[arg(long)]
         cwd: Option<PathBuf>,
+    },
+    /// Adjudicate PR review comments and post selected replies
+    ///
+    /// With `-y` / `--yes`, post each agent-recommended response without prompting.
+    Adjudicate {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// PR URL or number (else current branch PR)
+        #[arg(long)]
+        pr: Option<String>,
+        /// AI client key (cursor|claude|codex)
+        #[arg(long)]
+        client: Option<String>,
     },
     /// Post thread replies from parley-fixes.json
     ///
@@ -972,6 +985,18 @@ fn run() -> Result<()> {
             })?;
             println!("{}", path.display());
         }
+        Commands::Adjudicate { cwd, pr, client } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
+            prepare_artifacts(&cwd, pr.as_deref(), &[])?;
+            let path = run_adjudicate(scrutiny_core::AdjudicateInput {
+                cwd,
+                pr,
+                client,
+                yes,
+            })?;
+            println!("{}", path.display());
+        }
         Commands::ParleyReply {
             fixes,
             fixes_pos,
@@ -1349,6 +1374,18 @@ mod tests {
             }
             other => panic!("expected Parley, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn adjudicate_supports_global_yes_before_and_after_command() {
+        let before =
+            Cli::try_parse_from(["scrutiny", "-y", "adjudicate", "--pr", "42"]).expect("parse");
+        assert!(before.yes);
+        assert!(matches!(before.cmd, Commands::Adjudicate { .. }));
+
+        let after =
+            Cli::try_parse_from(["scrutiny", "adjudicate", "--pr", "42", "-y"]).expect("parse");
+        assert!(after.yes);
     }
 
     #[test]

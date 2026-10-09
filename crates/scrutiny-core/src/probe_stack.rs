@@ -45,8 +45,8 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
             .context("get current branch")?;
         let branch = branch.trim().to_string();
         let n = input.stack_number.unwrap().to_string();
-        let out = gh_output_retry(cwd, &["stack", "checkout", &n], None)
-            .context("gh stack checkout")?;
+        let out =
+            gh_output_retry(cwd, &["stack", "checkout", &n], None).context("gh stack checkout")?;
         if !out.status.success() {
             bail!(
                 "gh stack checkout {} failed: {}",
@@ -59,8 +59,8 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
         None
     };
 
-    let view_out = gh_output_retry(cwd, &["stack", "view", "--json"], None)
-        .context("gh stack view --json")?;
+    let view_out =
+        gh_output_retry(cwd, &["stack", "view", "--json"], None).context("gh stack view --json")?;
 
     if let Some(ref orig) = orig_branch {
         git_stdout(cwd, &["checkout", orig]).ok();
@@ -96,11 +96,10 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
 
     // Phase 1: run all reviews unattended (settings prompted once from PR #1).
     let mut reuse_answers = input.from_json.clone();
-    let mut reuse_client = input.client.clone().or_else(|| {
-        reuse_answers
-            .as_deref()
-            .and_then(client_from_answers_json)
-    });
+    let mut reuse_client = input
+        .client
+        .clone()
+        .or_else(|| reuse_answers.as_deref().and_then(client_from_answers_json));
     let mut paths = Vec::new();
     let mut pending_triages = Vec::new();
     for (i, branch) in open.iter().enumerate() {
@@ -128,9 +127,7 @@ pub fn run_probe_stack(input: ProbeStackInput) -> Result<Vec<PathBuf>> {
         if reuse_answers.is_none() {
             reuse_answers = result.answers_json;
             if reuse_client.is_none() {
-                reuse_client = reuse_answers
-                    .as_deref()
-                    .and_then(client_from_answers_json);
+                reuse_client = reuse_answers.as_deref().and_then(client_from_answers_json);
             }
         }
         paths.push(result.findings_path);

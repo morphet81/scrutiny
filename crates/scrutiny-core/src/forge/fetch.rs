@@ -240,8 +240,7 @@ fn extract_jira_key_from_text(text: &str) -> Option<String> {
     while i < bytes.len() {
         if bytes[i].is_ascii_alphabetic() {
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i].is_ascii_digit())
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i].is_ascii_digit()) {
                 i += 1;
             }
             if i < bytes.len() && bytes[i] == b'-' {

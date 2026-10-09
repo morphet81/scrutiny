@@ -128,39 +128,12 @@ pub fn run_parley_reply(input: ParleyReplyInput) -> Result<(ParleyReplyResult, P
             skipped += 1;
             continue;
         }
-        let body = ensure_ai_tag(&body, AI_AGENT_TAG);
-        let vars = json!({
-            "input": {
-                "pullRequestReviewThreadId": fix.comment_id,
-                "body": body,
+        match post_thread_reply(&input.cwd, &fix.comment_id, &body) {
+            Ok(reply) => {
+                posted += 1;
+                replies.push(reply);
             }
-        });
-        match gh_graphql(&input.cwd, REPLY_MUTATION, &vars) {
-            Ok(data) => {
-                let url = data
-                    .pointer("/addPullRequestReviewThreadReply/comment/url")
-                    .and_then(|u| u.as_str())
-                    .map(|s| s.to_string());
-                let id_ok = data
-                    .pointer("/addPullRequestReviewThreadReply/comment/id")
-                    .and_then(|i| i.as_str())
-                    .is_some();
-                if id_ok {
-                    posted += 1;
-                    replies.push(PostedReply {
-                        thread_id: fix.comment_id.clone(),
-                        comment_url: url,
-                    });
-                } else {
-                    failed.push(format!(
-                        "{}: no comment id in response: {data}",
-                        fix.comment_id
-                    ));
-                }
-            }
-            Err(e) => {
-                failed.push(format!("{}: {e:#}", fix.comment_id));
-            }
+            Err(e) => failed.push(format!("{}: {e:#}", fix.comment_id)),
         }
     }
 
@@ -190,6 +163,29 @@ pub fn run_parley_reply(input: ParleyReplyInput) -> Result<(ParleyReplyResult, P
         }
     }
     Ok((result, path))
+}
+
+/// Post one thread reply with the shared AI attribution tag.
+pub fn post_thread_reply(cwd: &Path, thread_id: &str, body: &str) -> Result<PostedReply> {
+    ensure_gh()?;
+    let body = ensure_ai_tag(body, AI_AGENT_TAG);
+    let vars = reply_input_json(thread_id, &body);
+    let data = gh_graphql(cwd, REPLY_MUTATION, &vars)?;
+    let url = data
+        .pointer("/addPullRequestReviewThreadReply/comment/url")
+        .and_then(|u| u.as_str())
+        .map(str::to_string);
+    let id_ok = data
+        .pointer("/addPullRequestReviewThreadReply/comment/id")
+        .and_then(|i| i.as_str())
+        .is_some();
+    if !id_ok {
+        bail!("no comment id in response: {data}");
+    }
+    Ok(PostedReply {
+        thread_id: thread_id.to_string(),
+        comment_url: url,
+    })
 }
 
 /// True when every entry composes to the same reply body — a degenerate run.

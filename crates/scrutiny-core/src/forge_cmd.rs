@@ -286,12 +286,8 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
     })?;
 
     if cfg.forge.skip_ship {
-        eprintln!(
-            "scrutiny forge: skip_ship — not committing or opening PR (temporary)"
-        );
-        eprintln!(
-            "scrutiny forge: next → review changes, then `scrutiny pr` when ready"
-        );
+        eprintln!("scrutiny forge: skip_ship — not committing or opening PR (temporary)");
+        eprintln!("scrutiny forge: next → review changes, then `scrutiny pr` when ready");
     } else {
         run_forge_ship(
             &cwd,
@@ -537,11 +533,8 @@ pub(crate) fn run_forge_item_body(ctx: ForgeItemCtx) -> Result<ForgeItemOutcome>
     if let Some(tmpl) = cfg.forge.pr_description_prompt.as_deref() {
         let tmpl = tmpl.trim();
         if !tmpl.is_empty() {
-            let pr_model = cfg.resolve_agent_model(
-                &detected.client,
-                "forge_pr_description",
-                &session.model,
-            );
+            let pr_model =
+                cfg.resolve_agent_model(&detected.client, "forge_pr_description", &session.model);
             if pr_model != session.model {
                 eprintln!(
                     "scrutiny forge: pr_description model override `{pr_model}` (session was `{}`)",
@@ -1707,7 +1700,10 @@ pub(crate) fn print_forge_complete_report(
     print_file_group("deleted", &deleted_disp, &del);
 
     if added.is_empty() && modified.is_empty() && deleted.is_empty() {
-        eprintln!("  {}", dim.apply_to("(no working-tree changes vs forge start)"));
+        eprintln!(
+            "  {}",
+            dim.apply_to("(no working-tree changes vs forge start)")
+        );
     }
 
     eprintln!();
@@ -2207,10 +2203,7 @@ mod tests {
 
     #[test]
     fn collapse_locale_paths_keeps_few() {
-        let paths = vec![
-            "src/i18n/locales/en.json".into(),
-            "src/foo.ts".into(),
-        ];
+        let paths = vec!["src/i18n/locales/en.json".into(), "src/foo.ts".into()];
         let out = collapse_locale_paths(&paths);
         assert_eq!(out.len(), 2);
     }
@@ -2231,7 +2224,8 @@ mod tests {
     fn implementation_summary_falls_back_to_pr_changes() {
         let meta = PrMeta {
             pr_title: "Title".into(),
-            pr_body: "## Summary\n\nFix toast.\n\n## Changes\n\n- Add locale keys\n- Wire modal\n".into(),
+            pr_body: "## Summary\n\nFix toast.\n\n## Changes\n\n- Add locale keys\n- Wire modal\n"
+                .into(),
             commit_subject: "subj".into(),
             commit_body: String::new(),
         };

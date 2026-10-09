@@ -87,8 +87,8 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
 
     // Always try to open tmux/zellij tabs (multi-ticket forge point), even when
     // `headless = true` for spawned implement agents.
-    let term = resolve_terminal(false, &detected.client, "forge")
-        .or_else(|| force_multiplexer_terminal());
+    let term =
+        resolve_terminal(false, &detected.client, "forge").or_else(|| force_multiplexer_terminal());
 
     let in_zellij = term.as_ref().map(|t| t.kind) == Some(TerminalContext::Zellij)
         || detect_terminal() == Some(TerminalContext::Zellij);
@@ -188,9 +188,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
 
     if started_paths.is_empty() {
         if stopped_emfile {
-            bail!(
-                "forge: no tickets started — near open-file limit (EMFILE) before the first tab"
-            );
+            bail!("forge: no tickets started — near open-file limit (EMFILE) before the first tab");
         }
         bail!("forge: no tickets prepared");
     }
@@ -413,8 +411,7 @@ fn ensure_init_commands(worktree: &Path, commands: &[String]) -> Result<()> {
     }
     run_init_commands(worktree, commands)?;
     if let Some(parent) = stamp.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(&stamp, "ok\n")
         .with_context(|| format!("write init stamp {}", stamp.display()))?;
@@ -457,9 +454,7 @@ fn launch_prepared(item: &PreparedItem, scrutiny_bin: &Path, headless: bool) -> 
     }
     let surface = item.surface.as_ref().unwrap();
     if let ItemSurface::Zellij { tab, tab_id: None } = surface {
-        eprintln!(
-            "scrutiny forge: warn: no tab_id for `{tab}` — pane may land in wrong tab"
-        );
+        eprintln!("scrutiny forge: warn: no tab_id for `{tab}` — pane may land in wrong tab");
     }
     // Fire-and-forget: driver runs in the pane; host does not wait on done.
     launch_agent_in_surface(
@@ -733,12 +728,7 @@ mod tests {
         std::fs::create_dir_all(src.path().join("local")).unwrap();
         std::fs::write(src.path().join("local/x.json"), "{}").unwrap();
 
-        copy_setup_files(
-            src.path(),
-            dest.path(),
-            &[".env".into(), "local".into()],
-        )
-        .unwrap();
+        copy_setup_files(src.path(), dest.path(), &[".env".into(), "local".into()]).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dest.path().join(".env")).unwrap(),
@@ -823,8 +813,7 @@ mod tests {
     fn create_then_init_fail_removes_worktree() {
         let (_dir, main) = bare_repo_with_commit();
         let wt = main.parent().unwrap().join("feat-nero-fail");
-        let (worktree, created) =
-            resolve_or_create_worktree(&main, "feat-nero-fail", &wt).unwrap();
+        let (worktree, created) = resolve_or_create_worktree(&main, "feat-nero-fail", &wt).unwrap();
         assert!(created);
         let err = ensure_init_commands(&worktree, &["false".into()]).unwrap_err();
         assert!(err.to_string().contains("init-commands[0] failed"));

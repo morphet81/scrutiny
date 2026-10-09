@@ -160,10 +160,7 @@ pub fn push_current_branch(cwd: &Path, no_verify: bool) -> Result<()> {
     if no_verify {
         args.insert(1, "--no-verify");
     }
-    let label = format!(
-        "git {} — running pre-push hooks",
-        args.join(" ")
-    );
+    let label = format!("git {} — running pre-push hooks", args.join(" "));
     let sp = crate::spinner::Spinner::start(&label);
     let push = Command::new("git")
         .args(&args)

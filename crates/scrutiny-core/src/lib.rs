@@ -49,7 +49,7 @@ pub use config::{
 };
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
-    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, promote_summary_concerns,
+    attach_pr_to_findings, merge_ai_findings, promote_summary_concerns, prompt_pr_if_missing,
     run_findings_init, run_findings_init_empty, run_findings_resolve, run_findings_triage,
     run_findings_validate, run_post_comments, FindingsInitInput, FindingsReport, PostCommentsInput,
     PostResult, TriageAskCtx,
@@ -64,8 +64,9 @@ pub use info_cmd::{run_info, InfoCmdInput};
 pub use map::{run_map, MapReport};
 pub use pack::{run_pack, PackReport};
 pub use parley::{
-    resolve_parley_fixes_path, run_parley_fetch, run_parley_plan_write, run_parley_reply,
-    ParleyAnswers, ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput,
+    resolve_parley_fixes_path, run_adjudicate, run_parley_fetch, run_parley_plan_write,
+    run_parley_reply, AdjudicateInput, ParleyAnswers, ParleyFetchInput, ParleyPlanWriteInput,
+    ParleyReplyInput,
 };
 pub use parley_cmd::{run_parley, ParleyCmdInput};
 pub use parley_stack::{run_parley_stack, ParleyStackInput};

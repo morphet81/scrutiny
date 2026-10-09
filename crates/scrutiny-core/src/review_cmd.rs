@@ -11,22 +11,24 @@ use crate::agent_runner::{
 use crate::config::{ensure_config, find_shipped_default, load_config};
 use crate::eval::{run_eval, EvalInput};
 use crate::findings::{
-    attach_pr_to_findings, merge_ai_findings, prompt_pr_if_missing, promote_summary_concerns,
-    run_findings_init,
-    run_findings_init_empty, run_findings_resolve, run_findings_triage, run_findings_validate,
-    run_post_comments, FindingsInitInput, PostCommentsInput, TriageAskCtx,
+    attach_pr_to_findings, merge_ai_findings, promote_summary_concerns, prompt_pr_if_missing,
+    run_findings_init, run_findings_init_empty, run_findings_resolve, run_findings_triage,
+    run_findings_validate, run_post_comments, FindingsInitInput, PostCommentsInput, TriageAskCtx,
 };
-use crate::git;
 use crate::gh::resolve_pr_refs;
+use crate::git;
 use crate::map::run_map;
 use crate::pack::run_pack;
 use crate::plan::{run_plan_confirm, run_plan_write, PlanConfirmInput, PlanWriteInput};
 use crate::review_session::{run_review_session_write, ReviewSessionWriteInput};
 use crate::runtime::{
-    client_from_answers_json, resolve_client, resolve_spawn_mode, DetectedClient, ResolveClientInput,
+    client_from_answers_json, resolve_client, resolve_spawn_mode, DetectedClient,
+    ResolveClientInput,
 };
 use crate::scan::run_scan;
-use crate::terminal::{force_close_agent_panes, preflight_zellij_agent_panes, resolve_terminal, AgentPaneCleanupGuard};
+use crate::terminal::{
+    force_close_agent_panes, preflight_zellij_agent_panes, resolve_terminal, AgentPaneCleanupGuard,
+};
 
 #[derive(Debug, Clone)]
 pub struct ReviewCmdInput {
@@ -103,10 +105,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
         .collect();
 
     let pr_refs = resolve_pr_refs(&cwd, input.pr.as_deref())?;
-    let effective_pr = input
-        .pr
-        .as_deref()
-        .or(pr_refs.number.as_deref());
+    let effective_pr = input.pr.as_deref().or(pr_refs.number.as_deref());
     if input.pr.is_none() {
         if let Some(n) = &pr_refs.number {
             eprintln!("scrutiny probe: using PR #{n} for current branch");
@@ -140,10 +139,12 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
 
     // Stack / --from-json reuses plan answers: honor that client instead of
     // falling back to default_client when skip_prompt is set.
-    let cli_override = input
-        .client
-        .clone()
-        .or_else(|| input.from_json.as_deref().and_then(client_from_answers_json));
+    let cli_override = input.client.clone().or_else(|| {
+        input
+            .from_json
+            .as_deref()
+            .and_then(client_from_answers_json)
+    });
 
     let mut detected = resolve_client(
         &cfg,
@@ -532,14 +533,7 @@ fn spawn_pr_summary_agent(
     let pack = pack_path.to_path_buf();
     let cwd = cwd.to_path_buf();
     Some(thread::spawn(move || {
-        run_pr_summary_agent(
-            &client,
-            &cfg,
-            &session_model,
-            &pack,
-            &cwd,
-            term.as_ref(),
-        )
+        run_pr_summary_agent(&client, &cfg, &session_model, &pack, &cwd, term.as_ref())
     }))
 }
 

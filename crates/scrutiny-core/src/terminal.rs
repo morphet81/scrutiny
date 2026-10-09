@@ -189,9 +189,8 @@ fn close_held_exited_agent_panes_in_origin_tab() -> Result<u32> {
 }
 
 fn close_zellij_agent_panes(scope: AgentPaneCloseScope) -> Result<u32> {
-    let raw = zellij_list_panes_json().ok_or_else(|| {
-        anyhow::anyhow!("zellij list-panes --json failed (need zellij ≥0.44)")
-    })?;
+    let raw = zellij_list_panes_json()
+        .ok_or_else(|| anyhow::anyhow!("zellij list-panes --json failed (need zellij ≥0.44)"))?;
     let targets = agent_pane_ids_from_json(&raw, scope)?;
     let mut closed = 0u32;
     for id in targets {
@@ -390,9 +389,7 @@ fn kill_agent_pane_pidfile(pid_path: &Path, script_marker: &str) -> bool {
         return false;
     };
     if !identity_matches_marker(&id_before, script_marker) {
-        eprintln!(
-            "scrutiny: skip pane kill pid={pid}: cmdline does not match agent marker"
-        );
+        eprintln!("scrutiny: skip pane kill pid={pid}: cmdline does not match agent marker");
         return false;
     }
 
@@ -661,9 +658,7 @@ pub fn preflight_zellij_open_files_budget_ex(
             per,
             session: &session,
         });
-        bail!(
-            "scrutiny {tool}: refused to open {count} {unit_plural}: {EMFILE_BAIL_MARKER}"
-        );
+        bail!("scrutiny {tool}: refused to open {count} {unit_plural}: {EMFILE_BAIL_MARKER}");
     }
     Ok(())
 }
@@ -740,10 +735,7 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
 
     eprintln!();
     eprintln!("{}", red.apply_to(bar));
-    eprintln!(
-        "{}",
-        red.apply_to("  Zellij near open-file limit (EMFILE)")
-    );
+    eprintln!("{}", red.apply_to("  Zellij near open-file limit (EMFILE)"));
     eprintln!("{}", red.apply_to(bar));
     eprintln!();
     eprintln!(
@@ -820,9 +812,7 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
     eprintln!();
     eprintln!(
         "     {}",
-        dim.apply_to(
-            "Pane ulimit alone does nothing — the server keeps its birth limit."
-        )
+        dim.apply_to("Pane ulimit alone does nothing — the server keeps its birth limit.")
     );
     eprintln!(
         "     {}",
@@ -869,9 +859,10 @@ pub(crate) fn effective_server_nofile_limit(
     }
     let floor = rlimit_floor.filter(|&n| n > 0).unwrap_or(0);
     match launchctl_soft {
-        Some(l) if l > 0 && used > l => {
-            (cap_self(self_soft).max(used), "self_getrlimit(proven_raised)")
-        }
+        Some(l) if l > 0 && used > l => (
+            cap_self(self_soft).max(used),
+            "self_getrlimit(proven_raised)",
+        ),
         Some(l) if l > 0 && floor > l => {
             // Table grew past launchctl ⇒ server rlimit is at least `floor`.
             let n = cap_self(self_soft).min(floor.max(used));
@@ -1586,30 +1577,26 @@ fn launch_zellij_in_origin(
     let _g = focus_guard();
     if let Some(a) = anchor {
         run_zellij_argv(&zellij_goto_argv(&a.tab_name)).context("zellij go-to-tab-name origin")?;
-        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit)).context("zellij run")?;
+        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit))
+            .context("zellij run")?;
         if let Some(prev) = &a.restore_tab_name {
             if prev != &a.tab_name {
                 let _ = run_zellij_argv(&zellij_goto_argv(prev));
             }
         }
     } else {
-        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit)).context("zellij run")?;
+        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit))
+            .context("zellij run")?;
     }
     Ok(())
 }
 
 fn run_zellij_argv(args: &[String]) -> Result<()> {
     // Capture stdout so pane/tab ids (`terminal_12`) do not spam the host TTY.
-    let out = zellij_cmd(args)
-        .output()
-        .context("spawn zellij")?;
+    let out = zellij_cmd(args).output().context("spawn zellij")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        bail!(
-            "zellij exited with {}: {}",
-            out.status,
-            err.trim()
-        );
+        bail!("zellij exited with {}: {}", out.status, err.trim());
     }
     Ok(())
 }
@@ -1691,29 +1678,26 @@ fn parse_tab_id_from_info(text: &str) -> Option<u32> {
         }
     }
     // Newer zellij may print a bare number (same as new-tab).
-    text.lines()
-        .find_map(|l| {
-            let t = l.trim();
-            if t.is_empty() {
-                None
-            } else {
-                t.parse().ok()
-            }
-        })
+    text.lines().find_map(|l| {
+        let t = l.trim();
+        if t.is_empty() {
+            None
+        } else {
+            t.parse().ok()
+        }
+    })
 }
 
 /// Parse `zellij action new-tab` stdout ("Returns: The created tab's ID as a single number").
 fn parse_new_tab_id(stdout: &str) -> Option<u32> {
-    stdout
-        .lines()
-        .find_map(|l| {
-            let t = l.trim();
-            if t.is_empty() {
-                None
-            } else {
-                t.parse().ok()
-            }
-        })
+    stdout.lines().find_map(|l| {
+        let t = l.trim();
+        if t.is_empty() {
+            None
+        } else {
+            t.parse().ok()
+        }
+    })
 }
 
 /// Launch `bash <script_path>` as a new pane/tab named `role` inside `surface`.
@@ -1730,11 +1714,8 @@ pub fn launch_agent_in_surface(
     let run_cmd = format!("bash '{script}'");
     match surface {
         ItemSurface::Tmux { session } => {
-            run_argv(
-                "tmux",
-                &tmux_launch_argv(session, &cwd_s, &run_cmd),
-            )
-            .context("tmux split-window")?;
+            run_argv("tmux", &tmux_launch_argv(session, &cwd_s, &run_cmd))
+                .context("tmux split-window")?;
             // Best-effort pane title + readable layout (ignore failures).
             let _ = run_argv(
                 "tmux",
@@ -1847,9 +1828,7 @@ pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
             // and exiting the whole session).
             if let Some(focused) = focused_tab_name_from_layout() {
                 if focused != *tab {
-                    bail!(
-                        "zellij close-tab aborted: focused tab `{focused}` != target `{tab}`"
-                    );
+                    bail!("zellij close-tab aborted: focused tab `{focused}` != target `{tab}`");
                 }
             }
             run_zellij_argv(&["action".into(), "close-tab".into()]).context("zellij close-tab")
@@ -2062,8 +2041,7 @@ fn is_layout_pane_line(t: &str) -> bool {
     let Some(rest) = t.strip_prefix("pane") else {
         return t.starts_with("PaneId");
     };
-    rest.is_empty()
-        || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '=')
+    rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || c == '{' || c == '=')
 }
 
 fn focused_tab_name_from_layout_str(layout: &str) -> Option<String> {
@@ -2192,9 +2170,7 @@ fn zellij_open_argv(tab: &str, cwd: &str) -> Vec<String> {
 /// Returns the new tab's stable id when the CLI prints it.
 fn open_zellij_tab(tab: &str, cwd: &str) -> Result<Option<u32>> {
     let args = zellij_open_argv(tab, cwd);
-    let out = zellij_cmd(&args)
-        .output()
-        .context("spawn zellij new-tab")?;
+    let out = zellij_cmd(&args).output().context("spawn zellij new-tab")?;
     if !out.status.success() {
         bail!(
             "zellij new-tab failed: {}",
@@ -2216,9 +2192,7 @@ fn open_zellij_tab(tab: &str, cwd: &str) -> Result<Option<u32>> {
         // Let the interactive shell finish profile init (often cds to ~ or ~/dev).
         thread::sleep(Duration::from_millis(350));
         if let Err(e) = zellij_cd_placeholder(id, tab, cwd) {
-            eprintln!(
-                "scrutiny: warn: could not cd placeholder tab `{tab}` to worktree: {e:#}"
-            );
+            eprintln!("scrutiny: warn: could not cd placeholder tab `{tab}` to worktree: {e:#}");
         }
     }
     Ok(tab_id)
@@ -2282,7 +2256,12 @@ fn zellij_run_argv(role: &str, script: &str, cwd: &str, close_on_exit: bool) -> 
     v
 }
 
-pub fn zellij_run_near_argv(role: &str, script: &str, cwd: &str, close_on_exit: bool) -> Vec<String> {
+pub fn zellij_run_near_argv(
+    role: &str,
+    script: &str,
+    cwd: &str,
+    close_on_exit: bool,
+) -> Vec<String> {
     let mut v = vec![
         "run".to_string(),
         "--near-current-pane".to_string(),
@@ -2445,8 +2424,7 @@ mod tests {
     fn effective_server_limit_unlocks_when_fd_table_grew_past_launchctl() {
         // macOS catch-22: used=250 < launchctl 256 so proven_raised never fires,
         // but kernel fd table 512 means server rlimit is at least 512.
-        let (n, src) =
-            effective_server_nofile_limit(250, 10_240, Some(256), None, Some(512));
+        let (n, src) = effective_server_nofile_limit(250, 10_240, Some(256), None, Some(512));
         assert_eq!(n, 512);
         assert_eq!(src, "macos_fd_nfiles");
         let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
@@ -2474,7 +2452,9 @@ Max open files            1024                 4096                 files\n";
             "scrutiny forge: refused to open 1 tabs: near open-file limit (EMFILE)"
         );
         assert!(is_zellij_emfile_limit_error(&err));
-        assert!(!is_zellij_emfile_limit_error(&anyhow::anyhow!("lsof failed")));
+        assert!(!is_zellij_emfile_limit_error(&anyhow::anyhow!(
+            "lsof failed"
+        )));
     }
 
     #[test]
@@ -2777,7 +2757,10 @@ layout {
             "Stack Scrutiny Probe"
         ));
         assert!(is_agent_pane_text("scrutiny parley -y", ""));
-        assert!(is_agent_pane_text("bash /tmp/parley-repair.sh", "parley-repair"));
+        assert!(is_agent_pane_text(
+            "bash /tmp/parley-repair.sh",
+            "parley-repair"
+        ));
         assert!(!is_agent_pane_text("/bin/zsh", "Pane #1"));
         assert!(!is_agent_pane_text("/bin/bash", ""));
     }

@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::eval::EvalReport;
 use crate::agent_runner::ProbePrSummary;
+use crate::eval::EvalReport;
 use crate::gh::{gh_output_retry, is_transient};
 use crate::mdterm::{term_cols, wrap_indent};
 use crate::pack::PackReport;
@@ -267,9 +267,7 @@ pub fn merge_ai_findings(
 /// Promote anchored `pr_summary.bad_points` into triage findings.
 /// Skips unanchored concerns and items already covered by an existing finding
 /// (same path + nearby line + similar title/text). `review_limits` stay display-only.
-pub fn promote_summary_concerns(
-    findings_path: &Path,
-) -> Result<(FindingsReport, PathBuf)> {
+pub fn promote_summary_concerns(findings_path: &Path) -> Result<(FindingsReport, PathBuf)> {
     let mut report: FindingsReport = read_json(findings_path)?;
     let Some(summary) = report.pr_summary.clone() else {
         return Ok((report, findings_path.to_path_buf()));
@@ -316,11 +314,12 @@ fn concern_title(c: &crate::agent_runner::SummaryConcern) -> String {
     }
 }
 
-fn concern_to_triage(
-    c: &crate::agent_runner::SummaryConcern,
-    number: usize,
-) -> TriageFinding {
-    let path = c.path.as_ref().map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+fn concern_to_triage(c: &crate::agent_runner::SummaryConcern, number: usize) -> TriageFinding {
+    let path = c
+        .path
+        .as_ref()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
     let line = c.line.filter(|&l| l > 0);
     let severity = normalize_severity(c.severity.as_deref().unwrap_or("suggestion"));
     let proposed_fix = c.proposed_fix.clone().unwrap_or_default();
@@ -366,7 +365,12 @@ fn concern_covered_by_existing(
     let ctitle = concern_title(c);
     let ctext_norm = normalize_concern_text(&c.text);
     for f in findings {
-        let Some(fpath) = f.anchor.path.as_deref().or(f.paths.first().map(|s| s.as_str())) else {
+        let Some(fpath) = f
+            .anchor
+            .path
+            .as_deref()
+            .or(f.paths.first().map(|s| s.as_str()))
+        else {
             continue;
         };
         if fpath != cpath {
@@ -893,13 +897,7 @@ pub fn run_findings_triage(
             }
 
             // Progress so reviewer knows where they are in the queue.
-            eprintln!(
-                "{}[{}/{}]{}",
-                style_dim(color),
-                idx + 1,
-                n,
-                style_reset()
-            );
+            eprintln!("{}[{}/{}]{}", style_dim(color), idx + 1, n, style_reset());
 
             print_finding_block(f, cwd, &head_oid, &snapshot, color);
 
@@ -1176,7 +1174,9 @@ fn prompt_finding_decision_line(f: &TriageFinding) -> Result<TriagePick> {
             eprint!("  comment: ");
             let _ = io::stderr().flush();
             let mut c = String::new();
-            io::stdin().read_line(&mut c).context("read custom comment")?;
+            io::stdin()
+                .read_line(&mut c)
+                .context("read custom comment")?;
             c.trim().to_string()
         } else {
             rest.to_string()
@@ -1337,9 +1337,7 @@ fn resolve_ask_model(cwd: &Path, client: &str, session_model: &str) -> String {
         Ok(cfg) => {
             let model = cfg.resolve_agent_model(client, "ask", session_model);
             if model != session_model {
-                eprintln!(
-                    "  ask model override `{model}` (session was `{session_model}`)"
-                );
+                eprintln!("  ask model override `{model}` (session was `{session_model}`)");
             }
             model
         }
@@ -3434,7 +3432,10 @@ mod tests {
         assert_eq!(out.findings[1].source, "ai.summary");
         assert_eq!(out.findings[1].title, "Dual-path render gate");
         assert_eq!(out.findings[1].severity, "warning");
-        assert_eq!(out.findings[1].anchor.path.as_deref(), Some("src/FormBody.tsx"));
+        assert_eq!(
+            out.findings[1].anchor.path.as_deref(),
+            Some("src/FormBody.tsx")
+        );
         assert_eq!(out.findings[1].anchor.line, Some(40));
         assert_eq!(out.findings[1].proposed_fix, "Simplify condition");
         assert!(!out

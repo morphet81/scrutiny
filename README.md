@@ -136,6 +136,16 @@ scrutiny info   # detect KEY-123 from current branch
 
 Prints summary, description, custom text fields (Expected / Actual / Steps, …), ticket URL/status, and related GitHub PRs (`gh`) when found.
 
+### Adjudicate PR comments
+
+```bash
+scrutiny adjudicate
+scrutiny adjudicate --pr 42
+scrutiny adjudicate --pr 42 -y
+```
+
+Fetches unresolved threads, asks agent for insight and accept/refuse reply drafts, then lets you accept suggested reply, refuse comment with rationale, or write custom reply. `-y` posts each agent-recommended response. This command only replies; it does not edit code, resolve threads, commit, or push.
+
 ### Parley — clear review comments
 
 ```bash

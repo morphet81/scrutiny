@@ -106,7 +106,10 @@ pub fn prompt_parley_answers(
         .parley
         .default_evangelists
         .min(cfg.probe.agents.max_evangelists);
-    let default_verifiers = cfg.parley.default_verifiers.min(cfg.probe.agents.max_evangelists);
+    let default_verifiers = cfg
+        .parley
+        .default_verifiers
+        .min(cfg.probe.agents.max_evangelists);
 
     if skip_prompt || !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         let spawn = if let Some(m) = spawn_mode_preset {
