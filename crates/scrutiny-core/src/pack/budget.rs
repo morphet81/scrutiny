@@ -3,6 +3,7 @@
 
 use crate::config::PackConfig;
 
+use super::hunk::{take_diff_budget, DiffHunk};
 use super::{take_budget, DroppedRegion, FileManifest, OutlineEntry, PackSlice, SymbolSlice};
 
 pub(crate) struct Region {
@@ -27,6 +28,8 @@ pub(crate) struct Assembly {
     pub needs_full_file: Vec<String>,
     pub chars_used: usize,
     pub truncated: bool,
+    /// Chars of diff hunks + symbol regions that did not fit the budget.
+    pub dropped_chars: usize,
 }
 
 fn weight(kind: &str, cfg: &PackConfig) -> u32 {
@@ -46,7 +49,15 @@ fn outline_cost(o: &[OutlineEntry]) -> usize {
 
 struct Acc {
     diff: String,
+    /// Diff hunks that did not fit yet (in file order) — re-appended whole
+    /// by later passes before any file gets extra symbol bodies.
+    pending_hunks: Vec<DiffHunk>,
+    /// Pass A cut the diff (heuristics only; healed hunks leave `pending_hunks`).
     diff_trunc: bool,
+    /// A region was included but cut mid-body (budget ran out mid-region).
+    region_partial: bool,
+    /// The primary region could not be included at all (pool exhausted).
+    primary_missing: bool,
     syms: Vec<SymbolSlice>,
     used: Vec<bool>,
     full_omitted: bool,
@@ -68,7 +79,10 @@ pub(crate) fn allocate(
         .iter()
         .map(|w| Acc {
             diff: String::new(),
+            pending_hunks: Vec::new(),
             diff_trunc: false,
+            region_partial: false,
+            primary_missing: false,
             syms: Vec::new(),
             used: vec![false; w.regions.len()],
             full_omitted: false,
@@ -76,7 +90,7 @@ pub(crate) fn allocate(
         .collect();
 
     let mut spent = 0usize;
-    let mut truncated = false;
+    let mut dropped_chars = 0usize;
 
     // Pass A — mandatory reserve per file (outline + capped diff + primary region).
     for &i in &order {
@@ -84,23 +98,17 @@ pub(crate) fn allocate(
         let o_cost = outline_cost(&w.outline);
         if spent + o_cost > pool {
             accs[i].full_omitted = true;
-            truncated = true;
             continue;
         }
         let mut local = o_cost;
 
         let diff_cap = cfg.min_file_chars.min(pool.saturating_sub(spent + local));
-        if diff_cap == 0 && !w.diff.is_empty() {
-            accs[i].full_omitted = true;
-            truncated = true;
-        } else {
-            let (dpart, dtrunc) = take_budget(&w.diff, diff_cap);
-            if dtrunc {
-                truncated = true;
-                accs[i].diff_trunc = true;
-            }
-            local += dpart.len();
-            accs[i].diff = dpart;
+        let (dpart, dhunks) = take_diff_budget(&w.diff, diff_cap);
+        local += dpart.len();
+        accs[i].diff = dpart;
+        accs[i].pending_hunks = dhunks;
+        if !accs[i].pending_hunks.is_empty() {
+            accs[i].diff_trunc = true;
         }
 
         if let Some(r) = w.regions.first() {
@@ -108,7 +116,7 @@ pub(crate) fn allocate(
             if rem > 0 {
                 let (c, ct) = take_budget(&r.content, rem);
                 if ct {
-                    truncated = true;
+                    accs[i].region_partial = true;
                 }
                 local += c.len();
                 accs[i].syms.push(SymbolSlice {
@@ -119,20 +127,31 @@ pub(crate) fn allocate(
                 });
                 accs[i].used[0] = true;
             } else {
-                truncated = true;
+                accs[i].primary_missing = true;
             }
         }
 
         spent += local;
     }
 
-    // Pass B — distribute remainder round-robin (one extra region per file per round, priority order).
+    // Pass B — distribute remainder round-robin (priority order). Diffs complete
+    // first: a file's whole remaining hunks go in before it (or any file) gets
+    // extra symbol bodies. Hunks are only ever appended whole.
     loop {
         let mut progressed = false;
         for &i in &order {
             let rem = pool.saturating_sub(spent);
             if rem == 0 {
                 break;
+            }
+            if let Some(h) = accs[i].pending_hunks.first() {
+                if h.text.len() <= rem {
+                    let h = accs[i].pending_hunks.remove(0);
+                    accs[i].diff.push_str(&h.text);
+                    spent += h.text.len();
+                    progressed = true;
+                    continue;
+                }
             }
             let next = accs[i].used.iter().position(|u| !u);
             let Some(ri) = next else { continue };
@@ -142,7 +161,7 @@ pub(crate) fn allocate(
                 continue;
             }
             if ct {
-                truncated = true;
+                accs[i].region_partial = true;
             }
             spent += c.len();
             accs[i].syms.push(SymbolSlice {
@@ -159,6 +178,27 @@ pub(crate) fn allocate(
         }
     }
 
+    for (i, w) in work.iter().enumerate() {
+        dropped_chars += accs[i]
+            .pending_hunks
+            .iter()
+            .map(|h| h.text.len())
+            .sum::<usize>();
+        dropped_chars += w
+            .regions
+            .iter()
+            .enumerate()
+            .filter(|(ri, _)| !accs[i].used.get(*ri).copied().unwrap_or(true))
+            .map(|(_, r)| r.content.len())
+            .sum::<usize>();
+    }
+
+    // Truncated only when cut content actually remains: a pass-A diff cut that
+    // pass B healed (hunks re-appended whole) is not a truncation.
+    let truncated = accs.iter().any(|a| {
+        a.full_omitted || !a.pending_hunks.is_empty() || a.region_partial || a.primary_missing
+    });
+
     // Assemble in original (map) order for stable output + partitioning.
     let mut slices = Vec::new();
     let mut manifest = Vec::new();
@@ -169,14 +209,17 @@ pub(crate) fn allocate(
             &mut accs[i],
             Acc {
                 diff: String::new(),
+                pending_hunks: Vec::new(),
                 diff_trunc: false,
+                region_partial: false,
+                primary_missing: false,
                 syms: Vec::new(),
                 used: Vec::new(),
                 full_omitted: false,
             },
         );
 
-        let dropped_regions: Vec<DroppedRegion> = w
+        let mut dropped_regions: Vec<DroppedRegion> = w
             .regions
             .iter()
             .enumerate()
@@ -188,6 +231,18 @@ pub(crate) fn allocate(
                 fetch_cmd: format!("{} | sed -n '{},{}p'", w.head_show_cmd, r.start, r.end),
             })
             .collect();
+        for h in &acc.pending_hunks {
+            dropped_regions.push(DroppedRegion {
+                label: format!("{}:{}-{}", w.path, h.new_start, h.new_end),
+                start_line: h.new_start,
+                end_line: h.new_end,
+                fetch_cmd: format!(
+                    "{} | sed -n '{},{}p'",
+                    w.head_show_cmd, h.new_start, h.new_end
+                ),
+            });
+        }
+        dropped_regions.sort_by_key(|d| d.start_line);
 
         let full_omitted = acc.full_omitted
             || (acc.diff_trunc && acc.syms.is_empty())
@@ -232,6 +287,7 @@ pub(crate) fn allocate(
         needs_full_file,
         chars_used: spent,
         truncated,
+        dropped_chars,
     }
 }
 
@@ -324,6 +380,42 @@ mod tests {
         let src_body: usize = src.symbol_slices.iter().map(|s| s.content.len()).sum();
         let test_body: usize = test.symbol_slices.iter().map(|s| s.content.len()).sum();
         assert!(src_body >= test_body);
+    }
+
+    #[test]
+    fn pass_a_diff_cut_healed_whole_by_pass_b() {
+        // Three hunks; pass A caps the diff at 1200 and drops two, pass B
+        // re-appends them whole. End state: not truncated, no dropped regions.
+        let hunk = |start: usize| format!("@@ -{start} +{start} @@\n+{}", "x".repeat(595));
+        let diff = format!("{}\n{}\n{}", hunk(1), hunk(50), hunk(100));
+        let w = vec![work("a.rs", "source", &diff, vec![(1, 9, "fn f() {}")])];
+        let a = allocate(w, 2000, 0, &cfg());
+        assert!(!a.truncated, "healed hunks must not count as truncation");
+        assert_eq!(a.dropped_chars, 0);
+        assert_eq!(
+            a.slices[0].unified_diff,
+            format!("{diff}\n"),
+            "all hunks re-appended whole"
+        );
+        assert!(a.manifest[0].dropped_regions.is_empty());
+    }
+
+    #[test]
+    fn unhealed_dropped_hunks_listed_in_dropped_regions() {
+        // Pool too small to ever fit the hunks: they stay listed as dropped
+        // regions with fetch commands, and truncation is reported.
+        let hunk = |start: usize| format!("@@ -{start} +{start} @@\n+{}", "x".repeat(595));
+        let diff = format!("{}\n{}", hunk(1), hunk(50));
+        let w = vec![work("a.rs", "source", &diff, vec![(1, 9, "fn f() {}")])];
+        let a = allocate(w, 100, 0, &cfg());
+        assert!(a.truncated);
+        assert!(a.dropped_chars > 0);
+        let dr = &a.manifest[0].dropped_regions;
+        assert_eq!(dr.len(), 2, "{dr:?}");
+        assert_eq!(dr[0].label, "a.rs:1-1");
+        assert_eq!(dr[1].label, "a.rs:50-50");
+        assert!(dr[0].fetch_cmd.contains("sed -n '1,1p'"));
+        assert!(a.slices[0].unified_diff.is_empty());
     }
 
     #[test]

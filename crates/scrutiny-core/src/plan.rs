@@ -39,6 +39,16 @@ pub struct ConfirmedPlan {
     /// isolated (script parallel) | team (one lead spawns team).
     #[serde(default = "default_spawn_isolated")]
     pub spawn_mode: String,
+    /// Pack lost content to the budget (diff hunks / symbol regions).
+    #[serde(default)]
+    pub pack_truncated: bool,
+    /// Chars the pack could not fit (see also `suggested_reviewers`).
+    #[serde(default)]
+    pub dropped_chars: usize,
+    /// Reviewers the pack size suggests: ceil((used + dropped) / max_chars).
+    /// 0 = pack fits, no signal.
+    #[serde(default)]
+    pub suggested_reviewers: u32,
 }
 
 fn default_spawn_isolated() -> String {
@@ -292,14 +302,49 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
         None
     };
 
-    let pack_chars = if let Some(p) = &input.pack_path {
+    let mut pack_chars = usize::MAX;
+    let (mut pack_truncated, mut pack_dropped_chars, mut pack_max_chars) = (false, 0usize, 0usize);
+    let (mut pack_dropped_regions, mut pack_needs_full) = (0usize, 0usize);
+    if let Some(p) = &input.pack_path {
         let v: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(p).with_context(|| format!("read pack {}", p.display()))?,
         )
         .context("parse pack json")?;
-        v.get("chars_used").and_then(|c| c.as_u64()).unwrap_or(0) as usize
+        pack_chars = v.get("chars_used").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+        pack_max_chars = v.get("max_chars").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+        pack_truncated = v
+            .get("truncated")
+            .and_then(|t| t.as_bool())
+            .unwrap_or(false);
+        pack_dropped_chars = v.get("dropped_chars").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+        pack_dropped_regions = v
+            .get("manifest")
+            .and_then(|m| m.as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|f| {
+                        f.get("dropped_regions")
+                            .and_then(|d| d.as_array())
+                            .map(|d| d.len())
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        pack_needs_full = v
+            .get("needs_full_file")
+            .and_then(|n| n.as_array())
+            .map(|n| n.len())
+            .unwrap_or(0);
+    }
+
+    // Reviewers the pack size suggests: every extra reviewer is one more shard
+    // with the full max_chars budget, so this scales coverage on big PRs.
+    let suggested_reviewers = if pack_truncated && pack_max_chars > 0 && pack_chars != usize::MAX {
+        let need = pack_chars.saturating_add(pack_dropped_chars);
+        (((need + pack_max_chars - 1) / pack_max_chars) as u32).max(2)
     } else {
-        usize::MAX
+        0
     };
 
     let architecture_risk = scan.as_ref().map(|s| s.architecture_risk).unwrap_or(false);
@@ -354,13 +399,30 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
     }
 
     // Cap agents by pack size
-    let max_reviewers = if pack_chars < 4_000 {
+    let mut max_reviewers = if pack_chars < 4_000 {
         1
     } else {
         reviewers.max(1)
     };
     if reviewers > max_reviewers {
         reviewers = max_reviewers;
+    }
+
+    // Truncated pack → raise reviewers toward the suggested count (within the
+    // configured cap): each reviewer shard gets the full max_chars budget.
+    if suggested_reviewers > reviewers {
+        let cap = agent_caps
+            .map(|(max_r, _, _)| max_r)
+            .unwrap_or(suggested_reviewers);
+        let raised = suggested_reviewers.min(cap).max(reviewers);
+        if raised > reviewers {
+            eprintln!(
+                "scrutiny plan-write: pack truncated — reviewers {reviewers} → {raised} \
+                 (suggested={suggested_reviewers} for full coverage)"
+            );
+            reviewers = raised;
+            max_reviewers = max_reviewers.max(raised);
+        }
     }
 
     // Evangelists only if architecture_risk or tier >= L
@@ -395,8 +457,20 @@ pub fn run_plan_write(input: PlanWriteInput) -> Result<(ConfirmedPlan, PathBuf)>
         max_reviewers,
         spawn_evangelists,
         spawn_mode,
+        pack_truncated,
+        dropped_chars: pack_dropped_chars,
+        suggested_reviewers,
     };
 
+    if pack_truncated {
+        eprintln!(
+            "scrutiny plan-write: ⚠ pack truncated: chars_used={pack_chars}/{} dropped_chars={pack_dropped_chars} dropped_regions={pack_dropped_regions} needs_full_file={pack_needs_full}",
+            if pack_max_chars > 0 { pack_max_chars.to_string() } else { "?".into() }
+        );
+        eprintln!(
+            "scrutiny plan-write: ⚠ review coverage incomplete on dropped regions — annex inlines the top ones; reviewers={reviewers} suggested={suggested_reviewers}"
+        );
+    }
     if reviewers_requested > max_reviewers {
         eprintln!(
             "scrutiny plan-write: reviewers capped {reviewers_requested} → {reviewers} (max_reviewers={max_reviewers}, pack_chars={pack_chars})"
@@ -555,6 +629,7 @@ mod tests {
         }"#;
         fs::write(&eval_path, eval).unwrap();
 
+        let _g = crate::paths::tests::lock_for_test();
         let _ = crate::paths::init_artifact_ctx(dir.path(), "local");
 
         let answers_json = r#"{
@@ -626,6 +701,7 @@ mod tests {
             "config_path": "/tmp/x"
         }"#;
         fs::write(&eval_path, eval).unwrap();
+        let _g = crate::paths::tests::lock_for_test();
         let _ = crate::paths::init_artifact_ctx(dir.path(), "local");
 
         let (answers, _) = run_plan_confirm(PlanConfirmInput {

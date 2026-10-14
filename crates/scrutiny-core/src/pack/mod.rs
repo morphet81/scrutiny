@@ -52,6 +52,20 @@ pub struct PackReport {
     pub markdown_path: Option<String>,
     #[serde(default)]
     pub explore: ExploreContract,
+    /// Top dropped regions inlined verbatim (within `annex_char_budget`).
+    #[serde(default)]
+    pub annex: Vec<AnnexRegion>,
+    /// Chars of diff hunks + symbol regions that did not fit `max_chars`.
+    #[serde(default)]
+    pub dropped_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnexRegion {
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -137,6 +151,26 @@ pub struct ReferencedSignature {
 }
 
 pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
+    run_pack_filtered(map_path, cwd, None, "pack")
+}
+
+/// Per-reviewer-bucket pack: only `paths` land in slices, but the shard gets
+/// the full `max_chars` budget. Written as `pack-shard-<label>.json`.
+pub fn run_pack_shard(
+    map_path: &Path,
+    cwd: &Path,
+    paths: &[String],
+    label: &str,
+) -> Result<(PackReport, PathBuf)> {
+    run_pack_filtered(map_path, cwd, Some(paths), &format!("pack-shard-{label}"))
+}
+
+fn run_pack_filtered(
+    map_path: &Path,
+    cwd: &Path,
+    path_filter: Option<&[String]>,
+    artifact_kind: &str,
+) -> Result<(PackReport, PathBuf)> {
     let text =
         fs::read_to_string(map_path).with_context(|| format!("read map {}", map_path.display()))?;
     let map: MapReport = serde_json::from_str(&text).context("parse map json")?;
@@ -162,12 +196,30 @@ pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
     };
 
     // Build per-file work: diff + outline + candidate symbol regions.
+    let filter = path_filter.map(|f| {
+        f.iter()
+            .map(|s| s.as_str())
+            .collect::<std::collections::HashSet<_>>()
+    });
     let mut paths: Vec<(String, String)> = Vec::new();
     for s in &map.source_to_review {
+        if let Some(f) = &filter {
+            if !f.contains(s.path.as_str()) {
+                continue;
+            }
+        }
         paths.push((s.path.clone(), "source".into()));
     }
     for t in &map.tests_related {
+        if let Some(f) = &filter {
+            if !f.contains(t.path.as_str()) {
+                continue;
+            }
+        }
         paths.push((t.path.clone(), "test".into()));
+    }
+    if paths.is_empty() {
+        anyhow::bail!("pack: no changed files selected");
     }
 
     let mut work: Vec<FileWork> = Vec::new();
@@ -284,6 +336,13 @@ pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
             .into(),
     };
 
+    let annex = build_annex(
+        &repo.root,
+        &map.head,
+        &assembly.manifest,
+        pack_cfg.annex_char_budget,
+    );
+
     let report = PackReport {
         version: 2,
         map_path: map_path.display().to_string(),
@@ -305,9 +364,11 @@ pub fn run_pack(map_path: &Path, cwd: &Path) -> Result<(PackReport, PathBuf)> {
         doc_digests,
         markdown_path: None,
         explore,
+        annex,
+        dropped_chars: assembly.dropped_chars,
     };
 
-    let out = temp_artifact_path(&map.repo, &map.branch, "pack");
+    let out = temp_artifact_path(&map.repo, &map.branch, artifact_kind);
     write_json_pretty(&out, &report)?;
 
     let md_path = out.with_extension("md");
@@ -341,6 +402,67 @@ pub(crate) fn show_file(root: &Path, head: &str, path: &str) -> Result<String> {
     git::git_stdout(root, &["show", &spec])
 }
 
+/// Inline the top dropped regions into the pack itself (within the annex
+/// budget), so reviewers see the highest-value missing code without a fetch.
+/// `dropped_regions` stays untouched as the fallback pointer list.
+fn build_annex(
+    root: &Path,
+    head: &str,
+    manifest: &[FileManifest],
+    budget: usize,
+) -> Vec<AnnexRegion> {
+    let mut annex = Vec::new();
+    if budget == 0 {
+        return annex;
+    }
+    let mut used = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    let mut cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for m in manifest {
+        for d in &m.dropped_regions {
+            if !seen.insert((m.path.clone(), d.start_line, d.end_line)) {
+                continue;
+            }
+            let rem = budget.saturating_sub(used);
+            if rem == 0 {
+                return annex;
+            }
+            let text = cache
+                .entry(m.path.clone())
+                .or_insert_with(|| show_file(root, head, &m.path).unwrap_or_default());
+            let content = slice_lines(text, d.start_line, d.end_line);
+            if content.is_empty() {
+                continue;
+            }
+            let (content, _) = take_budget(&content, rem);
+            used += content.len();
+            let partial = content.contains("…[truncated]");
+            annex.push(AnnexRegion {
+                path: m.path.clone(),
+                start_line: d.start_line,
+                end_line: d.end_line,
+                content,
+            });
+            if partial {
+                return annex;
+            }
+        }
+    }
+    annex
+}
+
+/// 1-based inclusive line slice.
+fn slice_lines(text: &str, start: usize, end: usize) -> String {
+    if end < start {
+        return String::new();
+    }
+    text.lines()
+        .skip(start.saturating_sub(1))
+        .take(end - start + 1)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +484,14 @@ mod tests {
             let (s, _) = take_budget(&long, b);
             assert!(s.len() <= b, "len {} > budget {b}", s.len());
         }
+    }
+
+    #[test]
+    fn line_slice_bounds() {
+        let text = "l1\nl2\nl3\nl4";
+        assert_eq!(slice_lines(text, 2, 3), "l2\nl3");
+        assert_eq!(slice_lines(text, 1, 1), "l1");
+        assert_eq!(slice_lines(text, 3, 2), "");
+        assert_eq!(slice_lines(text, 10, 20), "");
     }
 }

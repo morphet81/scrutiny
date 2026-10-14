@@ -82,6 +82,16 @@ pub(crate) fn render_pack_markdown(pack: &PackReport) -> String {
         md.push_str(&format!("```\n{}\n```\n\n", d.preview));
     }
 
+    if !pack.annex.is_empty() {
+        md.push_str("## annex (inlined dropped regions)\n\n");
+        for a in &pack.annex {
+            md.push_str(&format!(
+                "### {}:{}-{}\n\n```\n{}\n```\n\n",
+                a.path, a.start_line, a.end_line, a.content
+            ));
+        }
+    }
+
     if !pack.needs_full_file.is_empty() {
         md.push_str("## needs_full_file\n\n");
         for p in &pack.needs_full_file {

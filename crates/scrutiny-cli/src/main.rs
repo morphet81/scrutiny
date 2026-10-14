@@ -7,7 +7,8 @@ use scrutiny_core::{
     run_adjudicate, run_agent_prompt, run_bench, run_cleanup, run_eval, run_findings_init,
     run_findings_resolve, run_findings_triage, run_findings_validate, run_forge, run_forge_all,
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map,
-    run_pack, run_parley, run_parley_fetch, run_parley_plan_write, run_parley_reply,
+    run_pack, run_pack_shard, run_parley, run_parley_fetch, run_parley_plan_write,
+    run_parley_reply,
     run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
     run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
     BenchCmdInput, BenchWorkload, CleanupCmdInput, EvalInput, FindingsInitInput, ForgeAllInput,
@@ -101,6 +102,17 @@ enum Commands {
     Pack {
         #[arg(long)]
         map: PathBuf,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Per-reviewer-bucket pack shard (full max_chars budget) for the given paths
+    PackShard {
+        #[arg(long)]
+        map: PathBuf,
+        #[arg(long)]
+        paths: String,
+        #[arg(long)]
+        label: u32,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -588,6 +600,23 @@ fn run() -> Result<()> {
             ensure_git_repo(&cwd)?;
             prepare_artifacts(&cwd, None, &[&map])?;
             let (_report, path) = run_pack(&map, &cwd)?;
+            println!("{}", path.display());
+        }
+        Commands::PackShard {
+            map,
+            paths,
+            label,
+            cwd,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
+            prepare_artifacts(&cwd, None, &[&map])?;
+            let paths: Vec<String> = paths
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            let (_report, path) = run_pack_shard(&map, &cwd, &paths, &label.to_string())?;
             println!("{}", path.display());
         }
         Commands::Scan {

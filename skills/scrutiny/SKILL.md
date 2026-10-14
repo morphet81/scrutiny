@@ -153,9 +153,11 @@ PLAN="$("$SCRUTINY_BIN" plan-write \
   --answers "$ANSWERS")"
 ```
 
-Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `reviewers_requested`, `evangelists_requested`, `model`, `spawn_evangelists`, `max_reviewers`. **Confirm those numbers to the user before any spawn.**
+Show plan path. Read `skip_ai`, `skip_ai_reason`, `reviewers`, `evangelists`, `reviewers_requested`, `evangelists_requested`, `model`, `spawn_evangelists`, `max_reviewers`, `pack_truncated`, `suggested_reviewers`. **Confirm those numbers to the user before any spawn.**
 
 If `reviewers_requested` > `reviewers` (pack `max_reviewers` cap, e.g. pack_chars < 4000 → cap 1), tell user the effective count — do not spawn the raw requested number.
+
+If `pack_truncated` is true, plan-write already raised `reviewers` toward `suggested_reviewers` (each reviewer shard gets the FULL `max_chars` budget). Tell the user coverage was scaled and that `dropped_chars` / `dropped_regions` show what the pack could not fit — the annex inlines the top regions.
 
 #### Short-circuit (no AI probe)
 
@@ -203,6 +205,15 @@ BUCKETS="$("$SCRUTINY_BIN" pack-partition --pack "$PACK" --reviewers "$(jq .revi
 
 `BUCKETS` = JSON array of path arrays. Reviewer *i* gets **only** `BUCKETS[i]` (+ shared plan/pack paths in the brief).
 
+**Truncated pack (`plan.pack_truncated` true):** build one shard pack per bucket — each gets the full `max_chars` budget — and pass it as that reviewer's `--pack`:
+
+```bash
+"$SCRUTINY_BIN" pack-shard --cwd <repo-root> --map <map-json-path> \
+  --paths "$(jq -c '.[0] | join(",")' <<<"$BUCKETS")" --label 1
+```
+
+Evangelists/specialists keep the global pack. Shards exist only when the global pack truncated; otherwise skip.
+
 2. Spawn **exactly** `plan.reviewers` reviewer Tasks + `plan.evangelists` evangelists **in parallel**, each with confirmed `model=` and the matching `agent-prompt` text.
 3. **Wait for all** to finish before merge — no early stop / skim.
 4. Each agent return must be structured findings with `path`+`line`, or explicit `findings: []`.
@@ -227,10 +238,10 @@ Other:
 **Hard rule — anchors at raise time.** Every finding a reviewer/evangelist returns **must** include:
 
 - `path` (repo-relative)
-- `line` (1-based, from pack `symbol_slices` / diff hunk new-file lines — the agent is reading that text)
+- `line` (1-based, **changed** line: from that path's pack unified diff, or — when the pack diff was cut — a changed line verified by a Tier-1/2 head-file `Read`; `findings-resolve` later validates every anchor against the REAL PR diff)
 - optional `start_line`, `severity` (`critical|warning|suggestion`), `title`, `explanation`, `proposed_fix` / `fix_options`
 
-No finding without a line. “I’ll figure out the line later” is forbidden. The lead agent must **reject and re-ask** any finding missing `path`+`line`.
+No finding without a line. “I’ll figure out the line later” is forbidden. The lead agent must **reject and re-ask** any finding missing `path`+`line` or anchored on an unverified guess.
 
 Merge: static scan findings + AI findings → dedupe → write into findings JSON (Step 6.5) **with anchors already set**. For scan-only items, lead sets `anchor` from pack hunks/symbol slices when possible before showing triage.
 

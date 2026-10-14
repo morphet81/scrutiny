@@ -62,7 +62,7 @@ pub use forge_all::{run_forge_all, ForgeAllInput};
 pub use forge_cmd::{run_forge, ForgeCmdInput};
 pub use info_cmd::{run_info, InfoCmdInput};
 pub use map::{run_map, MapReport};
-pub use pack::{run_pack, PackReport};
+pub use pack::{run_pack, run_pack_shard, AnnexRegion, PackReport};
 pub use parley::{
     resolve_parley_fixes_path, run_adjudicate, run_parley_fetch, run_parley_plan_write,
     run_parley_reply, AdjudicateInput, ParleyAnswers, ParleyFetchInput, ParleyPlanWriteInput,

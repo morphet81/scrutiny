@@ -1260,9 +1260,9 @@ pub fn build_isolated_prompt(
         r#"## Context policy (save tokens)
 
 Tier 0 (default): pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
-Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path (or exact fetch_cmd). Prefer Read over Bash.
+Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path. If your host also gives a shell tool, MAY run that exact fetch_cmd. Prefer Read.
 Tier 2: at most 6 extra Reads of head files already in pack/xref/imports. No whole-repo rg/find. No writes.
-Stop at quota. No explore "to get oriented." Finding `line` MUST sit on that path's pack unified diff (GitHub-attachable). Explore = understanding only.
+Stop at quota. No explore "to get oriented." Explore = understanding only.
 
 Pack shape (v2):
 - `manifest[]`: changed-file outline; `dropped_regions` may sit in annex.
@@ -1277,7 +1277,8 @@ Output: JSON ONLY. No prose outside JSON.
 
 Rules:
 - Every finding: path + line (1-based).
-- **CRITICAL:** `line` MUST be **changed** line in that path's pack unified diff — added `+` (RIGHT) preferred, or deleted `-` (LEFT). Never context ` ` line. GitHub reject out-of-diff — never invent from full file.
+- **CRITICAL:** `line` MUST be **changed** line — added `+` (RIGHT) preferred, or deleted `-` (LEFT). Never context ` ` line, never invented.
+  Source of truth, in order: (1) that path's pack unified diff; (2) if pack diff was cut, changed line verified by Tier-1/2 Read of the head file — OK, host later validates against the REAL PR diff. Unverified guesses rejected.
 - Issue only on unchanged context line → omit finding or file-level (omit `line`).
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
@@ -1291,9 +1292,9 @@ Prefer pack.md sibling if present (same stem). Paths:
         r#"## Context policy (graduated — save tokens)
 
 Tier 0 (default): use pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
-Tier 1: if pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths`, you MAY Read that path (or run that exact fetch_cmd). Prefer Read over Bash.
+Tier 1: if pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths`, you MAY Read that path. If your host also gives a shell tool, you may run that exact fetch_cmd. Prefer Read.
 Tier 2: at most 6 extra Reads of head files whose path/symbol already appears in pack/xref/imports. No whole-repo rg/find. No writes.
-Stop when quota hit. Do NOT explore "to get oriented." Finding `line` MUST still be on that path's pack unified diff (GitHub-attachable). Exploration is for understanding only.
+Stop when quota hit. Do NOT explore "to get oriented." Exploration is for understanding only.
 
 Pack shape (v2):
 - `manifest[]`: outline of changed files; `dropped_regions` may already be inlined in annex.
@@ -1308,7 +1309,8 @@ Output: JSON ONLY. No prose outside JSON.
 
 Rules:
 - Every finding: path + line (1-based).
-- **CRITICAL:** `line` MUST be a **changed** line in that path's pack unified diff — added `+` (new-side, RIGHT) preferred, or deleted `-` (old-side, LEFT). Never a context ` ` line. GitHub will reject out-of-diff lines — never invent them from the full file.
+- **CRITICAL:** `line` MUST be a **changed** line — added `+` (new-side, RIGHT) preferred, or deleted `-` (old-side, LEFT). Never a context ` ` line, never invented.
+  Source of truth, in order: (1) that path's pack unified diff; (2) if the pack diff was cut, a changed line verified by a Tier-1/2 Read of the head file is OK — the host later validates every anchor against the REAL PR diff. Unverified guesses are rejected.
 - If the issue is only on an unchanged context line → omit that finding or attach at file level (omit `line`).
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
@@ -1402,17 +1404,17 @@ pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String 
 
 1. Spawn **exactly** counts above (parallel when possible).
 2. Wait for **ALL** members → findings JSON array before consolidate. Status/idle/progress pings NOT complete — re-request JSON if missing.
-3. Reject / re-ask finding missing path+line, or line not **changed** (added `+` or deleted `-`) in that path's pack unified diff. Context ` ` lines bad. Prefer pack+annex; bounded Tier-1/2 explore only (see member templates). No whole-repo fishing.
+3. Reject / re-ask finding missing path+line, or line not **changed** (added `+` or deleted `-`): in path pack unified diff, or verified by member Tier-1/2 head-file Read when pack diff cut. Context ` ` lines bad; unverified guesses bad. Prefer pack+annex; bounded Tier-1/2 explore only (see member templates). No whole-repo fishing.
 4. Dedupe. Disagreement on same issue → keep **higher** severity (critical > warning > suggestion).
-5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on changed lines in path unified_diff.
+5. Members may use pack annex / allowlisted fetch for omitted bodies; host later validates every anchor against the REAL PR diff.
 6. Return ONE final JSON on stdout (no prose outside JSON)."#,
         r#"## Lead ops (mandatory)
 
 1. Spawn **exactly** the counts above (parallel when possible).
 2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
-3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`) in that path's pack unified diff. Context ` ` lines are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
+3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`): in that path's pack unified diff, or verified by a member's Tier-1/2 head-file Read when the pack diff was cut. Context ` ` lines are not acceptable; unverified guesses are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
 4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
-5. Members may use pack annex / allowlisted fetch for omitted bodies; finding lines STILL only on changed lines (added `+` or deleted `-`) in the path unified_diff.
+5. Members may use pack annex / allowlisted fetch for omitted bodies; the host later validates every anchor against the REAL PR diff.
 6. Return ONE final JSON on stdout (no prose outside JSON)."#,
     );
 
@@ -1894,7 +1896,7 @@ pub fn build_pr_summary_prompt(pack_path: &Path) -> String {
 Read the pack. Write a SHORT overview for a reviewer about to triage findings.
 
 Tier 0: pack only — diffs, symbol slices, annex, outlined names, referenced_signatures.
-Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path.
+Tier 1: pack lists `dropped_regions[].fetch_cmd` or `explore.allowed_paths` → MAY Read that path. If your host also gives a shell tool, you may run that exact fetch_cmd.
 Tier 2: at most 6 extra Reads of head files already in pack/xref/imports. No writes.
 
 Output JSON ONLY. No prose outside JSON.
@@ -1924,7 +1926,8 @@ Style (mandatory):
 - `architecture`: ONE sentence (two only if data flow needs it), ≤30 words.
 - `good_points`: 0–3 bullets; each ≤12 words; concrete (module/pattern), not praise.
 - `bad_points`: actionable code risks ONLY. Each MUST include `path` + `line` from pack
-  unified diff / symbol slices (1-based new-file lines). Prefer `suggestion` or `warning`.
+  unified diff / symbol slices (1-based new-file lines), or a changed line verified by a
+  Tier-1/2 head-file Read when the pack diff was cut. Prefer `suggestion` or `warning`.
   0–5 items; empty if none.
 - `review_limits`: pack/tool caveats only (truncation, unread regions). Empty if none.
   NEVER put pack limits in `bad_points`.
@@ -2114,6 +2117,45 @@ fn parse_pr_summary_value(v: &Value) -> ProbePrSummary {
     direct
 }
 
+/// Global pack truncated? (Per-reviewer shards only pay off when it is.)
+fn pack_is_truncated(pack_path: &Path) -> bool {
+    fs::read_to_string(pack_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("truncated").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Per-reviewer-bucket pack: the bucket's paths get the FULL `max_chars`
+/// budget instead of a slice of one shared truncated pack. Falls back to
+/// the global pack on any failure.
+fn shard_pack_for(
+    plan: &ConfirmedPlan,
+    cwd: &Path,
+    paths: &[String],
+    index: u32,
+    global_pack: &Path,
+) -> PathBuf {
+    let Some(map_path) = plan.map_path.as_deref() else {
+        return global_pack.to_path_buf();
+    };
+    match crate::pack::run_pack_shard(Path::new(map_path), cwd, paths, &index.to_string()) {
+        Ok((report, path)) => {
+            eprintln!(
+                "scrutiny: reviewer#{index} shard pack → {} (chars={} truncated={})",
+                path.display(),
+                report.chars_used,
+                report.truncated
+            );
+            path
+        }
+        Err(e) => {
+            eprintln!("scrutiny: reviewer#{index} shard build failed ({e:#}) — using global pack");
+            global_pack.to_path_buf()
+        }
+    }
+}
+
 pub fn run_isolated_agents(
     client: &DetectedClient,
     cfg: &Config,
@@ -2122,29 +2164,38 @@ pub fn run_isolated_agents(
     cwd: &Path,
     term: Option<&ResolvedTerminal>,
 ) -> Result<Vec<AgentRunResult>> {
-    let mut jobs: Vec<(String, u32, Vec<String>)> = Vec::new();
+    // (role, index, paths, pack-to-read)
+    let mut jobs: Vec<(String, u32, Vec<String>, PathBuf)> = Vec::new();
 
     let buckets = if plan.reviewers > 0 {
         partition_pack_paths(pack_path, plan.reviewers)?
     } else {
         Vec::new()
     };
+    // Truncated global pack → each reviewer bucket gets its own shard with the
+    // full max_chars budget. Evangelists/specialists keep the global pack.
+    let shard = !buckets.is_empty() && pack_is_truncated(pack_path) && plan.map_path.is_some();
     for (i, paths) in buckets.into_iter().enumerate() {
-        jobs.push(("reviewer".into(), (i + 1) as u32, paths));
+        let pack = if shard && !paths.is_empty() {
+            shard_pack_for(plan, cwd, &paths, (i + 1) as u32, pack_path)
+        } else {
+            pack_path.to_path_buf()
+        };
+        jobs.push(("reviewer".into(), (i + 1) as u32, paths, pack));
     }
     if plan.evangelists > 0 {
         for i in 0..plan.evangelists {
-            jobs.push(("evangelist".into(), i + 1, Vec::new()));
+            jobs.push(("evangelist".into(), i + 1, Vec::new(), pack_path.to_path_buf()));
         }
     }
     if plan.security {
-        jobs.push(("security".into(), 1, Vec::new()));
+        jobs.push(("security".into(), 1, Vec::new(), pack_path.to_path_buf()));
     }
     if plan.performance {
-        jobs.push(("performance".into(), 1, Vec::new()));
+        jobs.push(("performance".into(), 1, Vec::new(), pack_path.to_path_buf()));
     }
     if plan.error_handling {
-        jobs.push(("error_handling".into(), 1, Vec::new()));
+        jobs.push(("error_handling".into(), 1, Vec::new(), pack_path.to_path_buf()));
     }
 
     if jobs.is_empty() {
@@ -2156,11 +2207,11 @@ pub fn run_isolated_agents(
         let wall = crate::timeouts::nonheadless();
         // (sentinel_path, findings_path, role, index, paths)
         let mut entries: Vec<(PathBuf, PathBuf, String, u32, Vec<String>)> = Vec::new();
-        for (role, index, paths) in &jobs {
+        for (role, index, paths, pack) in &jobs {
             let label = format!("{role}#{index}");
             let model = agent_model_for(cfg, &client.client, role, &plan.model);
             let findings_path = artifact_path(&format!("review-agent-findings-{role}-{index}"));
-            let prompt = build_isolated_prompt(role, pack_path, paths, plan)
+            let prompt = build_isolated_prompt(role, pack, paths, plan)
                 + &nonheadless_findings_suffix(&findings_path);
             let sentinel = run_nonheadless(client, &model, cwd, &prompt, &label, ctx)?;
             entries.push((sentinel, findings_path, role.clone(), *index, paths.clone()));
@@ -2212,7 +2263,7 @@ pub fn run_isolated_agents(
 
     let wall = crate::timeouts::probe_isolated();
     let pending: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::new(
-        std::sync::Mutex::new(jobs.iter().map(|(r, i, _)| format!("{r}#{i}")).collect()),
+        std::sync::Mutex::new(jobs.iter().map(|(r, i, ..)| format!("{r}#{i}")).collect()),
     );
 
     eprintln!(
@@ -2226,11 +2277,10 @@ pub fn run_isolated_agents(
     let job_count = jobs.len();
     let batch_start = std::time::Instant::now();
 
-    for (role, index, paths) in jobs {
+    for (role, index, paths, pack) in jobs {
         let tx = tx.clone();
         let client = client.clone();
         let model = agent_model_for(cfg, &client.client, &role, &plan.model);
-        let pack = pack_path.to_path_buf();
         let cwd = cwd.to_path_buf();
         let plan_c = plan.clone();
         let pending = pending.clone();
@@ -2584,6 +2634,9 @@ fn minimal_plan_for_prompt(pack_path: &Path) -> ConfirmedPlan {
         max_reviewers: 4,
         spawn_evangelists: true,
         spawn_mode: "isolated".into(),
+        pack_truncated: false,
+        dropped_chars: 0,
+        suggested_reviewers: 0,
     }
 }
 
@@ -2860,6 +2913,9 @@ mod tests {
             max_reviewers: 2,
             spawn_evangelists: true,
             spawn_mode: "team".into(),
+            pack_truncated: false,
+            dropped_chars: 0,
+            suggested_reviewers: 0,
         };
         let p = build_team_lead_prompt(Path::new("/tmp/pack.json"), &plan);
         assert!(p.contains("Member brief templates (MANDATORY)"));

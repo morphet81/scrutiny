@@ -226,9 +226,16 @@ pub fn warn_if_scrutiny_unignored(cwd: &Path) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Serialize tests that mutate the global ARTIFACT_CTX.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn lock_for_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap()
+    }
 
     #[test]
     fn parse_pr_from_url() {
@@ -246,6 +253,7 @@ mod tests {
 
     #[test]
     fn artifact_paths_under_session() {
+        let _g = lock_for_test();
         let dir = tempdir().unwrap();
         let root = init_artifact_ctx(dir.path(), "7").unwrap();
         assert_eq!(root, dir.path().join(".scrutiny/7"));
