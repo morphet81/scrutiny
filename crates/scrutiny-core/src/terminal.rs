@@ -833,13 +833,14 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
 ///
 /// macOS cannot read another process's rlimit. `launchctl` soft (often 256) is
 /// a **system default**, not the server's birth ulimit — a pane `ulimit -n`
-/// also does not change the server. Using `min(self, launchctl)` until
-/// `used > launchctl` is a catch-22: we refuse to open panes, so `used` never
-/// crosses 256, even when the server was restarted at 10240.
+/// also does not change the server. `self_soft` is the scrutiny process's own
+/// limit and says nothing about the server, so it is never used once the
+/// server is known to exceed launchctl.
 ///
 /// `rlimit_floor` is Darwin `pbi_nfiles` (`fd_nfiles` — allocated FD table
 /// size). The kernel will not grow that table past the process rlimit, so it
-/// is a lower bound. Conservative ceiling: `min(self, max(launchctl, floor))`.
+/// is a lower bound on the server limit. If `used > launchctl` and no floor is
+/// known, the limit is unknown: return launchctl so the preflight refuses.
 pub(crate) fn effective_server_nofile_limit(
     used: u64,
     self_soft: u64,
@@ -859,15 +860,8 @@ pub(crate) fn effective_server_nofile_limit(
     }
     let floor = rlimit_floor.filter(|&n| n > 0).unwrap_or(0);
     match launchctl_soft {
-        Some(l) if l > 0 && used > l => (
-            cap_self(self_soft).max(used),
-            "self_getrlimit(proven_raised)",
-        ),
-        Some(l) if l > 0 && floor > l => {
-            // Table grew past launchctl ⇒ server rlimit is at least `floor`.
-            let n = cap_self(self_soft).min(floor.max(used));
-            (n, "macos_fd_nfiles")
-        }
+        Some(l) if l > 0 && floor > l => (floor.max(used), "macos_fd_nfiles"),
+        Some(l) if l > 0 && used > l => (l, "launchctl(exceeded,limit_unknown)"),
         Some(l) if l > 0 => (cap_self(self_soft).min(l), "min(self,launchctl)"),
         _ => (cap_self(self_soft), "self_getrlimit"),
     }
@@ -2405,10 +2399,29 @@ mod tests {
     }
 
     #[test]
-    fn effective_server_limit_unlocks_when_used_proves_raised() {
-        let (n, src) = effective_server_nofile_limit(300, 10_240, Some(256), None, None);
-        assert_eq!(n, 10_240);
-        assert_eq!(src, "self_getrlimit(proven_raised)");
+    fn effective_server_limit_ignores_self_rlimit_when_used_exceeds_launchctl() {
+        // Real case: scrutiny pane self soft 256, server 259 FDs, fd table 512.
+        let (n, src) = effective_server_nofile_limit(259, 256, Some(256), None, Some(512));
+        assert_eq!(n, 512);
+        assert_eq!(src, "macos_fd_nfiles");
+        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+        assert!(259 + zellij_fds_for_panes(5) <= ceiling, "5 panes must fit");
+    }
+
+    #[test]
+    fn effective_server_limit_unknown_when_used_exceeds_launchctl_without_floor() {
+        let (n, src) = effective_server_nofile_limit(259, 256, Some(256), None, None);
+        assert_eq!(n, 256);
+        assert_ne!(n, 259, "limit must never collapse to used count");
+        assert_eq!(src, "launchctl(exceeded,limit_unknown)");
+        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
+        assert!(259 + zellij_fds_for_panes(1) > ceiling, "unknown limit refuses");
+    }
+
+    #[test]
+    fn effective_server_limit_ignores_large_self_rlimit_when_used_exceeds_launchctl() {
+        let (n, _) = effective_server_nofile_limit(300, 10_240, Some(256), None, None);
+        assert_eq!(n, 256);
     }
 
     #[test]
