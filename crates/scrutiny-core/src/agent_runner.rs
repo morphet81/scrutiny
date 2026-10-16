@@ -838,9 +838,9 @@ pub fn run_nonheadless(
         Some(&kill_cmd),
         &pid_path,
     )?;
-    register_agent_pane(label, pid_path, script_path.display().to_string());
     eprintln!("scrutiny: launch {label} in {ctx:?} window (auto mode)");
-    launch_agent_window(ctx, label, &script_path, cwd)?;
+    let pane = launch_agent_window(ctx, label, &script_path, cwd)?;
+    register_agent_pane(label, pid_path, script_path.display().to_string(), pane);
     Ok(sentinel)
 }
 
@@ -860,9 +860,9 @@ pub fn run_nonheadless_in(
     let (sentinel, script_path) =
         build_agent_script(client, model, cwd, prompt, role, None, &pid_path)?;
     // Bulk/item surfaces manage their own lifetime; still track PID for host exit cleanup.
-    register_agent_pane(role, pid_path, script_path.display().to_string());
     eprintln!("scrutiny: launch {role} into item surface (auto mode)");
-    launch_agent_in_surface(surface, role, &script_path, cwd, close_on_exit)?;
+    let pane = launch_agent_in_surface(surface, role, &script_path, cwd, close_on_exit)?;
+    register_agent_pane(role, pid_path, script_path.display().to_string(), pane);
     Ok(sentinel)
 }
 
@@ -878,7 +878,7 @@ pub fn run_dry_placeholder_in(cwd: &Path, role: &str, surface: &ItemSurface) -> 
     );
     fs::write(&script_path, script.as_bytes())
         .with_context(|| format!("write {}", script_path.display()))?;
-    launch_agent_in_surface(surface, role, &script_path, cwd, false)
+    launch_agent_in_surface(surface, role, &script_path, cwd, false).map(|_| ())
 }
 
 /// Write the agent prompt + launcher script; return `(sentinel, script_path)`.

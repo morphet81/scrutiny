@@ -57,19 +57,32 @@ struct TrackedAgentPane {
     script_marker: String,
 }
 
+/// Zellij pane created by scrutiny. Only these ids are ever closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedZellijPane {
+    pub id: u64,
+    /// Pane `--name` we passed at creation; matched before close (id reuse guard).
+    pub title: String,
+}
+
+static OWNED_ZELLIJ_PANES: Mutex<Vec<OwnedZellijPane>> = Mutex::new(Vec::new());
+
 static TRACKED_AGENT_PANES: Mutex<Vec<TrackedAgentPane>> = Mutex::new(Vec::new());
 static CLEANUP_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static CLEANUP_ONCE: Once = Once::new();
 /// Set by the SIGINT/SIGTERM handler. Real pane teardown runs on Drop / explicit
 /// [`force_close_agent_panes`] — never inside the signal handler (async-unsafe).
 static CLEANUP_REQUESTED: AtomicBool = AtomicBool::new(false);
-/// Origin zellij tab captured at [`resolve_terminal`] for held/exited agent sweep.
-static AGENT_ORIGIN_TAB: Mutex<Option<ZellijAnchor>> = Mutex::new(None);
 
 /// Register a non-headless agent pane (bash PID written to `pid_path` by the script).
 /// `script_marker` is matched against `ps` cmdline before any kill so a recycled
 /// PID cannot take down zellij or unrelated processes.
-pub fn register_agent_pane(label: &str, pid_path: PathBuf, script_marker: impl Into<String>) {
+pub fn register_agent_pane(
+    label: &str,
+    pid_path: PathBuf,
+    script_marker: impl Into<String>,
+    zellij_pane_id: Option<u64>,
+) {
     install_agent_pane_cleanup_hook();
     if let Ok(mut g) = TRACKED_AGENT_PANES.lock() {
         g.push(TrackedAgentPane {
@@ -77,6 +90,14 @@ pub fn register_agent_pane(label: &str, pid_path: PathBuf, script_marker: impl I
             pid_path,
             script_marker: script_marker.into(),
         });
+    }
+    if let Some(id) = zellij_pane_id {
+        if let Ok(mut g) = OWNED_ZELLIJ_PANES.lock() {
+            g.push(OwnedZellijPane {
+                id,
+                title: label.to_string(),
+            });
+        }
     }
 }
 
@@ -109,13 +130,72 @@ pub fn force_close_agent_panes() {
         eprintln!("scrutiny: force-closed {closed} agent pane(s) total");
     }
 
-    match close_held_exited_agent_panes_in_origin_tab() {
-        Ok(n) if n > 0 => {
-            eprintln!("scrutiny: closed {n} held/exited agent pane(s) in origin tab");
-        }
+    match close_owned_zellij_panes() {
+        Ok(n) if n > 0 => eprintln!("scrutiny: closed {n} scrutiny-owned zellij pane(s)"),
         Ok(_) => {}
-        Err(e) => eprintln!("scrutiny: skip origin-tab agent sweep: {e:#}"),
+        Err(e) => eprintln!("scrutiny: skip owned zellij pane close: {e:#}"),
     }
+}
+
+/// Close zellij panes scrutiny created (live, held, or exited), in any tab.
+/// Ids outside [`OWNED_ZELLIJ_PANES`] are never touched. Entries stay queued
+/// until their close succeeds, so a failed close is retried on the next call.
+fn close_owned_zellij_panes() -> Result<u32> {
+    let owned: Vec<OwnedZellijPane> = match OWNED_ZELLIJ_PANES.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return Ok(0),
+    };
+    if owned.is_empty() || detect_terminal() != Some(TerminalContext::Zellij) {
+        return Ok(0);
+    }
+    let raw = zellij_list_panes_json()
+        .ok_or_else(|| anyhow::anyhow!("zellij list-panes --json failed"))?;
+    let present = owned_panes_present(&raw, &owned)?;
+    let mut closed = 0u32;
+    for pane in owned {
+        if !present.contains(&pane.id) {
+            forget_owned_zellij_pane(pane.id);
+            continue;
+        }
+        let arg = format!("terminal_{}", pane.id);
+        match run_zellij_argv(&[
+            "action".into(),
+            "close-pane".into(),
+            "--pane-id".into(),
+            arg,
+        ]) {
+            Ok(()) => {
+                forget_owned_zellij_pane(pane.id);
+                closed += 1;
+            }
+            Err(e) => eprintln!("scrutiny: skip close-pane terminal_{}: {e:#}", pane.id),
+        }
+    }
+    Ok(closed)
+}
+
+fn forget_owned_zellij_pane(id: u64) {
+    if let Ok(mut g) = OWNED_ZELLIJ_PANES.lock() {
+        g.retain(|p| p.id != id);
+    }
+}
+
+/// Ids from `owned` that still exist as non-plugin panes with the same title.
+fn owned_panes_present(raw: &str, owned: &[OwnedZellijPane]) -> Result<Vec<u64>> {
+    let panes: Vec<serde_json::Value> =
+        serde_json::from_str(raw).context("parse zellij list-panes JSON")?;
+    let mut present = Vec::new();
+    for want in owned {
+        let found = panes.iter().any(|p| {
+            p.get("is_plugin").and_then(|v| v.as_bool()) != Some(true)
+                && p.get("id").and_then(|v| v.as_u64()) == Some(want.id)
+                && p.get("title").and_then(|v| v.as_str()) == Some(want.title.as_str())
+        });
+        if found {
+            present.push(want.id);
+        }
+    }
+    Ok(present)
 }
 
 /// True when pane command/title looks like a scrutiny/claude/cursor agent pane
@@ -148,21 +228,11 @@ pub fn is_agent_pane_text(command: &str, title: &str) -> bool {
         || cmd.contains("/agent --")
 }
 
-fn set_agent_origin_tab(anchor: &ZellijAnchor) {
-    if let Ok(mut g) = AGENT_ORIGIN_TAB.lock() {
-        *g = Some(anchor.clone());
-    }
-}
-
-fn agent_origin_tab() -> Option<ZellijAnchor> {
-    AGENT_ORIGIN_TAB.lock().ok().and_then(|g| g.clone())
-}
-
 /// Close session-wide agent panes (live + held + exited). Keeps interactive shells.
 /// Returns how many panes were closed.
 pub fn close_agent_panes_session_wide() -> Result<u32> {
     match detect_terminal() {
-        Some(TerminalContext::Zellij) => close_zellij_agent_panes(AgentPaneCloseScope::SessionWide),
+        Some(TerminalContext::Zellij) => close_zellij_agent_panes(),
         Some(TerminalContext::Tmux) => close_tmux_agent_panes_session_wide(),
         _ => {
             bail!("scrutiny cleanup --agents needs tmux or zellij");
@@ -170,28 +240,11 @@ pub fn close_agent_panes_session_wide() -> Result<u32> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum AgentPaneCloseScope {
-    /// All tabs: live + held + exited agent panes.
-    SessionWide,
-    /// Origin tab only: held/exited agent panes (auto cleanup after probe/parley).
-    OriginHeldExited,
-}
-
-fn close_held_exited_agent_panes_in_origin_tab() -> Result<u32> {
-    if detect_terminal() != Some(TerminalContext::Zellij) {
-        return Ok(0);
-    }
-    if agent_origin_tab().is_none() {
-        return Ok(0);
-    }
-    close_zellij_agent_panes(AgentPaneCloseScope::OriginHeldExited)
-}
-
-fn close_zellij_agent_panes(scope: AgentPaneCloseScope) -> Result<u32> {
+/// All tabs: live + held + exited agent-pattern panes (`cleanup --agents`).
+fn close_zellij_agent_panes() -> Result<u32> {
     let raw = zellij_list_panes_json()
         .ok_or_else(|| anyhow::anyhow!("zellij list-panes --json failed (need zellij ≥0.44)"))?;
-    let targets = agent_pane_ids_from_json(&raw, scope)?;
+    let targets = agent_pane_ids_from_json(&raw)?;
     let mut closed = 0u32;
     for id in targets {
         let pane = format!("terminal_{id}");
@@ -208,10 +261,9 @@ fn close_zellij_agent_panes(scope: AgentPaneCloseScope) -> Result<u32> {
     Ok(closed)
 }
 
-fn agent_pane_ids_from_json(raw: &str, scope: AgentPaneCloseScope) -> Result<Vec<u64>> {
+fn agent_pane_ids_from_json(raw: &str) -> Result<Vec<u64>> {
     let panes: Vec<serde_json::Value> =
         serde_json::from_str(raw).context("parse zellij list-panes JSON")?;
-    let origin = agent_origin_tab();
     let mut ids = Vec::new();
     for p in &panes {
         if p.get("is_plugin").and_then(|v| v.as_bool()) == Some(true) {
@@ -232,27 +284,6 @@ fn agent_pane_ids_from_json(raw: &str, scope: AgentPaneCloseScope) -> Result<Vec
         let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("");
         if !is_agent_pane_text(cmd, title) {
             continue;
-        }
-        let held = p.get("is_held").and_then(|v| v.as_bool()).unwrap_or(false);
-        let exited = p.get("exited").and_then(|v| v.as_bool()).unwrap_or(false);
-        match scope {
-            AgentPaneCloseScope::SessionWide => {}
-            AgentPaneCloseScope::OriginHeldExited => {
-                if !held && !exited {
-                    continue;
-                }
-                let Some(ref o) = origin else {
-                    continue;
-                };
-                let tab_ok = if let Some(want) = o.tab_id {
-                    p.get("tab_id").and_then(|v| v.as_u64()) == Some(u64::from(want))
-                } else {
-                    p.get("tab_name").and_then(|v| v.as_str()) == Some(o.tab_name.as_str())
-                };
-                if !tab_ok {
-                    continue;
-                }
-            }
         }
         ids.push(id);
     }
@@ -534,10 +565,10 @@ pub fn push_zellij_session_override(name: &str) -> ZellijSessionOverrideGuard {
 const ZELLIJ_FDS_PER_FORGE_TAB_DEFAULT: u64 = 48;
 /// Keep this many FDs free under the soft limit.
 const ZELLIJ_FD_SAFETY_MARGIN: u64 = 24;
-/// Tab-bar plugins + idle placeholder shell.
-const ZELLIJ_FD_TAB_OVERHEAD: u64 = 12;
-/// Rough FDs per terminal pane (driver / agent) on the zellij server.
-const ZELLIJ_FD_PER_PANE: u64 = 8;
+/// Tab-bar + status-bar plugin instances per tab (measured ~10 on zellij 0.45).
+const ZELLIJ_FD_TAB_OVERHEAD: u64 = 10;
+/// FDs per live terminal pane on the zellij server (PTY pair, measured 2).
+const ZELLIJ_FD_PER_PANE: u64 = 2;
 
 /// Marker substring kept in the bail message so [`is_zellij_emfile_limit_error`] works.
 const EMFILE_BAIL_MARKER: &str = "near open-file limit (EMFILE)";
@@ -1248,9 +1279,6 @@ pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<Reso
             match kind {
                 TerminalContext::Zellij => {
                     resolved.zellij = capture_zellij_anchor();
-                    if let Some(ref a) = resolved.zellij {
-                        set_agent_origin_tab(a);
-                    }
                     let caps = zellij_caps();
                     if !caps.near_current_pane && !caps.tab_id {
                         eprintln!(
@@ -1468,7 +1496,7 @@ pub fn launch_agent_window(
     label: &str,
     script_path: &Path,
     cwd: &Path,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     let script = script_path.display().to_string();
     let cwd_s = cwd.display().to_string();
     let run_cmd = format!("bash '{script}'");
@@ -1502,7 +1530,7 @@ pub fn launch_agent_window(
             if !status.success() {
                 bail!("terminal launcher for {label} exited with {status}");
             }
-            Ok(())
+            Ok(None)
         }
         TerminalContext::Zellij => {
             launch_zellij_in_origin(ctx.zellij.as_ref(), label, &script, &cwd_s, true)
@@ -1518,7 +1546,7 @@ pub fn launch_agent_window(
             if !status.success() {
                 bail!("terminal launcher for {label} exited with {status}");
             }
-            Ok(())
+            Ok(None)
         }
         TerminalContext::ITerm2 => {
             let status = Command::new("osascript")
@@ -1528,7 +1556,7 @@ pub fn launch_agent_window(
             if !status.success() {
                 bail!("terminal launcher for {label} exited with {status}");
             }
-            Ok(())
+            Ok(None)
         }
     }
 }
@@ -1539,14 +1567,13 @@ fn launch_zellij_in_origin(
     script: &str,
     cwd: &str,
     close_on_exit: bool,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     let caps = zellij_caps();
 
     // Best path: open beside the invoking pane without following user focus.
     if caps.near_current_pane {
         let args = zellij_run_near_argv(label, script, cwd, close_on_exit);
-        run_zellij_argv(&args).context("zellij run --near-current-pane")?;
-        return Ok(());
+        return run_zellij_argv_pane_id(&args).context("zellij run --near-current-pane");
     }
 
     // Next: target a known tab id without stealing focus.
@@ -1561,38 +1588,52 @@ fn launch_zellij_in_origin(
                     close_on_exit,
                     caps.no_focus,
                 );
-                run_zellij_argv(&args).context("zellij new-pane --tab-id")?;
-                return Ok(());
+                return run_zellij_argv_pane_id(&args).context("zellij new-pane --tab-id");
             }
         }
     }
 
     // Legacy: always hold the focus lock — never unguarded `zellij run`.
     let _g = focus_guard();
-    if let Some(a) = anchor {
+    let pane_id = if let Some(a) = anchor {
         run_zellij_argv(&zellij_goto_argv(&a.tab_name)).context("zellij go-to-tab-name origin")?;
-        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit))
+        let id = run_zellij_argv_pane_id(&zellij_run_argv(label, script, cwd, close_on_exit))
             .context("zellij run")?;
         if let Some(prev) = &a.restore_tab_name {
             if prev != &a.tab_name {
                 let _ = run_zellij_argv(&zellij_goto_argv(prev));
             }
         }
+        id
     } else {
-        run_zellij_argv(&zellij_run_argv(label, script, cwd, close_on_exit))
-            .context("zellij run")?;
-    }
-    Ok(())
+        run_zellij_argv_pane_id(&zellij_run_argv(label, script, cwd, close_on_exit))
+            .context("zellij run")?
+    };
+    Ok(pane_id)
 }
 
 fn run_zellij_argv(args: &[String]) -> Result<()> {
+    run_zellij_argv_pane_id(args).map(|_| ())
+}
+
+/// Run a zellij action that creates a pane; return its `terminal_N` id.
+fn run_zellij_argv_pane_id(args: &[String]) -> Result<Option<u64>> {
     // Capture stdout so pane/tab ids (`terminal_12`) do not spam the host TTY.
     let out = zellij_cmd(args).output().context("spawn zellij")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         bail!("zellij exited with {}: {}", out.status, err.trim());
     }
-    Ok(())
+    Ok(parse_terminal_pane_id(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
+}
+
+fn parse_terminal_pane_id(stdout: &str) -> Option<u64> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("terminal_")?.parse().ok())
 }
 
 /// tmux session names cannot contain `.` or `:`.
@@ -1702,7 +1743,7 @@ pub fn launch_agent_in_surface(
     script_path: &Path,
     cwd: &Path,
     close_on_exit: bool,
-) -> Result<()> {
+) -> Result<Option<u64>> {
     let script = script_path.display().to_string();
     let cwd_s = cwd.display().to_string();
     let run_cmd = format!("bash '{script}'");
@@ -1719,7 +1760,7 @@ pub fn launch_agent_in_surface(
                 "tmux",
                 &["select-layout", "-t", session, "tiled"].map(String::from),
             );
-            Ok(())
+            Ok(None)
         }
         ItemSurface::Zellij { tab, tab_id } => {
             let caps = zellij_caps();
@@ -1733,14 +1774,13 @@ pub fn launch_agent_in_surface(
                         close_on_exit,
                         caps.no_focus,
                     );
-                    return run_zellij_argv(&args).context("zellij new-pane --tab-id");
+                    return run_zellij_argv_pane_id(&args).context("zellij new-pane --tab-id");
                 }
             }
             let _g = focus_guard();
             run_zellij_argv(&zellij_goto_argv(tab)).context("zellij go-to-tab-name")?;
-            run_zellij_argv(&zellij_run_argv(role, &script, &cwd_s, close_on_exit))
-                .context("zellij run")?;
-            Ok(())
+            run_zellij_argv_pane_id(&zellij_run_argv(role, &script, &cwd_s, close_on_exit))
+                .context("zellij run")
         }
         ItemSurface::ITerm2 { window_id } => {
             if window_id.is_empty() {
@@ -1759,6 +1799,7 @@ pub fn launch_agent_in_surface(
                 ],
             )
             .context("iTerm2 new tab")
+            .map(|_| None)
         }
         ItemSurface::Apple { .. } => {
             // Terminal.app has no clean create-tab-in-window verb — best-effort
@@ -1769,6 +1810,7 @@ pub fn launch_agent_in_surface(
                 &["-e".to_string(), apple_launch_script(role, &run_cmd)],
             )
             .context("Terminal.app window")
+            .map(|_| None)
         }
     }
 }
@@ -2415,7 +2457,10 @@ mod tests {
         assert_ne!(n, 259, "limit must never collapse to used count");
         assert_eq!(src, "launchctl(exceeded,limit_unknown)");
         let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
-        assert!(259 + zellij_fds_for_panes(1) > ceiling, "unknown limit refuses");
+        assert!(
+            259 + zellij_fds_for_panes(1) > ceiling,
+            "unknown limit refuses"
+        );
     }
 
     #[test]
@@ -2793,30 +2838,46 @@ layout {
    "terminal_command": "/Users/x/.local/bin/agent --resume", "title": "Probe"}
 ]
 "#;
-        let ids = agent_pane_ids_from_json(raw, AgentPaneCloseScope::SessionWide).unwrap();
+        let ids = agent_pane_ids_from_json(raw).unwrap();
         assert_eq!(ids, vec![1, 3]);
     }
 
     #[test]
-    fn agent_pane_ids_origin_held_only() {
-        set_agent_origin_tab(&ZellijAnchor {
-            tab_name: "Scrutiny".into(),
-            tab_id: Some(1),
-            restore_tab_name: None,
-        });
+    fn parse_terminal_pane_id_from_run_stdout() {
+        assert_eq!(parse_terminal_pane_id("terminal_12\n"), Some(12));
+        assert_eq!(parse_terminal_pane_id("  terminal_3  "), Some(3));
+        assert_eq!(parse_terminal_pane_id(""), None);
+        assert_eq!(parse_terminal_pane_id("plugin_2\n"), None);
+    }
+
+    #[test]
+    fn owned_panes_present_matches_id_and_title_only() {
         let raw = r#"
 [
-  {"id": 1, "is_plugin": false, "is_floating": false, "is_held": true, "exited": false,
-   "tab_id": 0, "tab_name": "Main", "terminal_command": "claude", "title": "claude"},
-  {"id": 3, "is_plugin": false, "is_floating": false, "is_held": false, "exited": false,
-   "tab_id": 1, "tab_name": "Scrutiny",
-   "terminal_command": "/Users/x/.local/bin/agent --resume", "title": "Probe"},
-  {"id": 4, "is_plugin": false, "is_floating": false, "is_held": true, "exited": false,
-   "tab_id": 1, "tab_name": "Scrutiny",
-   "terminal_command": "claude", "title": "claude"}
+  {"id": 1, "is_plugin": false, "title": "forge"},
+  {"id": 2, "is_plugin": false, "title": "probe-architect"},
+  {"id": 3, "is_plugin": true, "title": "forge"},
+  {"id": 4, "is_plugin": false, "title": "user shell"}
 ]
 "#;
-        let ids = agent_pane_ids_from_json(raw, AgentPaneCloseScope::OriginHeldExited).unwrap();
-        assert_eq!(ids, vec![4]);
+        let owned = vec![
+            OwnedZellijPane {
+                id: 1,
+                title: "forge".into(),
+            },
+            OwnedZellijPane {
+                id: 2,
+                title: "probe-reviewer".into(),
+            },
+            OwnedZellijPane {
+                id: 3,
+                title: "forge".into(),
+            },
+            OwnedZellijPane {
+                id: 9,
+                title: "gone".into(),
+            },
+        ];
+        assert_eq!(owned_panes_present(raw, &owned).unwrap(), vec![1]);
     }
 }
