@@ -5,6 +5,7 @@
 //! headless child.
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -58,11 +59,19 @@ struct TrackedAgentPane {
 }
 
 /// Zellij pane created by scrutiny. Only these ids are ever closed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedZellijPane {
     pub id: u64,
     /// Pane `--name` we passed at creation; matched before close (id reuse guard).
     pub title: String,
+}
+
+/// One scrutiny process's owned panes, persisted so a later process can clean
+/// up after it if it dies without closing them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OwnedRegistryFile {
+    session: String,
+    panes: Vec<OwnedZellijPane>,
 }
 
 static OWNED_ZELLIJ_PANES: Mutex<Vec<OwnedZellijPane>> = Mutex::new(Vec::new());
@@ -98,6 +107,7 @@ pub fn register_agent_pane(
                 title: label.to_string(),
             });
         }
+        persist_owned_zellij_panes();
     }
 }
 
@@ -157,13 +167,7 @@ fn close_owned_zellij_panes() -> Result<u32> {
             forget_owned_zellij_pane(pane.id);
             continue;
         }
-        let arg = format!("terminal_{}", pane.id);
-        match run_zellij_argv(&[
-            "action".into(),
-            "close-pane".into(),
-            "--pane-id".into(),
-            arg,
-        ]) {
+        match close_pane_by_id(pane.id) {
             Ok(()) => {
                 forget_owned_zellij_pane(pane.id);
                 closed += 1;
@@ -174,10 +178,127 @@ fn close_owned_zellij_panes() -> Result<u32> {
     Ok(closed)
 }
 
+fn close_pane_by_id(id: u64) -> Result<()> {
+    run_zellij_argv(&[
+        "action".into(),
+        "close-pane".into(),
+        "--pane-id".into(),
+        format!("terminal_{id}"),
+    ])
+}
+
 fn forget_owned_zellij_pane(id: u64) {
     if let Ok(mut g) = OWNED_ZELLIJ_PANES.lock() {
         g.retain(|p| p.id != id);
     }
+    persist_owned_zellij_panes();
+}
+
+fn owned_registry_dir() -> PathBuf {
+    std::env::temp_dir().join("scrutiny-owned-zellij")
+}
+
+fn persist_owned_zellij_panes() {
+    let Ok(session) = std::env::var("ZELLIJ_SESSION_NAME") else {
+        return;
+    };
+    let panes = OWNED_ZELLIJ_PANES
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let _ = write_owner_registry(&owned_registry_dir(), std::process::id(), &session, &panes);
+}
+
+/// Write `pid`'s registry file; remove it when no panes remain.
+fn write_owner_registry(
+    dir: &Path,
+    pid: u32,
+    session: &str,
+    panes: &[OwnedZellijPane],
+) -> Result<()> {
+    let file = dir.join(format!("{pid}.json"));
+    if panes.is_empty() {
+        let _ = fs::remove_file(&file);
+        return Ok(());
+    }
+    fs::create_dir_all(dir).context("create owned-pane registry dir")?;
+    let body = serde_json::to_string(&OwnedRegistryFile {
+        session: session.to_string(),
+        panes: panes.to_vec(),
+    })?;
+    fs::write(&file, body).with_context(|| format!("write {}", file.display()))
+}
+
+/// Every owner registry file in `dir`: `(pid, contents)`.
+fn load_owner_registries(dir: &Path) -> Vec<(u32, OwnedRegistryFile)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|ent| {
+            let path = ent.path();
+            let pid: u32 = path.file_stem()?.to_str()?.parse().ok()?;
+            let reg: OwnedRegistryFile =
+                serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+            Some((pid, reg))
+        })
+        .collect()
+}
+
+/// Close registered panes for the given owners. Panes that fail to close stay
+/// in their owner's registry file; absent panes are dropped from it.
+fn close_registered_panes(dir: &Path, owners: Vec<(u32, OwnedRegistryFile)>) -> Result<u32> {
+    if owners.is_empty() {
+        return Ok(0);
+    }
+    let raw = zellij_list_panes_json()
+        .ok_or_else(|| anyhow::anyhow!("zellij list-panes --json failed"))?;
+    let mut closed = 0u32;
+    for (pid, reg) in owners {
+        let present = owned_panes_present(&raw, &reg.panes)?;
+        let mut remaining = Vec::new();
+        for pane in reg.panes {
+            if !present.contains(&pane.id) {
+                continue;
+            }
+            match close_pane_by_id(pane.id) {
+                Ok(()) => closed += 1,
+                Err(e) => {
+                    eprintln!("scrutiny: skip close-pane terminal_{}: {e:#}", pane.id);
+                    remaining.push(pane);
+                }
+            }
+        }
+        write_owner_registry(dir, pid, &reg.session, &remaining)?;
+    }
+    Ok(closed)
+}
+
+/// Close panes left by scrutiny processes that are no longer running (crash,
+/// SIGKILL). Live owners are never touched.
+fn sweep_dead_owner_zellij_panes() -> Result<u32> {
+    let Ok(session) = std::env::var("ZELLIJ_SESSION_NAME") else {
+        return Ok(0);
+    };
+    let dead = load_owner_registries(&owned_registry_dir())
+        .into_iter()
+        .filter(|(pid, reg)| reg.session == session && !pid_alive(*pid as i32))
+        .collect();
+    close_registered_panes(&owned_registry_dir(), dead)
+}
+
+/// `cleanup --agents`: close every registry-owned pane in this session, across
+/// all owners. Panes scrutiny did not create are never touched.
+fn close_owned_zellij_panes_session_wide() -> Result<u32> {
+    let Ok(session) = std::env::var("ZELLIJ_SESSION_NAME") else {
+        return Ok(0);
+    };
+    let all = load_owner_registries(&owned_registry_dir())
+        .into_iter()
+        .filter(|(_, reg)| reg.session == session)
+        .collect();
+    close_registered_panes(&owned_registry_dir(), all)
 }
 
 /// Ids from `owned` that still exist as non-plugin panes with the same title.
@@ -242,54 +363,7 @@ pub fn close_agent_panes_session_wide() -> Result<u32> {
 
 /// All tabs: live + held + exited agent-pattern panes (`cleanup --agents`).
 fn close_zellij_agent_panes() -> Result<u32> {
-    let raw = zellij_list_panes_json()
-        .ok_or_else(|| anyhow::anyhow!("zellij list-panes --json failed (need zellij ≥0.44)"))?;
-    let targets = agent_pane_ids_from_json(&raw)?;
-    let mut closed = 0u32;
-    for id in targets {
-        let pane = format!("terminal_{id}");
-        match run_zellij_argv(&[
-            "action".into(),
-            "close-pane".into(),
-            "--pane-id".into(),
-            pane,
-        ]) {
-            Ok(()) => closed += 1,
-            Err(e) => eprintln!("scrutiny: skip close-pane terminal_{id}: {e:#}"),
-        }
-    }
-    Ok(closed)
-}
-
-fn agent_pane_ids_from_json(raw: &str) -> Result<Vec<u64>> {
-    let panes: Vec<serde_json::Value> =
-        serde_json::from_str(raw).context("parse zellij list-panes JSON")?;
-    let mut ids = Vec::new();
-    for p in &panes {
-        if p.get("is_plugin").and_then(|v| v.as_bool()) == Some(true) {
-            continue;
-        }
-        if p.get("is_floating").and_then(|v| v.as_bool()) == Some(true) {
-            continue;
-        }
-        let id = match p.get("id").and_then(|v| v.as_u64()) {
-            Some(id) => id,
-            None => continue,
-        };
-        let cmd = p
-            .get("terminal_command")
-            .and_then(|v| v.as_str())
-            .or_else(|| p.get("pane_command").and_then(|v| v.as_str()))
-            .unwrap_or("");
-        let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        if !is_agent_pane_text(cmd, title) {
-            continue;
-        }
-        ids.push(id);
-    }
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(ids)
+    close_owned_zellij_panes_session_wide()
 }
 
 fn close_tmux_agent_panes_session_wide() -> Result<u32> {
@@ -646,6 +720,9 @@ pub fn preflight_zellij_open_files_budget_ex(
     } else {
         format!("{unit}s")
     };
+    if let Err(e) = sweep_dead_owner_zellij_panes() {
+        eprintln!("scrutiny {tool}: stale pane sweep skipped: {e:#}");
+    }
     let pid = zellij_current_server_pid().ok_or_else(|| {
         anyhow::anyhow!(
             "could not find zellij server pid for EMFILE preflight — refuse to open {unit_plural} \
@@ -2824,25 +2901,6 @@ layout {
     }
 
     #[test]
-    fn agent_pane_ids_session_wide_skips_shells_and_plugins() {
-        let raw = r#"
-[
-  {"id": 0, "is_plugin": false, "is_floating": false, "is_held": false, "exited": false,
-   "tab_id": 0, "tab_name": "Main", "pane_command": "/bin/zsh", "title": "Pane #1"},
-  {"id": 1, "is_plugin": false, "is_floating": false, "is_held": true, "exited": false,
-   "tab_id": 0, "tab_name": "Main", "terminal_command": "claude", "title": "claude"},
-  {"id": 2, "is_plugin": true, "is_floating": false, "is_held": false, "exited": false,
-   "tab_id": 0, "tab_name": "Main", "title": "status"},
-  {"id": 3, "is_plugin": false, "is_floating": false, "is_held": false, "exited": false,
-   "tab_id": 1, "tab_name": "Scrutiny",
-   "terminal_command": "/Users/x/.local/bin/agent --resume", "title": "Probe"}
-]
-"#;
-        let ids = agent_pane_ids_from_json(raw).unwrap();
-        assert_eq!(ids, vec![1, 3]);
-    }
-
-    #[test]
     fn parse_terminal_pane_id_from_run_stdout() {
         assert_eq!(parse_terminal_pane_id("terminal_12\n"), Some(12));
         assert_eq!(parse_terminal_pane_id("  terminal_3  "), Some(3));
@@ -2879,5 +2937,38 @@ layout {
             },
         ];
         assert_eq!(owned_panes_present(raw, &owned).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn owner_registry_roundtrip_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let panes = vec![OwnedZellijPane {
+            id: 7,
+            title: "reviewer#1".into(),
+        }];
+        write_owner_registry(dir.path(), 4242, "New TC Manager", &panes).unwrap();
+        let loaded = load_owner_registries(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0, 4242);
+        assert_eq!(loaded[0].1.session, "New TC Manager");
+        assert_eq!(loaded[0].1.panes, panes);
+
+        write_owner_registry(dir.path(), 4242, "New TC Manager", &[]).unwrap();
+        assert!(load_owner_registries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn owner_registry_ignores_non_pid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.json"), "{}").unwrap();
+        fs::write(dir.path().join("9.json"), "not json").unwrap();
+        assert!(load_owner_registries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn dead_pid_is_not_alive() {
+        // Above default pid_max on macOS/Linux; never a live process.
+        assert!(!pid_alive(2_147_000_000));
+        assert!(pid_alive(std::process::id() as i32));
     }
 }
