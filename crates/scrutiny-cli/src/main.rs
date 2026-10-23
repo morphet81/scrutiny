@@ -9,13 +9,13 @@ use scrutiny_core::{
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map,
     run_pack, run_pack_shard, run_parley, run_parley_fetch, run_parley_plan_write,
     run_parley_reply, run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments,
-    run_pr, run_ready, run_review, run_review_session_write, run_scan, run_skills_install,
-    AgentPromptInput, BenchArm, BenchCmdInput, BenchWorkload, CleanupCmdInput, EvalInput,
-    FindingsInitInput, ForgeAllInput, ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput,
-    InfoCmdInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput, ParleyPlanWriteInput,
-    ParleyReplyInput, ParleyStackInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
-    PrCmdInput, ProbeStackInput, ReadyCmdInput, ReviewCmdInput, ReviewSessionWriteInput,
-    SkillsInstallInput,
+    run_pr, run_ready, run_ready_stack, run_review, run_review_session_write, run_scan,
+    run_skills_install, AgentPromptInput, BenchArm, BenchCmdInput, BenchWorkload, CleanupCmdInput,
+    EvalInput, FindingsInitInput, ForgeAllInput, ForgeCmdInput, ForgeFetchInput,
+    ForgePlanWriteInput, InfoCmdInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput,
+    ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput, PlanConfirmInput, PlanWriteInput,
+    PostCommentsInput, PrCmdInput, ProbeStackInput, ReadyCmdInput, ReadyStackInput, ReviewCmdInput,
+    ReviewSessionWriteInput, SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,7 +34,7 @@ Main commands:
   cleanup Forge tab teardown, or `--agents` to close leftover agent panes
   info    Show colorful Jira ticket summary (+ related GitHub PRs)
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
-  ready   Resolve review threads, mark PR ready, nominate reviewers, Jira In Review
+  ready   Resolve threads, mark PR ready, nominate reviewers, Jira In Review (`stack` [N])
   bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
 
 {usage-heading} {usage}
@@ -346,6 +346,9 @@ enum Commands {
         ready: bool,
     },
     /// Resolve review threads, mark the PR ready, nominate reviewers, move Jira to In Review
+    ///
+    /// `scrutiny ready stack [N]` does that for every open PR in the current `gh stack`
+    /// (optionally after `gh stack checkout N`, then restores your branch).
     Ready {
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -997,6 +1000,16 @@ fn run() -> Result<()> {
             ticket,
         } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            ensure_git_repo(&cwd)?;
+            // scrutiny ready stack [number]
+            if pr.is_none() && rest.first().map(String::as_str) == Some("stack") {
+                let stack_number = rest.get(1).and_then(|s| s.parse::<u64>().ok());
+                let paths = run_ready_stack(ReadyStackInput { cwd, stack_number })?;
+                for p in paths {
+                    println!("{}", p.display());
+                }
+                return Ok(());
+            }
             let pr = pr.or_else(|| {
                 if rest.is_empty() {
                     None
@@ -1004,8 +1017,12 @@ fn run() -> Result<()> {
                     Some(rest.join(" "))
                 }
             });
-            ensure_git_repo(&cwd)?;
-            let path = run_ready(ReadyCmdInput { cwd, pr, ticket })?;
+            let path = run_ready(ReadyCmdInput {
+                cwd,
+                pr,
+                ticket,
+                branch_hint: None,
+            })?;
             println!("{}", path.display());
         }
         Commands::ParleyFetch { cwd, pr, rest } => {
@@ -1448,6 +1465,21 @@ mod tests {
         let after =
             Cli::try_parse_from(["scrutiny", "adjudicate", "--pr", "42", "-y"]).expect("parse");
         assert!(after.yes);
+    }
+
+    #[test]
+    fn ready_stack_parses_number() {
+        let cli = Cli::try_parse_from(["scrutiny", "ready", "stack", "2"]).expect("parse");
+        match cli.cmd {
+            Commands::Ready {
+                pr, rest, ticket, ..
+            } => {
+                assert!(pr.is_none());
+                assert!(ticket.is_none());
+                assert_eq!(rest, vec!["stack", "2"]);
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
     }
 
     #[test]

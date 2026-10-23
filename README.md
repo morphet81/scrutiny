@@ -7,7 +7,7 @@ CLI + agent skills that review PRs, implement tickets, and clear review comments
 | **`scrutiny probe`** | Review a local branch or GitHub PR |
 | **`scrutiny forge`** | Implement a ticket (Jira / GitHub / GitLab / inline) |
 | **`scrutiny parley`** | Fix unresolved PR review threads |
-| **`scrutiny ready`** | Resolve threads, mark PR ready, nominate reviewers, Jira In Review |
+| **`scrutiny ready`** | Resolve threads, mark PR ready, nominate reviewers, Jira In Review (`stack`) |
 | **`scrutiny bench`** | Token-usage compare: cli vs skill vs skill+caveman |
 
 Skills `/scrutiny`, `/forge`, `/parley` wrap the same flows for IDE agents.
@@ -182,7 +182,11 @@ Caveman-ultra style is **on by default** (`caveman = true`): every spawned promp
 scrutiny ready
 scrutiny ready --pr 42
 scrutiny ready --ticket NERO-730
+scrutiny ready stack
+scrutiny ready stack 2
 ```
+
+`stack` runs the same steps on every open PR in the current `gh stack`, bottom to top. `stack 2` runs `gh stack checkout 2` first, then restores your branch. Each PR takes its Jira key from its own branch name, then its title or body.
 
 1. Mark every unresolved review thread resolved
 2. `gh pr ready` (already-ready is a no-op)

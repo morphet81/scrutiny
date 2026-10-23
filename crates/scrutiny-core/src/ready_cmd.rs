@@ -2,7 +2,7 @@
 //! nominate reviewers from config, and move the Jira ticket to In Review.
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ use crate::forge::tools::require_acli;
 use crate::gh::{
     ensure_gh, gh_graphql, gh_json, gh_output_retry, repo_name_with_owner, split_repo,
 };
+use crate::git::git_stdout;
 use crate::paths::{artifact_path, prepare_artifacts, write_json_pretty};
 
 const THREAD_IDS_QUERY: &str = r#"
@@ -70,6 +71,16 @@ pub struct ReadyCmdInput {
     pub pr: Option<String>,
     /// Jira key or URL. None → branch, then PR title, then PR body.
     pub ticket: Option<String>,
+    /// Stack branch name. Jira key comes from this name, then the PR title/body.
+    /// Skips the checked-out branch so a stack walk does not stamp the wrong ticket.
+    pub branch_hint: Option<String>,
+}
+
+/// `scrutiny ready stack [N]` — ready every open PR in the current `gh stack`.
+pub struct ReadyStackInput {
+    pub cwd: PathBuf,
+    /// `gh stack checkout N` before reading the stack. The original branch is restored.
+    pub stack_number: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +102,103 @@ struct PrSnap {
 }
 
 pub fn run_ready(input: ReadyCmdInput) -> Result<PathBuf> {
+    let mut org_index = None;
+    run_ready_with(input, &mut org_index)
+}
+
+/// Bottom→top over open PRs in `gh stack view`. Optional `stack_number` checks
+/// that stack out first, then restores the branch you were on.
+pub fn run_ready_stack(input: ReadyStackInput) -> Result<Vec<PathBuf>> {
+    ensure_gh()?;
+    let cwd = &input.cwd;
+
+    let orig_branch = if input.stack_number.is_some() {
+        let branch = git_stdout(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .context("get current branch")?
+            .trim()
+            .to_string();
+        let n = input.stack_number.expect("stack number").to_string();
+        let out =
+            gh_output_retry(cwd, &["stack", "checkout", &n], None).context("gh stack checkout")?;
+        if !out.status.success() {
+            bail!(
+                "gh stack checkout {} failed: {}",
+                n,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Some(branch)
+    } else {
+        None
+    };
+
+    let view_out = gh_output_retry(cwd, &["stack", "view", "--json"], None);
+    if let Some(ref orig) = orig_branch {
+        git_stdout(cwd, &["checkout", orig]).ok();
+    }
+    let view_out = view_out.context("gh stack view --json")?;
+
+    if !view_out.status.success() {
+        bail!(
+            "gh stack view --json failed: {}",
+            String::from_utf8_lossy(&view_out.stderr).trim()
+        );
+    }
+
+    let view: GhStackView =
+        serde_json::from_slice(&view_out.stdout).context("parse gh stack view JSON")?;
+    let layers = open_stack_prs(&view);
+    if layers.is_empty() {
+        bail!("no open PRs found in stack");
+    }
+
+    let shipped = find_shipped_default(cwd);
+    let cfg_path = ensure_config(&shipped)?;
+    let cfg = load_config_from(&cfg_path, Some(cwd))?;
+    if transition_status(&cfg.ready.in_review_status).is_some()
+        && layers
+            .iter()
+            .any(|layer| extract_jira_key_from_text(&layer.name).is_some())
+    {
+        require_acli()?;
+    }
+
+    eprintln!("scrutiny ready stack: {} open PR(s)", layers.len());
+
+    let mut org_index = None;
+    let mut paths = Vec::new();
+    for (i, layer) in layers.iter().enumerate() {
+        eprintln!(
+            "scrutiny ready stack [{}/{}]: PR #{} ({}) …",
+            i + 1,
+            layers.len(),
+            layer.pr_number,
+            layer.name
+        );
+        let path = run_ready_with(
+            ReadyCmdInput {
+                cwd: input.cwd.clone(),
+                pr: Some(layer.pr_number.to_string()),
+                ticket: None,
+                branch_hint: Some(layer.name.clone()),
+            },
+            &mut org_index,
+        )
+        .with_context(|| {
+            format!(
+                "ready stack stopped at {} (PR #{})",
+                layer.name, layer.pr_number
+            )
+        })?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn run_ready_with(
+    input: ReadyCmdInput,
+    org_index: &mut Option<HashMap<String, String>>,
+) -> Result<PathBuf> {
     ensure_gh()?;
     let cwd = &input.cwd;
     let shipped = find_shipped_default(cwd);
@@ -100,7 +208,12 @@ pub fn run_ready(input: ReadyCmdInput) -> Result<PathBuf> {
     let pr = view_pr(cwd, input.pr.as_deref())?;
     prepare_artifacts(cwd, Some(&pr.number.to_string()), &[])?;
 
-    let ticket = ticket_key(cwd, input.ticket.as_deref(), &pr)?;
+    let ticket = ticket_key(
+        cwd,
+        input.ticket.as_deref(),
+        &pr,
+        input.branch_hint.as_deref(),
+    )?;
     let status = transition_status(&cfg.ready.in_review_status);
     if status.is_some() && ticket.is_some() {
         require_acli()?;
@@ -111,6 +224,7 @@ pub fn run_ready(input: ReadyCmdInput) -> Result<PathBuf> {
         &cfg.ready.reviewers,
         cfg.ready.reviewer_count,
         pr.author.as_deref(),
+        org_index,
     )?;
 
     let resolved = resolve_open_threads(cwd, pr.number)?;
@@ -167,6 +281,7 @@ fn nominate_logins(
     pool: &[String],
     count: u32,
     author: Option<&str>,
+    org_index: &mut Option<HashMap<String, String>>,
 ) -> Result<Vec<String>> {
     if !request_enabled(pool, count) {
         if pool.iter().all(|r| r.trim().is_empty()) {
@@ -181,17 +296,17 @@ fn nominate_logins(
     let needs_lookup = picked
         .iter()
         .any(|p| p.contains('@') && login_from_noreply(p).is_none());
-    let index = if needs_lookup {
+    if needs_lookup && org_index.is_none() {
         let repo = repo_name_with_owner(cwd)?;
         let (owner, _) = split_repo(&repo)?;
-        org_email_index(cwd, &owner)
-    } else {
-        HashMap::new()
-    };
+        *org_index = Some(org_email_index(cwd, &owner));
+    }
+    let empty = HashMap::new();
+    let index = org_index.as_ref().unwrap_or(&empty);
 
     let mut logins = Vec::new();
     for email in &picked {
-        logins.push(resolve_reviewer_login(email, &index, |e| {
+        logins.push(resolve_reviewer_login(email, index, |e| {
             search_users_by_email(cwd, e)
         })?);
     }
@@ -436,9 +551,23 @@ fn search_users_by_email(cwd: &Path, email: &str) -> Result<Vec<String>> {
     Ok(logins)
 }
 
-fn ticket_key(cwd: &Path, explicit: Option<&str>, pr: &PrSnap) -> Result<Option<String>> {
+fn ticket_key(
+    cwd: &Path,
+    explicit: Option<&str>,
+    pr: &PrSnap,
+    branch_hint: Option<&str>,
+) -> Result<Option<String>> {
     if let Some(raw) = explicit {
         return Ok(Some(jira_key_from_url_or_raw(raw)?));
+    }
+    if let Some(hint) = branch_hint {
+        if let Some(key) = extract_jira_key_from_text(hint) {
+            return Ok(Some(key));
+        }
+        if let Some(key) = extract_jira_key_from_text(&pr.title) {
+            return Ok(Some(key));
+        }
+        return Ok(extract_jira_key_from_text(&pr.body));
     }
     if let Some(key) = jira_key_from_branch(cwd)? {
         return Ok(Some(key));
@@ -447,6 +576,49 @@ fn ticket_key(cwd: &Path, explicit: Option<&str>, pr: &PrSnap) -> Result<Option<
         return Ok(Some(key));
     }
     Ok(extract_jira_key_from_text(&pr.body))
+}
+
+#[derive(Deserialize)]
+struct GhStackView {
+    branches: Vec<GhStackBranch>,
+}
+
+#[derive(Deserialize)]
+struct GhStackBranch {
+    name: String,
+    #[serde(rename = "isMerged", default)]
+    is_merged: bool,
+    pr: Option<GhStackPr>,
+}
+
+#[derive(Deserialize)]
+struct GhStackPr {
+    number: u64,
+    state: String,
+}
+
+struct StackPr {
+    name: String,
+    pr_number: u64,
+}
+
+/// Open, unmerged PRs in `gh stack view` order (bottom → top).
+fn open_stack_prs(view: &GhStackView) -> Vec<StackPr> {
+    view.branches
+        .iter()
+        .filter(|branch| {
+            !branch.is_merged
+                && branch
+                    .pr
+                    .as_ref()
+                    .map(|pr| pr.state.eq_ignore_ascii_case("OPEN"))
+                    .unwrap_or(false)
+        })
+        .map(|branch| StackPr {
+            name: branch.name.clone(),
+            pr_number: branch.pr.as_ref().expect("open pr").number,
+        })
+        .collect()
 }
 
 fn view_pr(cwd: &Path, pr: Option<&str>) -> Result<PrSnap> {
@@ -691,5 +863,58 @@ mod tests {
         assert_eq!(next.as_deref(), Some("CUR"));
         assert_eq!(index.get("ada@ex.com").map(String::as_str), Some("ada"));
         assert_eq!(index.get("bea@ex.com").map(String::as_str), Some("bea"));
+    }
+
+    #[test]
+    fn open_stack_prs_keeps_open_bottom_to_top() {
+        let view: GhStackView = serde_json::from_str(
+            r#"{
+              "trunk": "main",
+              "branches": [
+                {
+                  "name": "feat/proj-10-a",
+                  "isMerged": true,
+                  "pr": { "number": 10, "state": "MERGED" }
+                },
+                {
+                  "name": "feat/proj-11-b",
+                  "isMerged": false,
+                  "pr": { "number": 11, "state": "OPEN" }
+                },
+                {
+                  "name": "feat/proj-12-c",
+                  "isMerged": false,
+                  "pr": { "number": 12, "state": "CLOSED" }
+                },
+                {
+                  "name": "feat/proj-13-d",
+                  "isMerged": false,
+                  "pr": { "number": 13, "state": "OPEN" }
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let layers = open_stack_prs(&view);
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].name, "feat/proj-11-b");
+        assert_eq!(layers[0].pr_number, 11);
+        assert_eq!(layers[1].pr_number, 13);
+    }
+
+    #[test]
+    fn branch_hint_supplies_jira_key_without_head() {
+        let pr = PrSnap {
+            number: 1,
+            url: String::new(),
+            title: "other PROJ-2 work".into(),
+            body: "see PROJ-3".into(),
+            author: None,
+        };
+        let from_branch =
+            ticket_key(Path::new("/tmp"), None, &pr, Some("feat/proj-9-thing")).unwrap();
+        assert_eq!(from_branch.as_deref(), Some("PROJ-9"));
+        let from_title = ticket_key(Path::new("/tmp"), None, &pr, Some("feat/no-key")).unwrap();
+        assert_eq!(from_title.as_deref(), Some("PROJ-2"));
     }
 }

@@ -81,7 +81,7 @@ pub use plan::{
 };
 pub use pr_cmd::{run_pr, PrCmdInput};
 pub use probe_stack::{run_probe_stack, ProbeStackInput};
-pub use ready_cmd::{run_ready, ReadyCmdInput};
+pub use ready_cmd::{run_ready, run_ready_stack, ReadyCmdInput, ReadyStackInput};
 pub use review_cmd::{
     run_pending_triage, run_review, run_review_from_report, PendingTriage, ReportResumeInput,
     ReviewCmdInput, ReviewResult,
