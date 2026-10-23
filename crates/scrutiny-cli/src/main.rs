@@ -1,21 +1,21 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scrutiny_core::run_probe_stack;
-use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config};
+use scrutiny_core::{ensure_config, find_shipped_default, git::ensure_git_repo, load_config_from};
 use scrutiny_core::{
     load_plan_answers, partition_pack_paths, prepare_artifacts, resolve_parley_fixes_path,
     run_adjudicate, run_agent_prompt, run_bench, run_cleanup, run_eval, run_findings_init,
     run_findings_resolve, run_findings_triage, run_findings_validate, run_forge, run_forge_all,
     run_forge_brief, run_forge_context, run_forge_fetch, run_forge_plan_write, run_info, run_map,
     run_pack, run_pack_shard, run_parley, run_parley_fetch, run_parley_plan_write,
-    run_parley_reply,
-    run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments, run_pr, run_review,
-    run_review_session_write, run_scan, run_skills_install, AgentPromptInput, BenchArm,
-    BenchCmdInput, BenchWorkload, CleanupCmdInput, EvalInput, FindingsInitInput, ForgeAllInput,
-    ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput, InfoCmdInput, ParleyAnswers,
-    ParleyCmdInput, ParleyFetchInput, ParleyPlanWriteInput, ParleyReplyInput, ParleyStackInput,
-    PlanConfirmInput, PlanWriteInput, PostCommentsInput, PrCmdInput, ProbeStackInput,
-    ReviewCmdInput, ReviewSessionWriteInput, SkillsInstallInput,
+    run_parley_reply, run_parley_stack, run_plan_confirm, run_plan_write, run_post_comments,
+    run_pr, run_ready, run_review, run_review_session_write, run_scan, run_skills_install,
+    AgentPromptInput, BenchArm, BenchCmdInput, BenchWorkload, CleanupCmdInput, EvalInput,
+    FindingsInitInput, ForgeAllInput, ForgeCmdInput, ForgeFetchInput, ForgePlanWriteInput,
+    InfoCmdInput, ParleyAnswers, ParleyCmdInput, ParleyFetchInput, ParleyPlanWriteInput,
+    ParleyReplyInput, ParleyStackInput, PlanConfirmInput, PlanWriteInput, PostCommentsInput,
+    PrCmdInput, ProbeStackInput, ReadyCmdInput, ReviewCmdInput, ReviewSessionWriteInput,
+    SkillsInstallInput,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,6 +34,7 @@ Main commands:
   cleanup Forge tab teardown, or `--agents` to close leftover agent panes
   info    Show colorful Jira ticket summary (+ related GitHub PRs)
   parley  Address unresolved PR review comments: fetch → fix agents → commit/push → reply
+  ready   Resolve review threads, mark PR ready, nominate reviewers, Jira In Review
   bench   Token-usage compare: cli vs skill vs skill+caveman (probe and/or forge)
 
 {usage-heading} {usage}
@@ -343,6 +344,20 @@ enum Commands {
         /// Create a ready PR instead of the default draft
         #[arg(long, default_value_t = false)]
         ready: bool,
+    },
+    /// Resolve review threads, mark the PR ready, nominate reviewers, move Jira to In Review
+    Ready {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// PR URL or number (else current branch PR)
+        #[arg(long)]
+        pr: Option<String>,
+        /// Positional alias for --pr
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+        /// Jira key or URL (else infer from branch, then PR title/body)
+        #[arg(long)]
+        ticket: Option<String>,
     },
     /// Fetch unresolved PR review threads → parley-comments.json path
     ParleyFetch {
@@ -975,6 +990,24 @@ fn run() -> Result<()> {
             })?;
             println!("{}", path.display());
         }
+        Commands::Ready {
+            cwd,
+            pr,
+            rest,
+            ticket,
+        } => {
+            let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+            let pr = pr.or_else(|| {
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            });
+            ensure_git_repo(&cwd)?;
+            let path = run_ready(ReadyCmdInput { cwd, pr, ticket })?;
+            println!("{}", path.display());
+        }
         Commands::ParleyFetch { cwd, pr, rest } => {
             let cwd = cwd.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
             let pr = pr.or_else(|| {
@@ -999,7 +1032,7 @@ fn run() -> Result<()> {
             let shipped =
                 find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
             let cfg_path = ensure_config(&shipped)?;
-            let cfg = load_config(&cfg_path)?;
+            let cfg = load_config_from(&cfg_path, Some(&cwd))?;
             let answers: ParleyAnswers = serde_json::from_str(&from_json)
                 .context("parse --from-json for parley-plan-write")?;
             let text = std::fs::read_to_string(&comments)
@@ -1415,6 +1448,22 @@ mod tests {
         let after =
             Cli::try_parse_from(["scrutiny", "adjudicate", "--pr", "42", "-y"]).expect("parse");
         assert!(after.yes);
+    }
+
+    #[test]
+    fn ready_accepts_pr_and_ticket() {
+        let cli = Cli::try_parse_from(["scrutiny", "ready", "--pr", "42", "--ticket", "NERO-1"])
+            .expect("parse");
+        match cli.cmd {
+            Commands::Ready {
+                pr, ticket, rest, ..
+            } => {
+                assert_eq!(pr.as_deref(), Some("42"));
+                assert_eq!(ticket.as_deref(), Some("NERO-1"));
+                assert!(rest.is_empty());
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
     }
 
     #[test]

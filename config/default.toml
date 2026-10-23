@@ -254,6 +254,15 @@ bump_labels = ["urgent", "complex", "breaking-change", "breaking", "epic", "larg
 lower_labels = ["trivial", "minor", "quick", "simple", "easy", "small"]
 tier_thresholds = [18, 35, 55, 95]
 
+[ready]
+# Emails or GitHub logins eligible for `scrutiny ready` nomination.
+# Empty → do not request reviews.
+reviewers = []
+# How many of `reviewers` to pick at random. 0 → do not request.
+reviewer_count = 1
+# Jira status name for the In Review step. Empty → skip the transition.
+in_review_status = "In Review"
+
 [parley]
 default_members = 1
 default_evangelists = 1

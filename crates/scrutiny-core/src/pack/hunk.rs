@@ -190,10 +190,7 @@ index 111..222 100644
     #[test]
     fn diff_zero_budget_drops_all_hunks_in_order() {
         let (_, dropped) = take_diff_budget(SAMPLE, 1);
-        let ranges: Vec<_> = dropped
-            .iter()
-            .map(|h| (h.new_start, h.new_end))
-            .collect();
+        let ranges: Vec<_> = dropped.iter().map(|h| (h.new_start, h.new_end)).collect();
         assert_eq!(ranges, vec![(1, 2), (8, 11)]);
     }
 
@@ -204,7 +201,6 @@ index 111..222 100644
         assert!(dropped[0].text.starts_with("@@ -1,2 +1,2 @@"));
         assert!(dropped[0].text.ends_with("+new\n"));
     }
-
 
     #[test]
     fn merge_adjacent() {

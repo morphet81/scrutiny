@@ -12,7 +12,7 @@ use crate::agent_runner::{
     run_dry_placeholder_in, run_headless, run_nonheadless, run_nonheadless_in, wait_for_sentinels,
     HeadlessKind, HeadlessOutcome,
 };
-use crate::config::{ensure_config, find_shipped_default, load_config, Config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from, Config};
 use crate::forge::brief::run_forge_brief;
 use crate::forge::context::run_forge_context;
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
@@ -189,7 +189,7 @@ pub fn run_forge(input: ForgeCmdInput) -> Result<PathBuf> {
 
     let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&cwd))?;
 
     let detected = resolve_client(
         &cfg,

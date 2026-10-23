@@ -7,6 +7,7 @@ CLI + agent skills that review PRs, implement tickets, and clear review comments
 | **`scrutiny probe`** | Review a local branch or GitHub PR |
 | **`scrutiny forge`** | Implement a ticket (Jira / GitHub / GitLab / inline) |
 | **`scrutiny parley`** | Fix unresolved PR review threads |
+| **`scrutiny ready`** | Resolve threads, mark PR ready, nominate reviewers, Jira In Review |
 | **`scrutiny bench`** | Token-usage compare: cli vs skill vs skill+caveman |
 
 Skills `/scrutiny`, `/forge`, `/parley` wrap the same flows for IDE agents.
@@ -175,6 +176,21 @@ Zellij panes pin to the **origin tab** where scrutiny started (not the tab you h
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
 
+### Ready — send the PR for review
+
+```bash
+scrutiny ready
+scrutiny ready --pr 42
+scrutiny ready --ticket NERO-730
+```
+
+1. Mark every unresolved review thread resolved
+2. `gh pr ready` (already-ready is a no-op)
+3. Nominate reviewers from `[ready].reviewers` (`reviewer_count` of them, random when the pool is larger) and request review. Empty `reviewers` or `reviewer_count = 0` → skip this step
+4. Transition the Jira ticket to `[ready].in_review_status` (default `In Review`). Empty status, or no `KEY-123` on `--ticket` / the branch / the PR title or body → skip
+
+Reviewer entries are emails or GitHub logins. Emails resolve through the repo owner's verified org-domain emails, then GitHub user search. The PR author is left off the request.
+
 ### Bench — token compare
 
 Compare **cli** (`scrutiny probe` / `scrutiny forge`) vs **skill** (same agents + skill markdown preamble, no caveman) vs **skill-caveman** (preamble + caveman). Claude Code only — real `usage` from `--output-format json`.
@@ -199,9 +215,9 @@ Partial files are fine — every key has a default. Set only overrides.
 | File | Role |
 |------|------|
 | `~/.scrutiny/config.toml` | Global (created from shipped defaults) |
-| `<repo>/scrutiny.toml` | Per-project override (walks up from cwd) |
+| `<repo>/scrutiny.toml` | Per-project override (walks up from `--cwd`, else the process cwd) |
 
-Merge is deep per key: local wins; tables merge key-by-key; scalars/arrays replace wholesale.
+Merge is deep per key: the project file wins on every key it sets; tables merge key-by-key; scalars and arrays replace wholesale. Keys the project file leaves out stay on the global config. The nearest `scrutiny.toml` wins; the walk stops at the git root.
 
 ```toml
 # scrutiny.toml — override only what this repo needs
@@ -421,6 +437,16 @@ Ticket scoring → tier → `[models.<client>]`. Lists default in `config/defaul
 | `tier_thresholds` | `[18,35,55,95]` | Inclusive upper bounds for XS/S/M/L; above → XL |
 
 Also scored (not configurable lists): AC count, description size, issue type, Figma URLs, comment volume.
+
+### `[ready]`
+
+Used by `scrutiny ready`.
+
+| Key | Default | Explanation |
+|-----|---------|-------------|
+| `reviewers` | `[]` | Emails or GitHub logins eligible for nomination. Empty → do not request reviews |
+| `reviewer_count` | `1` | How many of `reviewers` to pick at random. `0` → do not request. Count ≥ pool size nominates everyone |
+| `in_review_status` | `"In Review"` | Jira status for `acli jira workitem transition`. Empty → skip |
 
 ### `[parley]`
 

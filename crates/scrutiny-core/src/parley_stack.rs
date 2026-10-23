@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::agent_runner::{run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind};
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from};
 use crate::gh::gh_output_retry;
 use crate::git::git_stdout;
 use crate::parley::pr_has_unresolved_comments;
@@ -427,7 +427,7 @@ fn resolve_rebase_conflicts(
     let shipped =
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(cwd))?;
     let detected = resolve_client(
         &cfg,
         ResolveClientInput {

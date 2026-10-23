@@ -26,6 +26,7 @@ pub mod pr;
 pub mod pr_cmd;
 pub mod prepush;
 pub mod probe_stack;
+pub mod ready_cmd;
 pub mod review_cmd;
 pub mod review_session;
 pub mod runtime;
@@ -45,7 +46,8 @@ pub use agent_runner::{
 pub use bench_cmd::{run_bench, BenchArm, BenchCmdInput, BenchWorkload};
 pub use cleanup_cmd::{run_cleanup, CleanupCmdInput};
 pub use config::{
-    ensure_config, find_shipped_default, load_config, resolve_prompt_prefix, Config, PromptsConfig,
+    ensure_config, find_shipped_default, load_config, load_config_from, resolve_prompt_prefix,
+    Config, PromptsConfig,
 };
 pub use eval::{run_eval, EvalInput, EvalReport};
 pub use findings::{
@@ -79,6 +81,7 @@ pub use plan::{
 };
 pub use pr_cmd::{run_pr, PrCmdInput};
 pub use probe_stack::{run_probe_stack, ProbeStackInput};
+pub use ready_cmd::{run_ready, ReadyCmdInput};
 pub use review_cmd::{
     run_pending_triage, run_review, run_review_from_report, PendingTriage, ReportResumeInput,
     ReviewCmdInput, ReviewResult,

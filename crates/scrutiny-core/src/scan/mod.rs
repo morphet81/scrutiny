@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from};
 use crate::eval::EvalReport;
 use crate::git;
 use crate::map::MapReport;
@@ -94,7 +94,7 @@ pub fn run_scan(
     let shipped =
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(cwd))?;
 
     let architecture_risk = pack
         .as_ref()

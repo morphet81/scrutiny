@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{ensure_config, find_shipped_default, load_config, SuggestedForge};
+use crate::config::{ensure_config, find_shipped_default, load_config_from, SuggestedForge};
 use crate::forge::complexity::estimate_ticket_tier;
 use crate::forge::tools::{require_acli, require_gh, require_glab};
 use crate::paths::{temp_artifact_path, write_json_pretty};
@@ -78,7 +78,7 @@ pub struct ForgeFetchInput {
 pub fn run_forge_fetch(input: ForgeFetchInput) -> Result<(TicketReport, PathBuf)> {
     let shipped = find_shipped_default(&input.cwd);
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&input.cwd))?;
     let client = input
         .client
         .clone()
@@ -233,7 +233,7 @@ pub(crate) fn jira_key_from_branch(cwd: &Path) -> Result<Option<String>> {
     Ok(extract_jira_key_from_text(&branch))
 }
 
-fn extract_jira_key_from_text(text: &str) -> Option<String> {
+pub(crate) fn extract_jira_key_from_text(text: &str) -> Option<String> {
     // Scan for PROJ-123 / proj-123 tokens; normalize to uppercase (branch names are often lower).
     let bytes = text.as_bytes();
     let mut i = 0;

@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use crate::config::{ensure_config, find_shipped_default, load_config, Config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from, Config};
 use crate::forge::fetch::{run_forge_fetch, ForgeFetchInput, TicketReport};
 use crate::forge::scaffold;
 use crate::git::{self, git_ok, git_stdout};
@@ -43,7 +43,7 @@ pub fn run_pr(input: PrCmdInput) -> Result<PathBuf> {
 
     let shipped = find_shipped_default(&cwd);
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&cwd))?;
 
     preflight_branch(&cwd, &cfg, input.non_interactive)?;
 

@@ -43,6 +43,9 @@ pub struct Config {
     pub forge: ForgeConfig,
     #[serde(default)]
     pub parley: ParleyConfig,
+    /// `scrutiny ready`: reviewer pool, nomination count, Jira In Review status.
+    #[serde(default)]
+    pub ready: ReadyConfig,
     #[serde(default)]
     pub timeouts: TimeoutsConfig,
     #[serde(default)]
@@ -334,6 +337,39 @@ impl Default for ParleyConfig {
             timeouts: ParleyTimeoutsConfig::default(),
             agent_models: BTreeMap::new(),
             prompts: BTreeMap::new(),
+        }
+    }
+}
+
+/// `scrutiny ready` knobs. A project `scrutiny.toml` may set any subset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyConfig {
+    /// Emails or GitHub logins eligible for review nomination.
+    /// Empty → do not request reviews.
+    #[serde(default)]
+    pub reviewers: Vec<String>,
+    /// How many entries from `reviewers` to nominate. Random when the pool is larger.
+    /// `0` → do not request reviews.
+    #[serde(default = "default_ready_reviewer_count", alias = "reviewer-count")]
+    pub reviewer_count: u32,
+    /// Jira status name for the In Review step. Empty → skip the transition.
+    #[serde(default = "default_ready_in_review_status", alias = "in-review-status")]
+    pub in_review_status: String,
+}
+
+fn default_ready_reviewer_count() -> u32 {
+    1
+}
+fn default_ready_in_review_status() -> String {
+    "In Review".into()
+}
+
+impl Default for ReadyConfig {
+    fn default() -> Self {
+        Self {
+            reviewers: Vec::new(),
+            reviewer_count: default_ready_reviewer_count(),
+            in_review_status: default_ready_in_review_status(),
         }
     }
 }
@@ -1605,9 +1641,18 @@ pub fn ensure_config(shipped_default: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Find a project-local `scrutiny.toml` by walking up from cwd to the repo root.
-fn local_config_path() -> Option<PathBuf> {
-    let mut cur = std::env::current_dir().ok()?;
+/// Find a project `scrutiny.toml` by walking up from `start`.
+///
+/// `None` starts at the process cwd. The nearest file wins. Walk stops at a
+/// `.git` directory or file (repo root) when that level has no `scrutiny.toml`,
+/// so a config outside the repo does not leak in. A key present in the project
+/// file replaces that key; keys absent from the project file stay on the global
+/// config. Tables merge; scalars and arrays replace wholesale.
+fn project_config_path(start: Option<&Path>) -> Option<PathBuf> {
+    let mut cur = match start {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
     loop {
         let candidate = cur.join(LOCAL_CONFIG_FILE_NAME);
         if candidate.is_file() {
@@ -1639,11 +1684,20 @@ fn merge_toml(base: &mut toml::Value, over: toml::Value) {
 }
 
 pub fn load_config(path: &Path) -> Result<Config> {
+    load_config_from(path, None)
+}
+
+/// Load global `path`, then overlay a project `scrutiny.toml` walked from `start`.
+///
+/// `start = None` walks from the process cwd. Pass the command `--cwd` so a
+/// project file is found even when the process cwd is somewhere else. Only
+/// keys set in the project file override; every other field stays global.
+pub fn load_config_from(path: &Path, start: Option<&Path>) -> Result<Config> {
     let text =
         fs::read_to_string(path).with_context(|| format!("read config {}", path.display()))?;
     let mut value: toml::Value = toml::from_str(&text).context("parse config.toml")?;
 
-    if let Some(local) = local_config_path() {
+    if let Some(local) = project_config_path(start) {
         let ltext =
             fs::read_to_string(&local).with_context(|| format!("read {}", local.display()))?;
         let lvalue: toml::Value =
@@ -1816,6 +1870,9 @@ mod tests {
         let cfg: Config = toml::from_str(DEFAULT_TOML).expect("parse default");
         assert_eq!(cfg.default_client, "claude");
         assert!(cfg.caveman);
+        assert!(cfg.ready.reviewers.is_empty());
+        assert_eq!(cfg.ready.reviewer_count, 1);
+        assert_eq!(cfg.ready.in_review_status, "In Review");
         assert!(cfg.probe.pr_summary);
         assert_eq!(cfg.probe.agents.reviewers_by_tier.get(Tier::Xs), 0);
         assert!(!cfg.probe.review.security_by_tier.get(Tier::S));
@@ -2147,6 +2204,73 @@ mod tests {
         assert_eq!(cfg.default_client, "codex");
         // untouched fields still come from global/defaults
         assert_eq!(cfg.probe.agents.reviewers_by_tier.get(Tier::Xs), 0);
+    }
+
+    #[test]
+    fn project_scrutiny_toml_overrides_only_keys_it_sets() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("nested")).unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join("config.toml"), DEFAULT_TOML).unwrap();
+        fs::write(
+            dir.path().join("scrutiny.toml"),
+            "default_client = \"codex\"\n\
+             [ready]\n\
+             reviewer_count = 3\n\
+             reviewers = [\"a@ex.com\", \"b@ex.com\"]\n\
+             [forge.all]\n\
+             in_progress_status = \"Doing\"\n",
+        )
+        .unwrap();
+
+        let cfg = load_config_from(&dir.path().join("config.toml"), Some(dir.path())).unwrap();
+        assert_eq!(cfg.default_client, "codex");
+        assert_eq!(cfg.ready.reviewer_count, 3);
+        assert_eq!(cfg.ready.reviewers, vec!["a@ex.com", "b@ex.com"]);
+        // Unset in the project file — global value stays.
+        assert_eq!(cfg.ready.in_review_status, "In Review");
+        assert_eq!(cfg.forge.all.in_progress_status, "Doing");
+        assert_eq!(cfg.forge.all.branch_prefix, "feat");
+        assert!(cfg.caveman);
+        assert_eq!(cfg.probe.agents.reviewers_by_tier.get(Tier::Xs), 0);
+
+        let nested = load_config_from(
+            &dir.path().join("config.toml"),
+            Some(&dir.path().join("nested")),
+        )
+        .unwrap();
+        assert_eq!(nested.default_client, "codex");
+
+        fs::write(
+            dir.path().join("nested").join("scrutiny.toml"),
+            "default_client = \"cursor\"\n",
+        )
+        .unwrap();
+        let nearest = load_config_from(
+            &dir.path().join("config.toml"),
+            Some(&dir.path().join("nested")),
+        )
+        .unwrap();
+        assert_eq!(nearest.default_client, "cursor");
+        // Nearer file did not set ready — root scrutiny.toml is not merged underneath.
+        // Only the nearest project file applies, so reviewers fall back to global.
+        assert!(nearest.ready.reviewers.is_empty());
+        assert_eq!(nearest.ready.reviewer_count, 1);
+    }
+
+    #[test]
+    fn project_scrutiny_toml_stops_at_git_root() {
+        let parent = tempdir().unwrap();
+        fs::write(
+            parent.path().join("scrutiny.toml"),
+            "default_client = \"codex\"\n",
+        )
+        .unwrap();
+        let repo = parent.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("config.toml"), DEFAULT_TOML).unwrap();
+        let cfg = load_config_from(&repo.join("config.toml"), Some(&repo)).unwrap();
+        assert_eq!(cfg.default_client, "claude");
     }
 
     #[test]

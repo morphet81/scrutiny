@@ -320,6 +320,11 @@ jira_assignee = "@me"
 in_progress_status = "In Progress"
 # init_commands = ["npm install"]  # run in each worktree before forge
 
+[ready]                            # `scrutiny ready`
+reviewers = []                     # emails or GitHub logins; empty → do not request
+reviewer_count = 1                 # random sample when the pool is larger; 0 → do not request
+in_review_status = "In Review"    # Jira status; empty → skip the transition
+
 # =============================================================================
 # COMMAND — parley
 # =============================================================================

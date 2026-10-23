@@ -1314,7 +1314,7 @@ fn load_ask_config(cwd: &Path) -> Result<crate::config::Config> {
         &std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()),
     );
     let cfg_path = crate::config::ensure_config(&shipped)?;
-    crate::config::load_config(&cfg_path)
+    crate::config::load_config_from(&cfg_path, Some(cwd))
 }
 
 fn resolve_ask_client(

@@ -2185,7 +2185,12 @@ pub fn run_isolated_agents(
     }
     if plan.evangelists > 0 {
         for i in 0..plan.evangelists {
-            jobs.push(("evangelist".into(), i + 1, Vec::new(), pack_path.to_path_buf()));
+            jobs.push((
+                "evangelist".into(),
+                i + 1,
+                Vec::new(),
+                pack_path.to_path_buf(),
+            ));
         }
     }
     if plan.security {
@@ -2195,7 +2200,12 @@ pub fn run_isolated_agents(
         jobs.push(("performance".into(), 1, Vec::new(), pack_path.to_path_buf()));
     }
     if plan.error_handling {
-        jobs.push(("error_handling".into(), 1, Vec::new(), pack_path.to_path_buf()));
+        jobs.push((
+            "error_handling".into(),
+            1,
+            Vec::new(),
+            pack_path.to_path_buf(),
+        ));
     }
 
     if jobs.is_empty() {

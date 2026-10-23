@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from};
 use crate::forge::fetch::TicketReport;
 use crate::paths::{temp_artifact_path, write_json_pretty};
 
@@ -88,7 +88,7 @@ pub fn run_forge_plan_write(input: ForgePlanWriteInput) -> Result<(ForgeSessionP
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     let shipped = find_shipped_default(&cwd);
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&cwd))?;
 
     let enable_figma = cfg.forge.enable_figma;
     let enable_lore = cfg.forge.enable_lore;

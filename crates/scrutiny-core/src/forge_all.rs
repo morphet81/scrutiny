@@ -16,7 +16,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use crate::config::{ensure_config, find_shipped_default, load_config, ForgeAllConfig};
+use crate::config::{ensure_config, find_shipped_default, load_config_from, ForgeAllConfig};
 use crate::forge::fetch::{jira_key_from_url_or_raw, run_forge_fetch, ForgeFetchInput};
 use crate::forge::jira_ops::{jira_assign, jira_transition};
 use crate::forge::tools::require_acli_jira;
@@ -56,7 +56,7 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
 
     let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&cwd))?;
     let fa = cfg.forge.all.clone();
 
     if input.tickets.is_empty() {

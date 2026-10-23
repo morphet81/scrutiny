@@ -1,5 +1,6 @@
 //! Artifact paths: `<cwd>/.scrutiny/<session>/<kind>.json`
-//! Config still lives in `~/.scrutiny/config.toml` (separate).
+//! Global config lives in `~/.scrutiny/config.toml`. A project `scrutiny.toml`
+//! overrides any key it sets.
 
 use anyhow::{Context, Result};
 use chrono::Utc;

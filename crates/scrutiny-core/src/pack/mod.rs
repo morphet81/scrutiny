@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from};
 use crate::git;
 use crate::map::MapReport;
 use crate::paths::{temp_artifact_path, write_json_pretty};
@@ -178,7 +178,7 @@ fn run_pack_filtered(
     let shipped =
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.to_path_buf()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(cwd))?;
     let pack_cfg = &cfg.probe.pack;
 
     let repo = git::discover_repo(cwd)?;

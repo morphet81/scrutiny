@@ -8,7 +8,7 @@ use crate::agent_runner::{
     collate_review_report, run_isolated_agents, run_pr_summary_agent, run_team_agents,
     session_records_from_report, summary_concerns_as_findings, ProbePrSummary, ReviewReport,
 };
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from};
 use crate::eval::{run_eval, EvalInput};
 use crate::findings::{
     attach_pr_to_findings, merge_ai_findings, promote_summary_concerns, prompt_pr_if_missing,
@@ -135,7 +135,7 @@ pub fn run_review(input: ReviewCmdInput) -> Result<ReviewResult> {
 
     let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&cwd))?;
 
     // Stack / --from-json reuses plan answers: honor that client instead of
     // falling back to default_client when skip_prompt is set.

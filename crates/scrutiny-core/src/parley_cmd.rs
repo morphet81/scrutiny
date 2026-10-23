@@ -15,7 +15,7 @@ use crate::agent_runner::{
     claude_error_message, run_headless, run_nonheadless, wait_for_sentinels, HeadlessKind,
     HeadlessOutcome,
 };
-use crate::config::{ensure_config, find_shipped_default, load_config, Config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from, Config};
 use crate::git::{
     clean_paths, commit_paths, git_stdout, paths_changed_since, snapshot_worktree, WorktreeSnapshot,
 };
@@ -79,7 +79,7 @@ pub fn run_parley(input: ParleyCmdInput) -> Result<PathBuf> {
 
     let shipped = find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&cwd))?;
 
     let cli_override = input.client.clone().or_else(|| {
         input

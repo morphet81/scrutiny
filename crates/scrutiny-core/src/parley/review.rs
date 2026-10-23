@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::agent_runner::{claude_error_message, run_headless, HeadlessKind};
-use crate::config::{ensure_config, find_shipped_default, load_config};
+use crate::config::{ensure_config, find_shipped_default, load_config_from};
 use crate::parley::fetch::{run_parley_fetch, ParleyComment, ParleyFetchInput};
 use crate::parley::reply::post_thread_reply;
 use crate::paths::{artifact_path, write_json_pretty};
@@ -80,7 +80,7 @@ pub fn run_adjudicate(input: AdjudicateInput) -> Result<PathBuf> {
     let shipped =
         find_shipped_default(&std::env::current_exe().unwrap_or_else(|_| input.cwd.clone()));
     let cfg_path = ensure_config(&shipped)?;
-    let cfg = load_config(&cfg_path)?;
+    let cfg = load_config_from(&cfg_path, Some(&input.cwd))?;
     let client = resolve_client(
         &cfg,
         ResolveClientInput {
