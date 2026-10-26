@@ -1276,10 +1276,11 @@ Output: JSON ONLY. No prose outside JSON.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
 Rules:
+- Review ONLY added `+` and deleted `-` lines. Context lines, unchanged symbol bodies, referenced signatures, and other files are out of scope.
 - Every finding: path + line (1-based).
 - **CRITICAL:** `line` MUST be **changed** line — added `+` (RIGHT) preferred, or deleted `-` (LEFT). Never context ` ` line, never invented.
   Source of truth, in order: (1) that path's pack unified diff; (2) if pack diff was cut, changed line verified by Tier-1/2 Read of the head file — OK, host later validates against the REAL PR diff. Unverified guesses rejected.
-- Issue only on unchanged context line → omit finding or file-level (omit `line`).
+- Issue on unchanged line, context line, or line outside branch diff → omit finding. No file-level fallback. No move onto another line.
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
 {policy}
@@ -1308,10 +1309,11 @@ Output: JSON ONLY. No prose outside JSON.
 {{"findings":[{{"path":"rel/path","line":1,"severity":"critical|warning|suggestion","title":"...","explanation":"...","proposed_fix":"...","fix_options":[]}}]}}
 
 Rules:
+- Review ONLY added `+` and deleted `-` lines. Context lines, unchanged lines inside a symbol, referenced signatures, and other files are out of scope.
 - Every finding: path + line (1-based).
 - **CRITICAL:** `line` MUST be a **changed** line — added `+` (new-side, RIGHT) preferred, or deleted `-` (old-side, LEFT). Never a context ` ` line, never invented.
   Source of truth, in order: (1) that path's pack unified diff; (2) if the pack diff was cut, a changed line verified by a Tier-1/2 Read of the head file is OK — the host later validates every anchor against the REAL PR diff. Unverified guesses are rejected.
-- If the issue is only on an unchanged context line → omit that finding or attach at file level (omit `line`).
+- If the issue is only on an unchanged line, a context line, or any line the branch did not add or delete → omit that finding. Do not attach it at file level and do not move it onto a different line.
 - Nothing: {{"findings":[]}}
 - Severity: critical|warning|suggestion
 {policy}
@@ -1404,7 +1406,7 @@ pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String 
 
 1. Spawn **exactly** counts above (parallel when possible).
 2. Wait for **ALL** members → findings JSON array before consolidate. Status/idle/progress pings NOT complete — re-request JSON if missing.
-3. Reject / re-ask finding missing path+line, or line not **changed** (added `+` or deleted `-`): in path pack unified diff, or verified by member Tier-1/2 head-file Read when pack diff cut. Context ` ` lines bad; unverified guesses bad. Prefer pack+annex; bounded Tier-1/2 explore only (see member templates). No whole-repo fishing.
+3. Reject / re-ask finding missing path+line, or line not **changed** (added `+` or deleted `-`): in path pack unified diff, or verified by member Tier-1/2 head-file Read when pack diff cut. Context ` ` lines bad; lines outside branch diff bad. Omit those. Do not file-level them or move them onto another line. Unverified guesses bad. Prefer pack+annex; bounded Tier-1/2 explore only (see member templates). No whole-repo fishing.
 4. Dedupe. Disagreement on same issue → keep **higher** severity (critical > warning > suggestion).
 5. Members may use pack annex / allowlisted fetch for omitted bodies; host later validates every anchor against the REAL PR diff.
 6. Return ONE final JSON on stdout (no prose outside JSON)."#,
@@ -1412,7 +1414,7 @@ pub fn build_team_lead_prompt(pack_path: &Path, plan: &ConfirmedPlan) -> String 
 
 1. Spawn **exactly** the counts above (parallel when possible).
 2. Wait for **ALL** members to return a findings JSON array before consolidating. Status/idle/progress pings are NOT complete — re-request the JSON if missing.
-3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`): in that path's pack unified diff, or verified by a member's Tier-1/2 head-file Read when the pack diff was cut. Context ` ` lines are not acceptable; unverified guesses are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
+3. Reject / re-ask any finding missing path+line, or whose line is not a **changed** line (added `+` or deleted `-`): in that path's pack unified diff, or verified by a member's Tier-1/2 head-file Read when the pack diff was cut. Context lines and lines outside the branch diff are not acceptable. Omit them. Do not attach them at file level or move them onto another line. Unverified guesses are not acceptable. Prefer pack+annex; bounded Tier-1/2 exploration only (see member templates). No whole-repo fishing.
 4. Dedupe. On disagreement about the same issue, keep the **higher** severity (critical > warning > suggestion).
 5. Members may use pack annex / allowlisted fetch for omitted bodies; the host later validates every anchor against the REAL PR diff.
 6. Return ONE final JSON on stdout (no prose outside JSON)."#,
@@ -1925,10 +1927,11 @@ Style (mandatory):
 - `purpose`: ONE sentence, ≤25 words.
 - `architecture`: ONE sentence (two only if data flow needs it), ≤30 words.
 - `good_points`: 0–3 bullets; each ≤12 words; concrete (module/pattern), not praise.
-- `bad_points`: actionable code risks ONLY. Each MUST include `path` + `line` from pack
-  unified diff / symbol slices (1-based new-file lines), or a changed line verified by a
-  Tier-1/2 head-file Read when the pack diff was cut. Prefer `suggestion` or `warning`.
-  0–5 items; empty if none.
+- `bad_points`: actionable risks on this branch's changes ONLY. Each MUST include `path` + `line`
+  of an added `+` or deleted `-` line in that path's unified diff (or a changed line verified by a
+  Tier-1/2 head-file Read when the pack diff was cut). Never a context line, never a line that
+  only appears in a symbol slice or referenced signature. If you cannot point at a changed line,
+  omit the concern. Prefer `suggestion` or `warning`. 0–5 items; empty if none.
 - `review_limits`: pack/tool caveats only (truncation, unread regions). Empty if none.
   NEVER put pack limits in `bad_points`.
 - `diagram` / `table`: EMPTY string by default. Fill ONLY when a visual is necessary to

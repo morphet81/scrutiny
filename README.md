@@ -338,7 +338,7 @@ Review-pack size and cross-file budgets.
 |-----|---------|-------------|
 | `max_chars` | `48000` | Total pack character budget |
 | `doc_digest_lines` | `40` | Max lines kept from doc files |
-| `symbol_context_lines` | `3` | Context lines around changed symbols |
+| `symbol_context_lines` | `3` | Kept so old configs still parse. Slices are added lines only |
 | `min_file_chars` | `1200` | Per-file floor before extra symbol bodies |
 | `source_weight` | `4` | Budget weight for source files |
 | `test_weight` | `2` | Budget weight for tests |

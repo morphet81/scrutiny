@@ -5,22 +5,12 @@ use crate::config::PackConfig;
 use crate::treesitter;
 
 use super::budget::Region;
-use super::hunk::merge_ranges;
-use super::slice::{expand_brace_range, looks_like_decl};
+use super::slice::looks_like_decl;
 use super::OutlineEntry;
 
-/// Merged (lo, hi) inclusive changed-line ranges from a unified diff's hunks.
+/// Inclusive ranges of added lines only. Hunk context is not a change.
 pub(crate) fn changed_ranges(diff: &str) -> Vec<(usize, usize)> {
-    let pairs: Vec<(usize, usize)> = super::hunk::parse_hunk_new_ranges(diff)
-        .into_iter()
-        .map(|(start, count)| {
-            (
-                start,
-                start.saturating_add(count.saturating_sub(1)).max(start),
-            )
-        })
-        .collect();
-    merge_ranges(pairs)
+    super::hunk::added_line_ranges(diff)
 }
 
 pub(crate) fn build_outline(
@@ -94,26 +84,18 @@ pub(crate) fn build_regions(
     ranges: &[(usize, usize)],
     cfg: &PackConfig,
 ) -> Vec<Region> {
+    // Outline and context padding stay available to callers; the slice itself
+    // is only the added lines. A whole symbol would put unchanged lines in front
+    // of the reviewer.
+    let _ = (outline, cfg);
     let lines: Vec<&str> = head_text.lines().collect();
-
-    let mut regions: Vec<Region> = outline
+    let mut regions: Vec<Region> = ranges
         .iter()
-        .filter(|e| e.in_diff)
-        .map(|e| region_from(path, &lines, e.start_line, e.end_line))
+        .copied()
+        .filter(|&(lo, hi)| lo > 0 && hi >= lo)
+        .map(|(lo, hi)| region_from(path, &lines, lo, hi))
+        .filter(|r| !r.content.is_empty())
         .collect();
-
-    if regions.is_empty() {
-        let expanded: Vec<(usize, usize)> = ranges
-            .iter()
-            .map(|&(lo, hi)| expand_brace_range(&lines, lo, hi, cfg.symbol_context_lines))
-            .collect();
-        regions = merge_ranges(expanded)
-            .into_iter()
-            .map(|(lo, hi)| region_from(path, &lines, lo, hi))
-            .collect();
-    }
-
-    // Primary first = smallest (most specific) region, then by position. Deterministic.
     regions.sort_by_key(|r| (r.end.saturating_sub(r.start), r.start));
     regions
 }
@@ -148,12 +130,18 @@ mod tests {
     }
 
     #[test]
-    fn regions_from_in_diff_decls() {
-        let src = "fn a() {\n  1\n}\nfn b() {\n  2\n}\n";
-        let o = build_outline("x.rs", src, &[(4, 4)]);
-        let r = build_regions("x.rs", src, &o, &[(4, 4)], &PackConfig::default());
+    fn regions_are_changed_lines_not_the_whole_symbol() {
+        let src = "fn b() {\n  keep\n  changed\n  keep\n}\n";
+        let o = build_outline("x.rs", src, &[(3, 3)]);
+        let r = build_regions("x.rs", src, &o, &[(3, 3)], &PackConfig::default());
         assert_eq!(r.len(), 1);
-        assert!(r[0].content.contains("fn b"));
+        assert_eq!(r[0].content, "  changed");
+    }
+
+    #[test]
+    fn changed_ranges_skip_context() {
+        let diff = "@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n";
+        assert_eq!(changed_ranges(diff), vec![(2, 2)]);
     }
 
     #[test]

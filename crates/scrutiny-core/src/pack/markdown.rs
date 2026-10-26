@@ -60,7 +60,9 @@ pub(crate) fn render_pack_markdown(pack: &PackReport) -> String {
 
     if !pack.referenced_signatures.is_empty() {
         md.push_str("## referenced signatures\n\n");
-        md.push_str("Symbols the diff calls but does not change (read the def for the body):\n\n");
+        md.push_str(
+            "Symbols the diff calls but does not change. Not review targets — do not comment on them:\n\n",
+        );
         for r in &pack.referenced_signatures {
             md.push_str(&format!(
                 "- `{}` — {} `{}:{}`\n",
@@ -94,6 +96,9 @@ pub(crate) fn render_pack_markdown(pack: &PackReport) -> String {
 
     if !pack.needs_full_file.is_empty() {
         md.push_str("## needs_full_file\n\n");
+        md.push_str(
+            "Diff was cut. Read only to locate added or deleted lines. Do not review the rest of the file.\n\n",
+        );
         for p in &pack.needs_full_file {
             md.push_str(&format!("- {p}\n"));
         }

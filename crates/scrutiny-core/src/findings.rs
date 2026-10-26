@@ -814,6 +814,21 @@ pub fn print_findings_dashboard(n_crit: u32, n_warn: u32, n_sug: u32) {
 /// Non-TTY: letter line; ask only via `ask <question>` or multi-word free text (never bare P/I/A…).
 /// Order: critical → warning → suggestion, then renumber F1…
 /// When `accept_suggested`, each finding takes menu default (first fix option, else Post).
+fn on_changed_line(f: &TriageFinding) -> bool {
+    f.anchor.in_diff == Some(true)
+        && f.anchor.line_resolved
+        && f.anchor.line.filter(|&l| l > 0).is_some()
+}
+
+/// Findings not yet checked (`in_diff` unset) stay visible. After resolve, only
+/// an added or deleted line is reviewed.
+fn triage_visible(f: &TriageFinding) -> bool {
+    match f.anchor.in_diff {
+        Some(_) => on_changed_line(f),
+        None => true,
+    }
+}
+
 pub fn run_findings_triage(
     findings_path: &Path,
     cwd: Option<&Path>,
@@ -821,12 +836,36 @@ pub fn run_findings_triage(
     accept_suggested: bool,
 ) -> Result<(FindingsReport, PathBuf)> {
     let mut ask = ask;
+    if let Some(dir) = cwd {
+        run_findings_resolve(findings_path, dir, false)?;
+    }
     let mut report: FindingsReport = read_json(findings_path)?;
     if let Some(ref summary) = report.pr_summary {
         print_pr_summary(summary);
     }
     if report.findings.is_empty() {
         eprintln!("scrutiny findings-triage: no findings");
+        return Ok((report, findings_path.to_path_buf()));
+    }
+
+    let mut dropped = 0u32;
+    for f in &mut report.findings {
+        if triage_visible(f) {
+            continue;
+        }
+        dropped += 1;
+        f.include = Some(false);
+        f.status = "skipped".into();
+        if f.fail_reason.is_none() {
+            f.fail_reason = Some("not a changed line in the branch diff — not reviewed".into());
+        }
+    }
+    if dropped > 0 {
+        eprintln!("scrutiny findings-triage: {dropped} finding(s) not on a changed line — skipped");
+    }
+    if !report.findings.iter().any(triage_visible) {
+        eprintln!("scrutiny findings-triage: no findings on changed lines");
+        write_json_pretty(findings_path, &report)?;
         return Ok((report, findings_path.to_path_buf()));
     }
 
@@ -841,7 +880,7 @@ pub fn run_findings_triage(
         let mut c = 0u32;
         let mut w = 0u32;
         let mut s = 0u32;
-        for f in &report.findings {
+        for f in report.findings.iter().filter(|f| triage_visible(f)) {
             match normalize_severity(&f.severity).as_str() {
                 "critical" => c += 1,
                 "warning" => w += 1,
@@ -873,6 +912,9 @@ pub fn run_findings_triage(
     };
 
     for idx in 0..n {
+        if !triage_visible(&report.findings[idx]) {
+            continue;
+        }
         loop {
             let snapshot = report.findings.clone();
             let f = &mut report.findings[idx];
@@ -1632,6 +1674,8 @@ pub fn run_findings_resolve(
 
     let base_ref = report.base_ref.clone();
     let mut critical_fail = false;
+    let mut diff_cache: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     for f in &mut report.findings {
         if f.include == Some(false) {
             f.status = "skipped".into();
@@ -1648,122 +1692,116 @@ pub fn run_findings_resolve(
         };
         f.anchor.path = Some(path.clone());
 
-        // Get unified diff for this file (prefer PR patches; fall back to pack).
-        let file_diff: Option<String> = if let Some(patches) = &pr_patches {
-            patches.get(&path).cloned()
-        } else {
-            pack.as_ref()
-                .and_then(|p| p.slices.iter().find(|s| s.path == path))
-                .map(|s| s.unified_diff.clone())
-        };
+        // Branch diff (triple-dot) is the authority. GitHub's patch is often missing
+        // on large files; without a diff, a line comment can land on unchanged code
+        // in a file the PR merely touches.
+        let file_diff = diff_cache
+            .entry(path.clone())
+            .or_insert_with(|| {
+                branch_file_diff(
+                    cwd,
+                    &base_ref,
+                    &report.head_oid,
+                    &path,
+                    pr_patches.as_ref(),
+                    pack.as_ref(),
+                )
+            })
+            .clone();
 
+        let resolved_line = f.anchor.line.filter(|&l| l > 0);
         let file_text = git_show_file(cwd, &report.head_oid, &path);
-        let Ok(file_text) = file_text else {
-            f.anchor.line_resolved = false;
-            f.fail_reason = Some(format!("git show {}:{} failed", report.head_oid, path));
-            if f.include == Some(true) && f.severity == "critical" {
-                critical_fail = true;
+        // A fully deleted file has no head blob. Keep going only when the branch
+        // diff itself proves this anchor is a deleted line.
+        let lines: Vec<String> = match &file_text {
+            Ok(text) => text.lines().map(|l| l.to_string()).collect(),
+            Err(_) => {
+                let deleted = resolved_line
+                    .and_then(|line| {
+                        file_diff
+                            .as_deref()
+                            .and_then(|diff| locate_changed_line(diff, line, f.needle.as_deref()))
+                    })
+                    .filter(|hit| hit.side == "LEFT");
+                if deleted.is_none() {
+                    f.anchor.line_resolved = false;
+                    f.fail_reason = Some(format!("git show {}:{} failed", report.head_oid, path));
+                    if f.include == Some(true) && f.severity == "critical" {
+                        critical_fail = true;
+                    }
+                    continue;
+                }
+                Vec::new()
             }
-            continue;
         };
-        let lines: Vec<&str> = file_text.lines().collect();
-
-        let mut resolved_line = f.anchor.line;
-        if let Some(needle) = &f.needle {
-            if let Some((idx, _)) = lines
-                .iter()
-                .enumerate()
-                .find(|(_, l)| l.contains(needle.as_str()))
-            {
-                resolved_line = Some((idx + 1) as u32);
-            }
-        }
 
         if let Some(line) = resolved_line {
-            if line == 0 {
-                // Treat as no-line (file-level / global path) — do not fake resolve
-                f.anchor.line = None;
-                f.anchor.line_resolved = false;
-                f.fail_reason = None;
-                continue;
-            }
-            if line as usize > lines.len() {
-                f.anchor.line_resolved = false;
-                f.fail_reason = Some(format!(
-                    "line {line} out of range (file has {} lines)",
-                    lines.len()
-                ));
-                if f.include == Some(true) && f.severity == "critical" {
-                    critical_fail = true;
-                }
-                continue;
-            }
-            let text = lines[(line as usize) - 1].to_string();
-            if let Some(expected) = &f.anchor.line_text {
-                if expected.trim() != text.trim() {
-                    f.fail_reason = Some("line_text mismatch; updated to actual".into());
-                }
-            }
-            f.anchor.line = Some(line);
-            f.anchor.line_text = Some(text);
-            f.anchor.line_resolved = true;
-
-            // Anchor must be on a changed line (added + or deleted -), never a context line.
-            // If not, try re-anchor to needle in added lines, then deleted-line LEFT anchor.
-            let in_diff = if let Some(ref diff) = file_diff {
-                if line_is_added(diff, line) {
-                    true
-                } else {
-                    let re_anchor = f
-                        .needle
-                        .as_deref()
-                        .and_then(|needle| find_needle_in_added_lines(diff, needle));
-                    if let Some(new_line) = re_anchor {
-                        if (new_line as usize) <= lines.len() {
-                            f.anchor.line = Some(new_line);
-                            f.anchor.line_text = Some(lines[(new_line as usize) - 1].to_string());
+            let hit = file_diff
+                .as_deref()
+                .and_then(|diff| locate_changed_line(diff, line, f.needle.as_deref()));
+            if let Some(hit) = hit {
+                if hit.side == "RIGHT" {
+                    if hit.line as usize > lines.len() {
+                        f.anchor.line_resolved = false;
+                        f.anchor.in_diff = Some(false);
+                        f.fail_reason = Some(format!(
+                            "line {} out of range (file has {} lines)",
+                            hit.line,
+                            lines.len()
+                        ));
+                        if f.include == Some(true) && f.severity == "critical" {
+                            critical_fail = true;
                         }
-                        true
-                    } else {
-                        let del_anchor = f
-                            .needle
-                            .as_deref()
-                            .and_then(|needle| find_needle_in_deleted_lines(diff, needle));
-                        if let Some(old_line) = del_anchor {
-                            if let Ok(base_text) = git_show_file(cwd, &base_ref, &path) {
-                                let blines: Vec<&str> = base_text.lines().collect();
-                                if (old_line as usize) <= blines.len() {
-                                    f.anchor.line_text =
-                                        Some(blines[(old_line as usize) - 1].to_string());
-                                }
-                            }
-                            f.anchor.line = Some(old_line);
-                            f.anchor.side = "LEFT".into();
-                            true
-                        } else {
-                            false
-                        }
+                        continue;
                     }
+                    let text = lines[(hit.line as usize) - 1].clone();
+                    if let Some(expected) = &f.anchor.line_text {
+                        if expected.trim() != text.trim() {
+                            f.fail_reason = Some("line_text mismatch; updated to actual".into());
+                        } else {
+                            f.fail_reason = None;
+                        }
+                    } else {
+                        f.fail_reason = None;
+                    }
+                    f.anchor.line_text = Some(text);
+                } else if let Ok(base_text) = git_show_file(cwd, &base_ref, &path) {
+                    let blines: Vec<&str> = base_text.lines().collect();
+                    if hit.line > 0 && (hit.line as usize) <= blines.len() {
+                        f.anchor.line_text = Some(blines[(hit.line as usize) - 1].to_string());
+                    }
+                    f.fail_reason = None;
+                } else {
+                    f.fail_reason = None;
                 }
+                f.anchor.line = Some(hit.line);
+                f.anchor.side = hit.side.to_string();
+                f.anchor.line_resolved = true;
+                f.anchor.in_diff = Some(true);
+                // A range that includes unchanged lines highlights code the branch did not touch.
+                f.anchor.start_line = file_diff.as_deref().and_then(|diff| {
+                    narrow_start_line(diff, hit.side, f.anchor.start_line, hit.line)
+                });
             } else {
-                // No diff available — allow attempt (pack not loaded or file not in pack).
-                true
-            };
-            f.anchor.in_diff = Some(in_diff);
-            if !in_diff {
+                f.anchor.in_diff = Some(false);
+                f.anchor.line_resolved = false;
+                f.anchor.start_line = None;
                 f.fail_reason = Some(format!(
-                    "line {line} not in PR/pack diff for `{path}` — will post as file comment if included"
+                    "line {line} is not an added or deleted line in the branch diff for `{path}` — comment not posted"
                 ));
-                // Keep line for display; in_diff false → file demotion at post
-            } else if f.fail_reason.as_deref() == Some("line_text mismatch; updated to actual") {
-                // keep mismatch note
-            } else {
-                f.fail_reason = None;
             }
         } else {
+            let changed = file_diff.as_deref().map(diff_has_change).unwrap_or(false);
             f.anchor.line = None;
             f.anchor.line_resolved = false;
-            f.fail_reason = None; // file-level or global OK
+            f.anchor.in_diff = Some(changed);
+            if changed || f.anchor.path.is_none() {
+                f.fail_reason = None;
+            } else {
+                f.fail_reason = Some(format!(
+                    "`{path}` has no added or deleted lines in the branch diff — comment not posted"
+                ));
+            }
         }
 
         if let (Some(start), Some(end)) = (f.anchor.start_line, f.anchor.line) {
@@ -1808,8 +1846,7 @@ pub fn run_findings_validate(findings_path: &Path) -> Result<(FindingsReport, Pa
                 f.id
             ));
         }
-        // Out-of-diff / unresolved line → file comment at post (path required for that).
-        // No hard fail here — only need path or global.
+        // Out-of-diff lines are dropped at post (not retargeted). Path optional for global notes.
         let has_path = f
             .anchor
             .path
@@ -2056,7 +2093,7 @@ struct CommentPayloads {
 fn build_comment_payloads(report: &mut FindingsReport, strict: bool) -> Result<CommentPayloads> {
     let mut api_comments: Vec<Value> = Vec::new();
     let mut comment_ids: Vec<String> = Vec::new();
-    let mut body_fallbacks: Vec<String> = Vec::new();
+    let body_fallbacks: Vec<String> = Vec::new();
     let failed: Vec<String> = Vec::new();
 
     for f in report.findings.iter_mut() {
@@ -2073,10 +2110,31 @@ fn build_comment_payloads(report: &mut FindingsReport, strict: bool) -> Result<C
             .or_else(|| f.paths.first().cloned())
             .filter(|p| !p.is_empty());
         let line = f.anchor.line.filter(|&l| l > 0);
+        // Fail closed: a line comment only when resolve proved the line was added or deleted.
         let line_usable = f.anchor.line_resolved
             && line.is_some()
             && path.is_some()
-            && f.anchor.in_diff != Some(false);
+            && f.anchor.in_diff == Some(true);
+
+        if line.is_some() && !line_usable {
+            eprintln!(
+                "scrutiny post-comments: {} line is not an added or deleted line in the branch diff — skipped",
+                f.id
+            );
+            f.status = "skipped".into();
+            if f.fail_reason.is_none() {
+                f.fail_reason = Some(
+                    "line is not a changed line in the branch diff — comment not posted".into(),
+                );
+            }
+            if strict && f.severity == "critical" {
+                bail!(
+                    "strict: critical {} is not on a changed line in the branch diff",
+                    f.id
+                );
+            }
+            continue;
+        }
 
         if line_usable {
             let mut c = json!({
@@ -2100,37 +2158,21 @@ fn build_comment_payloads(report: &mut FindingsReport, strict: bool) -> Result<C
             continue;
         }
 
-        if let Some(path) = path {
-            // Path but no usable inline line (missing, unresolved, or not on PR patch)
-            // → file-level review comment (clear line for payload / status)
-            if line.is_some() {
-                eprintln!(
-                    "scrutiny post-comments: {} line not on PR/pack diff — posting as file comment on `{path}`",
-                    f.id
-                );
-                f.anchor.line = None;
-                f.anchor.start_line = None;
-                f.anchor.line_resolved = false;
-                f.anchor.in_diff = Some(false);
-            }
-            api_comments.push(json!({
-                "path": path,
-                "body": body,
-                "subject_type": "file",
-            }));
-            comment_ids.push(f.id.clone());
-            f.status = "ready_file".into();
-            f.fail_reason = None;
-            continue;
+        // No proven changed line: do not post a file comment or a review-body note.
+        // Those attach the finding to code the branch did not change.
+        let _ = (path, body);
+        eprintln!(
+            "scrutiny post-comments: {} has no added or deleted line — skipped",
+            f.id
+        );
+        f.status = "skipped".into();
+        if f.fail_reason.is_none() {
+            f.fail_reason =
+                Some("not a changed line in the branch diff — comment not posted".into());
         }
-
-        // Global — review body
-        body_fallbacks.push(format_fallback_bullet(f, &body));
-        f.status = "posted_body".into();
-        f.fail_reason = None;
         if strict && f.severity == "critical" {
             bail!(
-                "strict: critical {} has no path for file/line comment",
+                "strict: critical {} is not on a changed line in the branch diff",
                 f.id
             );
         }
@@ -2767,7 +2809,7 @@ fn included_counts(report: &FindingsReport) -> (u32, u32, u32) {
     let mut warn = 0u32;
     let mut sug = 0u32;
     for f in &report.findings {
-        if f.include != Some(true) {
+        if f.include != Some(true) || f.status == "skipped" {
             continue;
         }
         match normalize_severity(&f.severity).as_str() {
@@ -2779,21 +2821,12 @@ fn included_counts(report: &FindingsReport) -> (u32, u32, u32) {
     (crit, warn, sug)
 }
 
-fn format_fallback_bullet(f: &TriageFinding, body: &str) -> String {
-    let path = f.anchor.path.as_deref().unwrap_or("?");
-    let line = f.anchor.line.unwrap_or(0);
-    format!(
-        "- **{}** (`{path}:{line}`) — {}\n{body}\n",
-        f.title, f.severity
-    )
-}
-
 fn default_review_body(report: &FindingsReport) -> String {
     let mut crit = 0u32;
     let mut warn = 0u32;
     let mut sug = 0u32;
     for f in &report.findings {
-        if f.include != Some(true) {
+        if f.include != Some(true) || f.status == "skipped" {
             continue;
         }
         match normalize_severity(&f.severity).as_str() {
@@ -2816,127 +2849,233 @@ fn ensure_ai_tag(body: &str) -> String {
     }
 }
 
-/// Returns true only if `line` (1-based, new-side) is an **added** (`+`) line in the diff.
-fn line_is_added(diff: &str, line: u32) -> bool {
+/// Triple-dot branch diff for `path`. Empty string means git succeeded and the
+/// path is not part of the branch change — do not fall through to a patch that
+/// could bless an unrelated line. GitHub's `patch` is fallback only when git fails.
+fn branch_file_diff(
+    cwd: &Path,
+    base_ref: &str,
+    head_oid: &str,
+    path: &str,
+    pr_patches: Option<&std::collections::HashMap<String, String>>,
+    pack: Option<&crate::pack::PackReport>,
+) -> Option<String> {
+    if !base_ref.is_empty() && !head_oid.is_empty() {
+        match crate::git::diff_unified_paths(cwd, base_ref, head_oid, &[path.to_string()]) {
+            Ok(diff) => return Some(diff),
+            Err(e) => {
+                eprintln!("scrutiny findings-resolve: warn: git diff `{path}`: {e:#}");
+            }
+        }
+    }
+    if let Some(p) = pr_patches
+        .and_then(|m| m.get(path))
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Some(p.clone());
+    }
+    pack.and_then(|p| p.slices.iter().find(|s| s.path == path))
+        .map(|s| s.unified_diff.clone())
+        .filter(|s| !s.trim().is_empty())
+}
+
+#[derive(Clone, Copy)]
+struct ChangedAnchor {
+    line: u32,
+    side: &'static str,
+}
+
+enum DiffChange<'a> {
+    Added { line: u32, text: &'a str },
+    Deleted { line: u32, text: &'a str },
+}
+
+fn is_diff_noise(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with('\\')
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+        || line.starts_with("similarity ")
+        || line.starts_with("dissimilarity ")
+        || line.starts_with("rename ")
+        || line.starts_with("old mode")
+        || line.starts_with("new mode")
+        || line.starts_with("Binary ")
+}
+
+fn hunk_side_cursors(header_rest: &str) -> (u32, u32) {
+    let old_line = header_rest
+        .split('-')
+        .nth(1)
+        .and_then(|minus| {
+            minus
+                .split(|c: char| c == ',' || c == ' ')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .unwrap_or(0)
+        .saturating_sub(1);
+    let new_line = header_rest
+        .split('+')
+        .nth(1)
+        .and_then(|plus| {
+            plus.split(|c: char| c == ',' || c == ' ')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .unwrap_or(0)
+        .saturating_sub(1);
+    (old_line, new_line)
+}
+
+fn each_diff_change<'a>(diff: &'a str, mut f: impl FnMut(DiffChange<'a>)) {
+    let mut old_line: u32 = 0;
     let mut new_line: u32 = 0;
     for diff_line in diff.lines() {
         if let Some(rest) = diff_line.strip_prefix("@@") {
-            if let Some(plus) = rest.split('+').nth(1) {
-                let start = plus
-                    .split(|c: char| c == ',' || c == ' ')
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                new_line = start.saturating_sub(1);
-            }
+            let (old_start, new_start) = hunk_side_cursors(rest);
+            old_line = old_start;
+            new_line = new_start;
             continue;
         }
-        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+        if diff_line.starts_with("+++") || diff_line.starts_with("---") || is_diff_noise(diff_line)
+        {
             continue;
         }
-        if diff_line.starts_with('+') {
+        if let Some(text) = diff_line.strip_prefix('+') {
             new_line += 1;
-            if new_line == line {
-                return true;
-            }
-        } else if !diff_line.starts_with('-') {
-            // context line — advance new-side counter only
+            f(DiffChange::Added {
+                line: new_line,
+                text,
+            });
+        } else if let Some(text) = diff_line.strip_prefix('-') {
+            old_line += 1;
+            f(DiffChange::Deleted {
+                line: old_line,
+                text,
+            });
+        } else {
             new_line += 1;
+            old_line += 1;
         }
     }
-    false
+}
+
+/// Returns true only if `line` (1-based, new-side) is an **added** (`+`) line in the diff.
+fn line_is_added(diff: &str, line: u32) -> bool {
+    let mut found = false;
+    each_diff_change(diff, |row| {
+        if let DiffChange::Added { line: n, .. } = row {
+            if n == line {
+                found = true;
+            }
+        }
+    });
+    found
 }
 
 /// Returns true only if `line` (1-based, old-side) is a **deleted** (`-`) line in the diff.
-#[allow(dead_code)]
 fn line_is_deleted(diff: &str, line: u32) -> bool {
-    let mut old_line: u32 = 0;
-    for diff_line in diff.lines() {
-        if let Some(rest) = diff_line.strip_prefix("@@") {
-            if let Some(minus) = rest.split('-').nth(1) {
-                let start = minus
-                    .split(|c: char| c == ',' || c == ' ')
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                old_line = start.saturating_sub(1);
+    let mut found = false;
+    each_diff_change(diff, |row| {
+        if let DiffChange::Deleted { line: n, .. } = row {
+            if n == line {
+                found = true;
             }
-            continue;
         }
-        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
-            continue;
-        }
-        if diff_line.starts_with('-') {
-            old_line += 1;
-            if old_line == line {
-                return true;
-            }
-        } else if !diff_line.starts_with('+') {
-            // context line — advance old-side counter only
-            old_line += 1;
-        }
-    }
-    false
+    });
+    found
+}
+
+fn diff_has_change(diff: &str) -> bool {
+    let mut found = false;
+    each_diff_change(diff, |_| found = true);
+    found
+}
+
+fn changed_lines_matching(diff: &str, needle: &str, added: bool) -> Vec<u32> {
+    let mut hits = Vec::new();
+    each_diff_change(diff, |row| match row {
+        DiffChange::Added { line, text } if added && text.contains(needle) => hits.push(line),
+        DiffChange::Deleted { line, text } if !added && text.contains(needle) => hits.push(line),
+        _ => {}
+    });
+    hits
 }
 
 /// Returns the new-side line number of the first added line containing `needle`, or None.
 fn find_needle_in_added_lines(diff: &str, needle: &str) -> Option<u32> {
-    let mut new_line: u32 = 0;
-    for diff_line in diff.lines() {
-        if let Some(rest) = diff_line.strip_prefix("@@") {
-            if let Some(plus) = rest.split('+').nth(1) {
-                let start = plus
-                    .split(|c: char| c == ',' || c == ' ')
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                new_line = start.saturating_sub(1);
-            }
-            continue;
-        }
-        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
-            continue;
-        }
-        if diff_line.starts_with('+') {
-            new_line += 1;
-            if diff_line.get(1..).map_or(false, |s| s.contains(needle)) {
-                return Some(new_line);
-            }
-        } else if !diff_line.starts_with('-') {
-            new_line += 1;
-        }
-    }
-    None
+    changed_lines_matching(diff, needle, true).first().copied()
 }
 
 /// Returns the old-side line number of the first deleted line containing `needle`, or None.
 fn find_needle_in_deleted_lines(diff: &str, needle: &str) -> Option<u32> {
-    let mut old_line: u32 = 0;
+    changed_lines_matching(diff, needle, false).first().copied()
+}
+
+/// True when `line` is a new-side line (added or context). A context line that
+/// shares its number with an old-side deletion is still unchanged code.
+fn line_on_new_side(diff: &str, line: u32) -> bool {
+    if line == 0 {
+        return false;
+    }
+    let mut new_line: u32 = 0;
+    let mut found = false;
     for diff_line in diff.lines() {
         if let Some(rest) = diff_line.strip_prefix("@@") {
-            if let Some(minus) = rest.split('-').nth(1) {
-                let start = minus
-                    .split(|c: char| c == ',' || c == ' ')
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(0);
-                old_line = start.saturating_sub(1);
-            }
+            let (_, new_start) = hunk_side_cursors(rest);
+            new_line = new_start;
             continue;
         }
-        if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+        if diff_line.starts_with("+++") || diff_line.starts_with("---") || is_diff_noise(diff_line)
+        {
             continue;
         }
-        if diff_line.starts_with('-') {
-            old_line += 1;
-            if diff_line.get(1..).map_or(false, |s| s.contains(needle)) {
-                return Some(old_line);
-            }
-        } else if !diff_line.starts_with('+') {
-            old_line += 1;
+        if diff_line.starts_with('-') && !diff_line.starts_with("---") {
+            continue;
+        }
+        new_line += 1;
+        if new_line == line {
+            found = true;
         }
     }
+    found
+}
+
+/// Anchor only on the cited line when that line itself was added or deleted.
+/// Do not move the anchor onto a different line. A new-side context line is
+/// rejected even if the same number is also an old-side deletion.
+fn locate_changed_line(diff: &str, line: u32, _needle: Option<&str>) -> Option<ChangedAnchor> {
+    if line > 0 && line_is_added(diff, line) {
+        return Some(ChangedAnchor {
+            line,
+            side: "RIGHT",
+        });
+    }
+    if line > 0 && line_is_deleted(diff, line) && !line_on_new_side(diff, line) {
+        return Some(ChangedAnchor { line, side: "LEFT" });
+    }
     None
+}
+
+/// Keep `start_line` only when every line in the range is a change on `side`.
+/// Otherwise the GitHub thread highlights unchanged lines next to the edit.
+fn narrow_start_line(diff: &str, side: &str, start: Option<u32>, end: u32) -> Option<u32> {
+    let start = start.filter(|&s| s > 0 && s < end)?;
+    let all_changed = (start..=end).all(|l| {
+        if side == "LEFT" {
+            line_is_deleted(diff, l)
+        } else {
+            line_is_added(diff, l)
+        }
+    });
+    if all_changed {
+        Some(start)
+    } else {
+        None
+    }
 }
 
 fn fetch_pr_file_patches(
@@ -3211,6 +3350,105 @@ mod tests {
         assert_eq!(find_needle_in_deleted_lines(patch, "removed_fn"), Some(2));
         assert_eq!(find_needle_in_deleted_lines(patch, "added_fn"), None); // on added line
         assert_eq!(find_needle_in_deleted_lines(patch, "missing"), None);
+    }
+
+    #[test]
+    fn no_newline_marker_does_not_shift_added_line() {
+        let patch = "@@ -1,2 +1,2 @@\n ctx\n\\ No newline at end of file\n+added\n";
+        assert!(line_is_added(patch, 2));
+        assert!(!line_is_added(patch, 3));
+    }
+
+    #[test]
+    fn locate_changed_line_rejects_context_and_ambiguous_needle() {
+        let patch = "@@ -10,3 +10,4 @@\n context\n-old\n+new\n more\n";
+        assert!(locate_changed_line(patch, 10, None).is_none());
+        assert!(locate_changed_line(patch, 12, None).is_none());
+        let hit = locate_changed_line(patch, 11, None).unwrap();
+        assert_eq!((hit.side, hit.line), ("RIGHT", 11));
+
+        let del_only = "@@ -2,2 +2,1 @@\n keep\n-gone\n";
+        assert!(locate_changed_line(del_only, 2, None).is_none());
+        assert_eq!(
+            locate_changed_line(del_only, 3, None).map(|h| h.side),
+            Some("LEFT")
+        );
+
+        let two = "@@ -1,0 +1,2 @@\n+foo()\n+foo_bar()\n";
+        // Do not move an off-diff line onto a different changed line.
+        assert!(locate_changed_line(two, 99, Some("foo_bar")).is_none());
+
+        // New line 6 is context. Old line 6 is a deletion. The cited number is
+        // the unchanged line, so it is not reviewed.
+        let collision = "@@ -5,4 +5,3 @@\n context\n-deleted\n context\n context\n";
+        assert!(locate_changed_line(collision, 6, None).is_none());
+    }
+
+    #[test]
+    fn narrow_start_line_drops_ranges_that_include_context() {
+        let patch = "@@ -1,2 +1,3 @@\n ctx\n+a\n+b\n";
+        assert_eq!(narrow_start_line(patch, "RIGHT", Some(1), 3), None);
+        assert_eq!(narrow_start_line(patch, "RIGHT", Some(2), 3), Some(2));
+    }
+
+    #[test]
+    fn out_of_diff_line_is_not_posted() {
+        let mut report = empty_findings_report(None);
+        let mut f = sample_finding();
+        f.anchor.line = Some(10);
+        f.anchor.line_resolved = true;
+        f.anchor.in_diff = Some(false);
+        f.include = Some(true);
+        f.comment_body = Some("about unchanged code".into());
+        report.findings.push(f);
+        let payloads = build_comment_payloads(&mut report, false).unwrap();
+        assert!(payloads.api_comments.is_empty());
+        assert!(payloads.body_fallbacks.is_empty());
+        assert_eq!(report.findings[0].status, "skipped");
+    }
+
+    #[test]
+    fn changed_line_posts_inline() {
+        let mut report = empty_findings_report(None);
+        let mut f = sample_finding();
+        f.anchor.line = Some(11);
+        f.anchor.start_line = None;
+        f.anchor.line_resolved = true;
+        f.anchor.in_diff = Some(true);
+        f.anchor.side = "RIGHT".into();
+        f.include = Some(true);
+        f.comment_body = Some("on the edit".into());
+        report.findings.push(f);
+        let payloads = build_comment_payloads(&mut report, false).unwrap();
+        assert_eq!(payloads.api_comments.len(), 1);
+        assert_eq!(payloads.api_comments[0]["line"], 11);
+        assert!(payloads.api_comments[0].get("subject_type").is_none());
+    }
+
+    #[test]
+    fn finding_without_a_changed_line_is_not_posted() {
+        let mut report = empty_findings_report(None);
+        let mut unchanged = sample_finding();
+        unchanged.id = "F1".into();
+        unchanged.anchor.line = None;
+        unchanged.anchor.line_resolved = false;
+        unchanged.anchor.in_diff = Some(false);
+        unchanged.include = Some(true);
+        unchanged.comment_body = Some("whole file".into());
+        let mut changed_file = sample_finding();
+        changed_file.id = "F2".into();
+        changed_file.anchor.line = None;
+        changed_file.anchor.line_resolved = false;
+        changed_file.anchor.in_diff = Some(true);
+        changed_file.include = Some(true);
+        changed_file.comment_body = Some("file changed".into());
+        report.findings.push(unchanged);
+        report.findings.push(changed_file);
+        let payloads = build_comment_payloads(&mut report, false).unwrap();
+        assert!(payloads.api_comments.is_empty());
+        assert!(payloads.body_fallbacks.is_empty());
+        assert_eq!(report.findings[0].status, "skipped");
+        assert_eq!(report.findings[1].status, "skipped");
     }
 
     fn sample_finding() -> TriageFinding {

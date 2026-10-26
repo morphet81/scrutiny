@@ -1,3 +1,62 @@
+/// Inclusive new-file ranges of **added** (`+`) lines only. Context and deletions
+/// are not included, and a context line between two additions splits the range.
+pub(crate) fn added_line_ranges(diff: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut new_line: usize = 0;
+    let mut run_lo: Option<usize> = None;
+    let mut run_hi: usize = 0;
+    let flush = |run_lo: &mut Option<usize>, run_hi: usize, out: &mut Vec<(usize, usize)>| {
+        if let Some(lo) = run_lo.take() {
+            if lo > 0 {
+                out.push((lo, run_hi.max(lo)));
+            }
+        }
+    };
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            flush(&mut run_lo, run_hi, &mut out);
+            new_line = hunk_new_start(rest).saturating_sub(1);
+            continue;
+        }
+        if line.starts_with("+++") || line.starts_with("---") || diff_noise(line) {
+            continue;
+        }
+        if line.starts_with('+') {
+            new_line += 1;
+            if run_lo.is_none() {
+                run_lo = Some(new_line);
+            }
+            run_hi = new_line;
+        } else if line.starts_with('-') {
+            flush(&mut run_lo, run_hi, &mut out);
+        } else {
+            flush(&mut run_lo, run_hi, &mut out);
+            new_line += 1;
+        }
+    }
+    flush(&mut run_lo, run_hi, &mut out);
+    out
+}
+
+fn hunk_new_start(header_rest: &str) -> usize {
+    header_rest
+        .split('+')
+        .nth(1)
+        .and_then(|plus| {
+            plus.split(|c: char| c == ',' || c == ' ')
+                .next()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+fn diff_noise(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with('\\')
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+}
+
 /// Parse `@@ -a,b +c,d @@` → (new_start, new_count)
 pub(crate) fn parse_hunk_new_ranges(diff: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
@@ -136,6 +195,12 @@ pub(crate) fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn added_ranges_skip_context_and_deletions() {
+        let diff = "@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n+also\n";
+        assert_eq!(added_line_ranges(diff), vec![(2, 2), (4, 4)]);
+    }
 
     #[test]
     fn parse_hunk_ranges() {

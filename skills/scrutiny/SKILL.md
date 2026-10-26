@@ -238,12 +238,12 @@ Other:
 **Hard rule — anchors at raise time.** Every finding a reviewer/evangelist returns **must** include:
 
 - `path` (repo-relative)
-- `line` (1-based, **changed** line: from that path's pack unified diff, or — when the pack diff was cut — a changed line verified by a Tier-1/2 head-file `Read`; `findings-resolve` later validates every anchor against the REAL PR diff)
+- `line` (1-based **added `+` or deleted `-` line** in that path's branch diff. Context lines and other unchanged lines are not reviewed: triage skips them, and they are not posted, not moved onto a different line, and not demoted to a file comment)
 - optional `start_line`, `severity` (`critical|warning|suggestion`), `title`, `explanation`, `proposed_fix` / `fix_options`
 
 No finding without a line. “I’ll figure out the line later” is forbidden. The lead agent must **reject and re-ask** any finding missing `path`+`line` or anchored on an unverified guess.
 
-Merge: static scan findings + AI findings → dedupe → write into findings JSON (Step 6.5) **with anchors already set**. For scan-only items, lead sets `anchor` from pack hunks/symbol slices when possible before showing triage.
+Merge: static scan findings + AI findings → dedupe → write into findings JSON (Step 6.5) **with anchors already set**. For scan-only items, lead sets `anchor` from an added or deleted line in the pack diff when possible before showing triage.
 
 ### 6.5 findings-init (canonical findings JSON)
 
