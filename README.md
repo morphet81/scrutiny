@@ -104,11 +104,13 @@ scrutiny forge --here --inline --input "Add dark mode toggle"
 
 ### Cleanup — tear down forge task tab (or agent panes)
 
-**Agent panes** (free zellij/tmux FDs without killing the session):
+**Agent panes** (free zellij/tmux FDs without killing the session). Check the server FD count first so you know whether panes are the cost:
 
 ```bash
-scrutiny cleanup --agents      # confirm first
-scrutiny cleanup --agents -y   # no prompt
+lsof -p <zellij-server-pid> | wc -l   # header is included
+scrutiny cleanup --agents             # confirm first
+scrutiny cleanup --agents -y          # no prompt
+lsof -p <zellij-server-pid> | wc -l
 ```
 
 Closes leftover `claude` / cursor `agent` / `scrutiny probe|parley` panes across the session. Keeps interactive shells. Does not remove worktrees or close tabs. Probe/parley also auto-close held/exited agent panes in the origin tab on exit.
@@ -172,7 +174,36 @@ scrutiny parley stack 2
 - Requires `gh stack`
 
 Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
-Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with fix steps — run `scrutiny cleanup --agents -y` to free FDs). Preflight compares server FD count to the **server** soft limit (a raised `ulimit` in a pane does not raise an already-running server — restart the session from an outside shell after `ulimit -n 10240`). On exit, probe/parley force-close tracked panes and sweep held/exited agent panes in the origin tab. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
+Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with the steps in [Zellij EMFILE](#zellij-emfile-macos)). Preflight compares server FD count to the **server** soft limit. A `ulimit` in a pane does not change that server. On exit, probe/parley force-close tracked panes and sweep held/exited agent panes in the origin tab. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
+
+### Zellij EMFILE (macOS)
+
+Zellij 0.45 panics on `EMFILE` and wipes the session. On macOS the server takes launchd's soft `maxfiles` at start (often 256). A shell whose own `ulimit -n` is already high does not raise a server that is already running, and a server reparented to pid 1 keeps the launchd soft limit it was born with. Global headroom (`kern.maxfiles`, `kern.maxfilesperproc`) can be large while that server is still capped at 256.
+
+One idle pane held 2 extra FDs (a PTY pair) and released them on close. A per-pane leak is unproven. Closing panes and raising the launchd limit are separate paths. Use the count to choose.
+
+From a normal terminal, outside the session:
+
+```bash
+launchctl limit maxfiles
+ps aux | grep 'zellij --server'          # note the pid
+lsof -p <pid> | wc -l                     # header is included
+```
+
+If leftover agent panes are the bulk of that count, close those panes and count again (`scrutiny cleanup --agents`). That does not exit zellij.
+
+To let a **new** server open more than 256 FDs, raise the launchd soft limit, then start zellij again. The running server does not pick this up. Exit that session yourself from outside zellij. Do not run `kill-session` from inside a pane.
+
+```bash
+sudo launchctl limit maxfiles 61440 524288
+launchctl limit maxfiles                  # 61440  524288
+# exit the old session from outside, then:
+zellij
+```
+
+In a pane of the new server, `ulimit -n` should be 61440, not 256. `lsof -p <new-server-pid> | wc -l` can then exceed 256. If the hard ceiling is lower than 524288, `sysctl kern.maxfilesperproc` is the per-process cap.
+
+This limit change is not permanent across reboot, and it is not the only way out.
 
 Caveman-ultra style is **on by default** (`caveman = true`): every spawned prompt gets an embedded ultra preamble, and scrutiny instruction text uses caveman dialect. Set `caveman = false` or `SCRUTINY_NO_CAVEMAN=1` for plain English.
 

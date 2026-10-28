@@ -879,57 +879,70 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
         yellow.apply_to("NOT tab count")
     );
     eprintln!();
-    eprintln!("{}", bold.apply_to("  Fix (pick one):"));
+    eprintln!(
+        "{}",
+        bold.apply_to("  You fix this. Scrutiny will not raise the limit or exit the session.")
+    );
     eprintln!();
     eprintln!(
-        "  {} Free FDs without killing the session",
+        "  {} Count, then choose a path",
         green.apply_to("1)")
     );
     eprintln!(
-        "     • Close leftover agent panes: {}",
-        cyan.apply_to("scrutiny cleanup --agents -y")
+        "     • {}",
+        cyan.apply_to("lsof -p <zellij-server-pid> | wc -l")
     );
     eprintln!(
-        "     • Close done forge tabs: {}",
+        "     • {}",
+        dim.apply_to("Header is included. Compare to launchctl limit maxfiles (soft is often 256).")
+    );
+    eprintln!(
+        "     • Leftover agent panes: {}",
+        cyan.apply_to("scrutiny cleanup --agents")
+    );
+    eprintln!(
+        "     • Count again before {}",
         cyan.apply_to("scrutiny cleanup -y")
-    );
-    eprintln!(
-        "     • Re-check: {}",
-        dim.apply_to("lsof -p <zellij-server-pid> | wc -l")
     );
     eprintln!();
     eprintln!(
-        "  {} Raise the server limit (best if you keep hitting this)",
+        "  {} New server inherits a higher launchd soft maxfiles",
         green.apply_to("2)")
     );
     eprintln!(
-        "     Open a normal Terminal/iTerm {} zellij, then:",
+        "     From a normal terminal {} this session:",
         yellow.apply_to("OUTSIDE")
     );
     eprintln!();
-    eprintln!("{}", cyan.apply_to("       ulimit -n 10240"));
     eprintln!(
         "{}",
-        cyan.apply_to(format!("       zellij kill-session \"{}\"", r.session))
+        cyan.apply_to("       sudo launchctl limit maxfiles 61440 524288")
     );
-    eprintln!("{}", cyan.apply_to("       ulimit -n 10240"));
-    eprintln!(
-        "{}",
-        cyan.apply_to(format!("       zellij -s \"{}\"", r.session))
-    );
-    eprintln!();
+    eprintln!("{}", cyan.apply_to("       launchctl limit maxfiles"));
     eprintln!(
         "     {}",
-        dim.apply_to("Pane ulimit alone does nothing — the server keeps its birth limit.")
+        dim.apply_to("Expect: 61440  524288")
+    );
+    eprintln!(
+        "     Exit session {} yourself, then start zellij again.",
+        cyan.apply_to(&r.session)
     );
     eprintln!(
         "     {}",
-        dim.apply_to("(launchctl system soft can stay 256.)")
+        dim.apply_to("The running server keeps its birth limit. A pane ulimit does not change it.")
+    );
+    eprintln!(
+        "     {}",
+        dim.apply_to("In the new server, ulimit -n should be 61440. lsof can then exceed 256.")
     );
     eprintln!();
     eprintln!(
         "  {}",
         yellow.apply_to("Do NOT run kill-session from inside a zellij pane.")
+    );
+    eprintln!(
+        "  {}",
+        dim.apply_to("Not the only path. A per-pane FD leak is unproven.")
     );
     eprintln!("{}", red.apply_to(bar));
     eprintln!();

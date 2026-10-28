@@ -181,8 +181,9 @@ pub fn run_forge_all(input: ForgeAllInput) -> Result<Vec<PathBuf>> {
         eprintln!(
             "scrutiny forge: started: {started}\n\
              scrutiny forge: skipped (EMFILE / not started): {skipped}\n\
-             Raise soft maxfiles outside zellij, restart the session from that shell, \
-             then re-run only the skipped keys."
+             macOS: sudo launchctl limit maxfiles 61440 524288 from outside zellij, \
+             exit this session yourself, start zellij again, then re-run only the skipped keys. \
+             See README Zellij EMFILE. A pane ulimit does not raise this server."
         );
     }
 
