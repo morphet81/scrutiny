@@ -637,8 +637,6 @@ pub fn push_zellij_session_override(name: &str) -> ZellijSessionOverrideGuard {
 /// Fallback FD budget per forge tab when caller does not pass a computed budget.
 /// Prefer [`zellij_fds_per_forge_tab`].
 const ZELLIJ_FDS_PER_FORGE_TAB_DEFAULT: u64 = 48;
-/// Keep this many FDs free under the soft limit.
-const ZELLIJ_FD_SAFETY_MARGIN: u64 = 24;
 /// Tab-bar + status-bar plugin instances per tab (measured ~10 on zellij 0.45).
 const ZELLIJ_FD_TAB_OVERHEAD: u64 = 10;
 /// FDs per live terminal pane on the zellij server (PTY pair, measured 2).
@@ -706,6 +704,66 @@ pub fn preflight_zellij_open_files_budget(extra_tabs: usize, fds_per_tab: u64) -
 }
 
 /// Shared EMFILE preflight for forge tabs or probe/parley panes.
+/// Refuse only when zellij itself logged EMFILE this recently.
+const EMFILE_RECENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+/// Launchd soft maxfiles target from `local.maxfiles` LaunchAgent (README).
+const LAUNCHD_MAXFILES_TARGET: u64 = 61440;
+
+/// Zellij log path: `$DARWIN_USER_TEMP_DIR/zellij-<uid>/zellij-log/zellij.log`
+/// on macOS, `/tmp/zellij-<uid>/...` elsewhere.
+fn zellij_log_candidates() -> Vec<PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let mut out = Vec::new();
+    if let Ok(o) = Command::new("getconf").arg("DARWIN_USER_TEMP_DIR").output() {
+        let dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        if !dir.is_empty() {
+            out.push(PathBuf::from(dir).join(format!("zellij-{uid}/zellij-log/zellij.log")));
+        }
+    }
+    out.push(PathBuf::from(format!(
+        "/tmp/zellij-{uid}/zellij-log/zellij.log"
+    )));
+    out
+}
+
+/// Last EMFILE line in `text` whose timestamp is within `window` of `now`.
+/// Zellij log lines carry local `YYYY-MM-DD HH:MM:SS.mmm` timestamps.
+fn emfile_line_within(
+    text: &str,
+    now: chrono::DateTime<chrono::Local>,
+    window: std::time::Duration,
+) -> Option<String> {
+    use chrono::TimeZone;
+    let window = chrono::Duration::from_std(window).ok()?;
+    text.lines().rev().find_map(|line| {
+        if !(line.contains("os error 24") || line.contains("Too many open files")) {
+            return None;
+        }
+        let ts_start = line.find("| 20")? + 2;
+        let ts = line.get(ts_start..ts_start + 23)?;
+        let naive = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+        let at = chrono::Local.from_local_datetime(&naive).single()?;
+        (now.signed_duration_since(at) <= window).then(|| line.to_string())
+    })
+}
+
+/// Most recent EMFILE line zellij logged within `window`, if any.
+fn recent_zellij_emfile(window: std::time::Duration) -> Option<String> {
+    let now = chrono::Local::now();
+    for path in zellij_log_candidates() {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Only the tail: the log grows large and recent lines are at the end.
+        let tail = text.len().saturating_sub(256 * 1024);
+        let tail = text.get(tail..).unwrap_or(&text);
+        if let Some(line) = emfile_line_within(tail, now, window) {
+            return Some(line);
+        }
+    }
+    None
+}
+
 pub fn preflight_zellij_open_files_budget_ex(
     tool: &str,
     unit: &str, // "tab" | "pane"
@@ -744,16 +802,29 @@ pub fn preflight_zellij_open_files_budget_ex(
     let per = fds_per_unit.max(1);
     let need = (count as u64).saturating_mul(per);
     let free = limit.saturating_sub(used);
-    let ceiling = limit.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
     let session = zellij_session_name_hint();
 
     eprintln!(
         "scrutiny {tool}: zellij server pid={pid} — {used} file descriptors open \
-         / soft limit {limit} from {limit_src} ({free} free; ~{need} needed for \
+         (estimate limit {limit} from {limit_src}; ~{need} needed for \
          {count} new {unit_plural} @ {per} FDs each). Note: FDs (sockets/pipes/files), \
          NOT tab count."
     );
-    if used.saturating_add(need) > ceiling {
+    if let Some(launchd) = launchctl {
+        if launchd < LAUNCHD_MAXFILES_TARGET {
+            eprintln!(
+                "scrutiny {tool}: warn: launchd soft maxfiles is {launchd} (target {LAUNCHD_MAXFILES_TARGET}). \
+                 A zellij server started now gets {launchd}. See README Zellij EMFILE."
+            );
+        }
+    }
+    if let Some(seen) = recent_zellij_emfile(EMFILE_RECENT_WINDOW) {
+        eprintln!(
+            "scrutiny {tool}: zellij logged EMFILE recently: {}",
+            seen.trim()
+        );
+    }
+    if recent_zellij_emfile(EMFILE_RECENT_WINDOW).is_some() {
         print_zellij_emfile_refusal(ZellijEmfileRefusal {
             tool,
             unit,
@@ -884,17 +955,16 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
         bold.apply_to("  You fix this. Scrutiny will not raise the limit or exit the session.")
     );
     eprintln!();
-    eprintln!(
-        "  {} Count, then choose a path",
-        green.apply_to("1)")
-    );
+    eprintln!("  {} Count, then choose a path", green.apply_to("1)"));
     eprintln!(
         "     • {}",
         cyan.apply_to("lsof -p <zellij-server-pid> | wc -l")
     );
     eprintln!(
         "     • {}",
-        dim.apply_to("Header is included. Compare to launchctl limit maxfiles (soft is often 256).")
+        dim.apply_to(
+            "Header is included. Compare to launchctl limit maxfiles (soft is often 256)."
+        )
     );
     eprintln!(
         "     • Leftover agent panes: {}",
@@ -919,10 +989,7 @@ fn print_zellij_emfile_refusal(r: ZellijEmfileRefusal<'_>) {
         cyan.apply_to("       sudo launchctl limit maxfiles 61440 524288")
     );
     eprintln!("{}", cyan.apply_to("       launchctl limit maxfiles"));
-    eprintln!(
-        "     {}",
-        dim.apply_to("Expect: 61440  524288")
-    );
+    eprintln!("     {}", dim.apply_to("Expect: 61440  524288"));
     eprintln!(
         "     Exit session {} yourself, then start zellij again.",
         cyan.apply_to(&r.session)
@@ -2526,8 +2593,6 @@ mod tests {
         let (n, src) = effective_server_nofile_limit(237, 1_048_575, Some(256), None, None);
         assert_eq!(n, 256);
         assert_eq!(src, "min(self,launchctl)");
-        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
-        assert!(237 + 48 > ceiling, "must refuse crowded soft-256 server");
     }
 
     #[test]
@@ -2536,8 +2601,6 @@ mod tests {
         let (n, src) = effective_server_nofile_limit(259, 256, Some(256), None, Some(512));
         assert_eq!(n, 512);
         assert_eq!(src, "macos_fd_nfiles");
-        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
-        assert!(259 + zellij_fds_for_panes(5) <= ceiling, "5 panes must fit");
     }
 
     #[test]
@@ -2546,11 +2609,6 @@ mod tests {
         assert_eq!(n, 256);
         assert_ne!(n, 259, "limit must never collapse to used count");
         assert_eq!(src, "launchctl(exceeded,limit_unknown)");
-        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
-        assert!(
-            259 + zellij_fds_for_panes(1) > ceiling,
-            "unknown limit refuses"
-        );
     }
 
     #[test]
@@ -2563,9 +2621,6 @@ mod tests {
     fn effective_server_limit_allows_fresh_session_under_256() {
         let (n, _) = effective_server_nofile_limit(95, 1_048_575, Some(256), None, None);
         assert_eq!(n, 256);
-        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
-        let need = zellij_fds_per_forge_tab(2, 1);
-        assert!(95 + need <= ceiling, "one tab should fit on fresh soft-256");
     }
 
     #[test]
@@ -2575,8 +2630,6 @@ mod tests {
         let (n, src) = effective_server_nofile_limit(250, 10_240, Some(256), None, Some(512));
         assert_eq!(n, 512);
         assert_eq!(src, "macos_fd_nfiles");
-        let ceiling = n.saturating_sub(ZELLIJ_FD_SAFETY_MARGIN);
-        assert!(250 + 16 <= ceiling, "two agent panes must fit");
     }
 
     #[test]
@@ -2983,5 +3036,30 @@ layout {
         // Above default pid_max on macOS/Linux; never a live process.
         assert!(!pid_alive(2_147_000_000));
         assert!(pid_alive(std::process::id() as i32));
+    }
+
+    #[test]
+    fn emfile_line_within_window_only() {
+        let now = chrono::Local::now();
+        let recent = (now - chrono::Duration::seconds(30)).format("%Y-%m-%d %H:%M:%S%.3f");
+        let old = (now - chrono::Duration::seconds(3600)).format("%Y-%m-%d %H:%M:%S%.3f");
+        let text = format!(
+            "ERROR  |x| {old} [async-runtime] f.rs:1: Failed to run command: Too many open files (os error 24)\n\
+             INFO   |x| {recent} [pty] ok\n"
+        );
+        let window = std::time::Duration::from_secs(600);
+        assert!(emfile_line_within(&text, now, window).is_none());
+        let text2 = format!(
+            "{old} junk\nERROR  |x| {recent} [async-runtime] f.rs:1: Too many open files (os error 24)\n"
+        );
+        assert!(emfile_line_within(&text2, now, window).is_some());
+    }
+
+    #[test]
+    fn emfile_line_ignores_unrelated_errors() {
+        let now = chrono::Local::now();
+        let t = (now - chrono::Duration::seconds(5)).format("%Y-%m-%d %H:%M:%S%.3f");
+        let text = format!("ERROR  |x| {t} [pty_writer] a non-fatal error occurred\n");
+        assert!(emfile_line_within(&text, now, std::time::Duration::from_secs(600)).is_none());
     }
 }
