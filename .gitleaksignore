@@ -1,0 +1,2 @@
+# Test JWT fixture in forge/fetch.rs (payload "abc", signature "def"). Not a live token.
+55ea37b5742d37c6c53bccdaf8f2ca5357b5e6ab:crates/scrutiny-core/src/forge/fetch.rs:generic-api-key:1164
