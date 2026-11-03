@@ -709,10 +709,20 @@ const EMFILE_RECENT_WINDOW: std::time::Duration = std::time::Duration::from_secs
 /// Launchd soft maxfiles target from `local.maxfiles` LaunchAgent (README).
 const LAUNCHD_MAXFILES_TARGET: u64 = 61440;
 
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
+}
+
 /// Zellij log path: `$DARWIN_USER_TEMP_DIR/zellij-<uid>/zellij-log/zellij.log`
 /// on macOS, `/tmp/zellij-<uid>/...` elsewhere.
 fn zellij_log_candidates() -> Vec<PathBuf> {
-    let uid = unsafe { libc::getuid() };
+    let uid = current_uid();
     let mut out = Vec::new();
     if let Ok(o) = Command::new("getconf").arg("DARWIN_USER_TEMP_DIR").output() {
         let dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
