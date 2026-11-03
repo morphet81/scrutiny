@@ -704,8 +704,6 @@ pub fn preflight_zellij_open_files_budget(extra_tabs: usize, fds_per_tab: u64) -
 }
 
 /// Shared EMFILE preflight for forge tabs or probe/parley panes.
-/// Refuse only when zellij itself logged EMFILE this recently.
-const EMFILE_RECENT_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 /// Launchd soft maxfiles target from `local.maxfiles` LaunchAgent (README).
 const LAUNCHD_MAXFILES_TARGET: u64 = 61440;
 
@@ -736,15 +734,10 @@ fn zellij_log_candidates() -> Vec<PathBuf> {
     out
 }
 
-/// Last EMFILE line in `text` whose timestamp is within `window` of `now`.
+/// Last EMFILE line in `text` logged at or after `since`.
 /// Zellij log lines carry local `YYYY-MM-DD HH:MM:SS.mmm` timestamps.
-fn emfile_line_within(
-    text: &str,
-    now: chrono::DateTime<chrono::Local>,
-    window: std::time::Duration,
-) -> Option<String> {
+fn emfile_line_since(text: &str, since: chrono::DateTime<chrono::Local>) -> Option<String> {
     use chrono::TimeZone;
-    let window = chrono::Duration::from_std(window).ok()?;
     text.lines().rev().find_map(|line| {
         if !(line.contains("os error 24") || line.contains("Too many open files")) {
             return None;
@@ -753,13 +746,40 @@ fn emfile_line_within(
         let ts = line.get(ts_start..ts_start + 23)?;
         let naive = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
         let at = chrono::Local.from_local_datetime(&naive).single()?;
-        (now.signed_duration_since(at) <= window).then(|| line.to_string())
+        (at >= since).then(|| line.to_string())
     })
 }
 
-/// Most recent EMFILE line zellij logged within `window`, if any.
-fn recent_zellij_emfile(window: std::time::Duration) -> Option<String> {
-    let now = chrono::Local::now();
+/// Elapsed run time `[[dd-]hh:]mm:ss` from `ps -o etime` (locale-independent).
+fn parse_etime(text: &str) -> Option<chrono::Duration> {
+    let (days, rest) = match text.trim().split_once('-') {
+        Some((d, r)) => (d.parse::<i64>().ok()?, r),
+        None => (0, text.trim()),
+    };
+    let parts: Vec<i64> = rest
+        .split(':')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    let secs = match parts.as_slice() {
+        [m, s] => m * 60 + s,
+        [h, m, s] => h * 3600 + m * 60 + s,
+        _ => return None,
+    };
+    Some(chrono::Duration::seconds(days * 86_400 + secs))
+}
+
+/// Start time of the zellij server `pid`, from its elapsed run time.
+fn zellij_server_started_at(pid: u32) -> Option<chrono::DateTime<chrono::Local>> {
+    let out = Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let elapsed = parse_etime(&String::from_utf8_lossy(&out.stdout))?;
+    Some(chrono::Local::now() - elapsed)
+}
+
+/// Most recent EMFILE line zellij logged at or after `since`, if any.
+fn recent_zellij_emfile(since: chrono::DateTime<chrono::Local>) -> Option<String> {
     for path in zellij_log_candidates() {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
@@ -767,7 +787,7 @@ fn recent_zellij_emfile(window: std::time::Duration) -> Option<String> {
         // Only the tail: the log grows large and recent lines are at the end.
         let tail = text.len().saturating_sub(256 * 1024);
         let tail = text.get(tail..).unwrap_or(&text);
-        if let Some(line) = emfile_line_within(tail, now, window) {
+        if let Some(line) = emfile_line_since(tail, since) {
             return Some(line);
         }
     }
@@ -828,13 +848,18 @@ pub fn preflight_zellij_open_files_budget_ex(
             );
         }
     }
-    if let Some(seen) = recent_zellij_emfile(EMFILE_RECENT_WINDOW) {
+    // Refuse only with evidence and no headroom: zellij logged EMFILE since
+    // this server started, and the estimated free FDs cannot cover the need.
+    let since = zellij_server_started_at(pid)
+        .unwrap_or_else(|| chrono::Local::now() - chrono::Duration::minutes(10));
+    let seen = recent_zellij_emfile(since);
+    if let Some(line) = &seen {
         eprintln!(
-            "scrutiny {tool}: zellij logged EMFILE recently: {}",
-            seen.trim()
+            "scrutiny {tool}: zellij logged EMFILE since server start: {}",
+            line.trim()
         );
     }
-    if recent_zellij_emfile(EMFILE_RECENT_WINDOW).is_some() {
+    if seen.is_some() && free < need {
         print_zellij_emfile_refusal(ZellijEmfileRefusal {
             tool,
             unit,
@@ -3049,20 +3074,34 @@ layout {
     }
 
     #[test]
-    fn emfile_line_within_window_only() {
+    fn emfile_line_since_server_start_only() {
         let now = chrono::Local::now();
-        let recent = (now - chrono::Duration::seconds(30)).format("%Y-%m-%d %H:%M:%S%.3f");
-        let old = (now - chrono::Duration::seconds(3600)).format("%Y-%m-%d %H:%M:%S%.3f");
+        let before = (now - chrono::Duration::seconds(3600)).format("%Y-%m-%d %H:%M:%S%.3f");
+        let after = (now - chrono::Duration::seconds(30)).format("%Y-%m-%d %H:%M:%S%.3f");
+        let server_start = now - chrono::Duration::seconds(600);
         let text = format!(
-            "ERROR  |x| {old} [async-runtime] f.rs:1: Failed to run command: Too many open files (os error 24)\n\
-             INFO   |x| {recent} [pty] ok\n"
+            "ERROR  |x| {before} [async-runtime] f.rs:1: Failed to run command: Too many open files (os error 24)\n\
+             INFO   |x| {after} [pty] ok\n"
         );
-        let window = std::time::Duration::from_secs(600);
-        assert!(emfile_line_within(&text, now, window).is_none());
+        assert!(emfile_line_since(&text, server_start).is_none());
         let text2 = format!(
-            "{old} junk\nERROR  |x| {recent} [async-runtime] f.rs:1: Too many open files (os error 24)\n"
+            "{before} junk\nERROR  |x| {after} [async-runtime] f.rs:1: Too many open files (os error 24)\n"
         );
-        assert!(emfile_line_within(&text2, now, window).is_some());
+        assert!(emfile_line_since(&text2, server_start).is_some());
+    }
+
+    #[test]
+    fn parse_etime_formats() {
+        assert_eq!(parse_etime("00:05"), Some(chrono::Duration::seconds(5)));
+        assert_eq!(
+            parse_etime("20:54:40"),
+            Some(chrono::Duration::seconds(75_280))
+        );
+        assert_eq!(
+            parse_etime("2-01:00:00"),
+            Some(chrono::Duration::seconds(176_400))
+        );
+        assert_eq!(parse_etime(""), None);
     }
 
     #[test]
@@ -3070,6 +3109,6 @@ layout {
         let now = chrono::Local::now();
         let t = (now - chrono::Duration::seconds(5)).format("%Y-%m-%d %H:%M:%S%.3f");
         let text = format!("ERROR  |x| {t} [pty_writer] a non-fatal error occurred\n");
-        assert!(emfile_line_within(&text, now, std::time::Duration::from_secs(600)).is_none());
+        assert!(emfile_line_since(&text, now - chrono::Duration::seconds(60)).is_none());
     }
 }
