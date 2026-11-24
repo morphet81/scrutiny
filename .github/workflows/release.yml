@@ -25,7 +25,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # macos-14 retired 2026-11-02 → "macos-14-arm64-us-default is not supported"
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact: scrutiny-aarch64-apple-darwin
           # Intel macOS dropped: macos-13 retired; macos-15-intel dies ~2027.
