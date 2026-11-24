@@ -13,6 +13,7 @@ pub mod forge_all;
 pub mod forge_cmd;
 pub mod gh;
 pub mod git;
+pub mod herdr;
 pub mod info_cmd;
 pub mod map;
 pub mod mdterm;

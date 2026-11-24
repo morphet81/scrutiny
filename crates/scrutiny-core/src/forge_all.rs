@@ -612,11 +612,14 @@ fn resolve_worktree_parent(repo_root: &Path, configured: &str) -> Result<PathBuf
 /// open a multiplexer tab if we are inside tmux/zellij.
 fn force_multiplexer_terminal() -> Option<ResolvedTerminal> {
     match detect_terminal()? {
-        kind @ (TerminalContext::Tmux | TerminalContext::Zellij) => Some(ResolvedTerminal {
-            kind,
-            zellij: None,
-            tmux: None,
-        }),
+        kind @ (TerminalContext::Tmux | TerminalContext::Zellij | TerminalContext::Herdr) => {
+            Some(ResolvedTerminal {
+                kind,
+                zellij: None,
+                tmux: None,
+                herdr: None,
+            })
+        }
         _ => None,
     }
 }

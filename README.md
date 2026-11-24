@@ -97,14 +97,14 @@ scrutiny forge --here --inline --input "Add dark mode toggle"
 3. Create branch `{branch_prefix}-…` + worktree under `worktree_parent_folder`
 4. Copy `[forge.all].copy_files` from forge cwd into the worktree (if any)
 5. Run `[forge.all].init_commands` in the worktree (if any)
-6. Open a tmux/zellij tab in that worktree (one ticket at a time; stop before EMFILE)
+6. Open a tmux/zellij/Herdr tab in that worktree (one ticket at a time; stop before EMFILE on zellij)
 7. Run `scrutiny forge --here --yes` with knobs from `[forge.all]` (`use_tdd`, `test_coverage`, `require_e2e`, `team_size`, `spawn_mode`, `agent_cli`, `model`) in that tab, then exit the multi-ticket host
 
 **`--here`:** fetch ticket → optional Figma → knobs (TDD, coverage, e2e, spawn) → optional TDD plan confirm → implement in the current folder. **Temporary default:** skip verify gate (tests) and ship (commit / draft PR); run `scrutiny pr` afterwards. Set `forge.skip_verify` / `forge.skip_ship` to `false` to restore the full pipeline.
 
 ### Cleanup — tear down forge task tab (or agent panes)
 
-**Agent panes** (free zellij/tmux FDs without killing the session). Check the server FD count first so you know whether panes are the cost:
+**Agent panes** (free zellij/tmux/Herdr panes without killing the session). On zellij, check the server FD count first so you know whether panes are the cost:
 
 ```bash
 lsof -p <zellij-server-pid> | wc -l   # header is included
@@ -122,7 +122,7 @@ scrutiny cleanup      # confirm first
 scrutiny cleanup -y   # no prompt
 ```
 
-1. Close other panes in the current tmux window / zellij tab  
+1. Close other panes in the current tmux window / zellij / Herdr tab  
 2. `git worktree remove --force` this folder (if it is a linked worktree)  
 3. Delete the task branch  
 4. Close the tab / session (uses `item-surface.json` when present)
@@ -173,8 +173,8 @@ scrutiny parley stack 2
 - Optional stack number runs `gh stack checkout N` first (then restores your branch)
 - Requires `gh stack`
 
-Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/macOS).
-Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with the steps in [Zellij EMFILE](#zellij-emfile-macos)). Preflight compares server FD count to the **server** soft limit. A `ulimit` in a pane does not change that server. On exit, probe/parley force-close tracked panes and sweep held/exited agent panes in the origin tab. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
+Set `headless = false` to open each agent in a visible terminal (claude/cursor; tmux/zellij/Herdr/macOS).
+Detection: `$HC_TERMINAL_ID` → Herdr (before tmux/zellij), then `$TMUX` / `$ZELLIJ`, then iTerm2 / Terminal.app. **Herdr** (via `herdr-app`): forge opens a **new tab** in the current space per ticket; probe/parley **split panes** in the origin tab. Zellij panes pin to the **origin tab** where scrutiny started (not the tab you happen to be viewing). Prefer zellij ≥0.44 (`--near-current-pane` / `--tab-id`) to avoid focus steal; older zellij uses a goto-tab fallback. Multi-ticket `forge` starts tickets **one-by-one** in the current session, stops before the zellij **server** open-file limit (EMFILE — session wipe), lists started vs skipped keys, and **exits the host** after launching drivers (work continues in tabs). The same EMFILE preflight runs for non-headless **`probe`** and **`parley`** before opening agent panes (colorful refusal with the steps in [Zellij EMFILE](#zellij-emfile-macos)). Herdr skips that EMFILE preflight. Preflight compares server FD count to the **server** soft limit. A `ulimit` in a pane does not change that server. On exit, probe/parley force-close tracked panes and sweep held/exited agent panes in the origin tab. Pane cleanup verifies process identity before SIGKILL (avoids killing the zellij client on PID reuse). Tmux splits into the origin window (`$TMUX_PANE`).
 
 ### Zellij EMFILE (macOS)
 
@@ -270,7 +270,7 @@ base_candidates = ["develop", "main"]
 | Key | Default | Explanation |
 |-----|---------|-------------|
 | `default_client` | `"claude"` | AI client: `claude` \| `cursor` \| `codex` |
-| `headless` | `true` | `true` = capture agent stdout. `false` = visible terminal window (claude/cursor; tmux/zellij/Terminal/iTerm2). Codex stays headless. Applies to probe, forge, parley |
+| `headless` | `true` | `true` = capture agent stdout. `false` = visible terminal window (claude/cursor; tmux/zellij/Herdr/Terminal/iTerm2). Codex stays headless. Applies to probe, forge, parley |
 | `caveman` | `true` | Inject caveman-ultra preamble + dialect into spawned-agent prompts. `false` or `SCRUTINY_NO_CAVEMAN=1` = plain English |
 | `force_client` | unset | Skip client prompt for `scrutiny probe` |
 | `force_spawn_mode` | unset | Skip spawn prompt: `isolated` \| `team`. Unset → prompt (default **isolated**) |

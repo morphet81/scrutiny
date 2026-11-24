@@ -18,6 +18,7 @@ use std::time::Duration;
 pub enum TerminalContext {
     Tmux,
     Zellij,
+    Herdr,
     ITerm2,
     AppleTerminal,
 }
@@ -41,12 +42,15 @@ pub struct TmuxAnchor {
     pub target: String,
 }
 
+pub use crate::herdr::HerdrAnchor;
+
 /// Resolved non-headless surface, with origin anchors for multiplexers.
 #[derive(Debug, Clone)]
 pub struct ResolvedTerminal {
     pub kind: TerminalContext,
     pub zellij: Option<ZellijAnchor>,
     pub tmux: Option<TmuxAnchor>,
+    pub herdr: Option<HerdrAnchor>,
 }
 
 /// Visible agent pane tracked so the host can force-close leftovers on exit.
@@ -75,6 +79,16 @@ struct OwnedRegistryFile {
 }
 
 static OWNED_ZELLIJ_PANES: Mutex<Vec<OwnedZellijPane>> = Mutex::new(Vec::new());
+
+/// Herdr pane created by scrutiny (`pane.close` on cleanup).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedHerdrPane {
+    pub pane_id: String,
+    pub terminal_id: Option<String>,
+    pub title: String,
+}
+
+static OWNED_HERDR_PANES: Mutex<Vec<OwnedHerdrPane>> = Mutex::new(Vec::new());
 
 static TRACKED_AGENT_PANES: Mutex<Vec<TrackedAgentPane>> = Mutex::new(Vec::new());
 static CLEANUP_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -144,6 +158,11 @@ pub fn force_close_agent_panes() {
         Ok(n) if n > 0 => eprintln!("scrutiny: closed {n} scrutiny-owned zellij pane(s)"),
         Ok(_) => {}
         Err(e) => eprintln!("scrutiny: skip owned zellij pane close: {e:#}"),
+    }
+    match close_owned_herdr_panes() {
+        Ok(n) if n > 0 => eprintln!("scrutiny: closed {n} scrutiny-owned Herdr pane(s)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("scrutiny: skip owned Herdr pane close: {e:#}"),
     }
 }
 
@@ -355,10 +374,73 @@ pub fn close_agent_panes_session_wide() -> Result<u32> {
     match detect_terminal() {
         Some(TerminalContext::Zellij) => close_zellij_agent_panes(),
         Some(TerminalContext::Tmux) => close_tmux_agent_panes_session_wide(),
+        Some(TerminalContext::Herdr) => close_herdr_agent_panes_session_wide(),
         _ => {
-            bail!("scrutiny cleanup --agents needs tmux or zellij");
+            bail!("scrutiny cleanup --agents needs tmux, zellij, or Herdr");
         }
     }
+}
+
+fn close_herdr_agent_panes_session_wide() -> Result<u32> {
+    let mut closed = close_owned_herdr_panes().unwrap_or(0);
+    let ls = crate::herdr::herdr_ls().context("herdr-app ls")?;
+    for (pane_id, _name) in crate::herdr::agent_pane_ids_in_ls(&ls) {
+        // Skip already-closed owned panes.
+        if let Ok(g) = OWNED_HERDR_PANES.lock() {
+            if g.iter().any(|p| p.pane_id == pane_id) {
+                continue;
+            }
+        }
+        match crate::herdr::herdr_do("pane.close", &[("pane", pane_id.clone())]) {
+            Ok(_) => closed += 1,
+            Err(e) => eprintln!("scrutiny: herdr pane.close {pane_id}: {e:#}"),
+        }
+    }
+    Ok(closed)
+}
+
+fn register_owned_herdr_pane(pane_id: String, terminal_id: Option<String>, title: &str) {
+    if let Ok(mut g) = OWNED_HERDR_PANES.lock() {
+        g.push(OwnedHerdrPane {
+            pane_id,
+            terminal_id,
+            title: title.to_string(),
+        });
+    }
+}
+
+fn close_owned_herdr_panes() -> Result<u32> {
+    let owned: Vec<OwnedHerdrPane> = match OWNED_HERDR_PANES.lock() {
+        Ok(mut g) => std::mem::take(&mut *g),
+        Err(_) => return Ok(0),
+    };
+    if owned.is_empty() {
+        return Ok(0);
+    }
+    let mut closed = 0u32;
+    let mut failed = Vec::new();
+    for pane in owned {
+        match crate::herdr::herdr_do("pane.close", &[("pane", pane.pane_id.clone())]) {
+            Ok(_) => closed += 1,
+            Err(_) => {
+                // Fallback: kill by terminal id.
+                if let Some(tid) = &pane.terminal_id {
+                    match crate::herdr::herdr_do("terminal.kill", &[("terminal", tid.clone())]) {
+                        Ok(_) => closed += 1,
+                        Err(_) => failed.push(pane),
+                    }
+                } else {
+                    failed.push(pane);
+                }
+            }
+        }
+    }
+    if !failed.is_empty() {
+        if let Ok(mut g) = OWNED_HERDR_PANES.lock() {
+            g.extend(failed);
+        }
+    }
+    Ok(closed)
 }
 
 /// All tabs: live + held + exited agent-pattern panes (`cleanup --agents`).
@@ -599,6 +681,14 @@ pub enum ItemSurface {
         tab: String,
         #[serde(default)]
         tab_id: Option<u32>,
+    },
+    /// Herdr tab in a space (forge ticket surface).
+    Herdr {
+        space_id: String,
+        tab_id: String,
+        /// Display name (ticket key) — not required to close.
+        #[serde(default)]
+        name: String,
     },
     /// iTerm2 window (AppleScript numeric window id).
     ITerm2 { window_id: String },
@@ -1410,10 +1500,11 @@ pub fn write_item_surface(path: &Path, surface: &ItemSurface) -> Result<()> {
 
 /// Detect the active terminal surface from the environment.
 ///
-/// Multiplexer wins over the host emulator: `$TMUX` / `$ZELLIJ` are set even
-/// inside iTerm2 or Terminal.app, and that is the surface we can spawn into.
+/// Herdr (`$HC_TERMINAL_ID`) wins first — the GUI hosts the shell even when
+/// nested mux env vars leak. Then `$TMUX` / `$ZELLIJ` over host emulators.
 pub fn detect_terminal() -> Option<TerminalContext> {
     detect_from_env(
+        std::env::var("HC_TERMINAL_ID").ok().as_deref(),
         std::env::var("TMUX").ok().as_deref(),
         std::env::var("ZELLIJ").ok().as_deref(),
         std::env::var("TERM_PROGRAM").ok().as_deref(),
@@ -1422,10 +1513,14 @@ pub fn detect_terminal() -> Option<TerminalContext> {
 
 /// Pure detection core (testable without touching the process environment).
 pub fn detect_from_env(
+    hc_terminal_id: Option<&str>,
     tmux: Option<&str>,
     zellij: Option<&str>,
     term_program: Option<&str>,
 ) -> Option<TerminalContext> {
+    if hc_terminal_id.map(|v| !v.is_empty()).unwrap_or(false) {
+        return Some(TerminalContext::Herdr);
+    }
     if tmux.map(|v| !v.is_empty()).unwrap_or(false) {
         return Some(TerminalContext::Tmux);
     }
@@ -1467,6 +1562,7 @@ pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<Reso
                 kind,
                 zellij: None,
                 tmux: None,
+                herdr: None,
             };
             match kind {
                 TerminalContext::Zellij => {
@@ -1483,6 +1579,15 @@ pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<Reso
                 TerminalContext::Tmux => {
                     resolved.tmux = capture_tmux_anchor();
                 }
+                TerminalContext::Herdr => {
+                    resolved.herdr = crate::herdr::capture_herdr_anchor();
+                    if resolved.herdr.is_none() {
+                        eprintln!(
+                            "scrutiny {tool}: Herdr detected but herdr-app status failed — \
+                             pane splits may fall back to focused pane"
+                        );
+                    }
+                }
                 _ => {}
             }
             eprintln!(
@@ -1493,7 +1598,7 @@ pub fn resolve_terminal(headless: bool, client: &str, tool: &str) -> Option<Reso
         None => {
             eprintln!(
                 "scrutiny {tool}: headless=false but no supported terminal surface \
-                 (tmux/zellij/iTerm2/Terminal.app) — running headless"
+                 (tmux/zellij/Herdr/iTerm2/Terminal.app) — running headless"
             );
             None
         }
@@ -1727,6 +1832,10 @@ pub fn launch_agent_window(
         TerminalContext::Zellij => {
             launch_zellij_in_origin(ctx.zellij.as_ref(), label, &script, &cwd_s, true)
         }
+        TerminalContext::Herdr => {
+            launch_herdr_agent_pane(ctx.herdr.as_ref(), label, script_path, cwd)
+                .map(|_| None)
+        }
         TerminalContext::AppleTerminal => {
             let status = Command::new("osascript")
                 .args([
@@ -1871,6 +1980,7 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
                 tab_id,
             })
         }
+        TerminalContext::Herdr => open_herdr_item_tab(ctx.herdr.as_ref(), key, Path::new(&cwd)),
         TerminalContext::ITerm2 => {
             let id =
                 osascript_capture(&iterm_open_script(key, &cwd)).context("iTerm2 new window")?;
@@ -1882,6 +1992,91 @@ pub fn open_item_surface(ctx: &ResolvedTerminal, key: &str, cwd: &Path) -> Resul
             Ok(ItemSurface::Apple { window_id: id })
         }
     }
+}
+
+fn open_herdr_item_tab(
+    anchor: Option<&HerdrAnchor>,
+    key: &str,
+    cwd: &Path,
+) -> Result<ItemSurface> {
+    let mut args: Vec<(&str, String)> = vec![
+        ("name", key.to_string()),
+        ("folder", cwd.display().to_string()),
+        ("focus", "false".into()),
+    ];
+    if let Some(a) = anchor {
+        if !a.space_id.is_empty() {
+            args.push(("space", a.space_id.clone()));
+        }
+    }
+    let v = crate::herdr::herdr_do("tab.new", &args).context("herdr-app do tab.new")?;
+    let (space_id, tab_id) = crate::herdr::parse_tab_ids(&v)?;
+    Ok(ItemSurface::Herdr {
+        space_id,
+        tab_id,
+        name: key.to_string(),
+    })
+}
+
+/// Split / open an agent pane in Herdr; register ids for host cleanup.
+fn launch_herdr_agent_pane(
+    anchor: Option<&HerdrAnchor>,
+    label: &str,
+    script_path: &Path,
+    cwd: &Path,
+) -> Result<()> {
+    let argv = crate::herdr::herdr_bash_argv(script_path);
+    let v = if let Some(pane) = anchor.and_then(|a| a.pane_id.clone()) {
+        crate::herdr::herdr_do(
+            "pane.split",
+            &[
+                ("direction", "right".into()),
+                ("pane", pane),
+                ("argv", argv),
+            ],
+        )
+        .context("herdr-app do pane.split")?
+    } else {
+        crate::herdr::herdr_do(
+            "terminal.open",
+            &[
+                ("folder", cwd.display().to_string()),
+                ("place", "right".into()),
+                ("argv", argv),
+                ("name", label.to_string()),
+            ],
+        )
+        .context("herdr-app do terminal.open")?
+    };
+    let (pane_id, terminal_id) = crate::herdr::parse_pane_ids(&v)?;
+    register_owned_herdr_pane(pane_id, terminal_id, label);
+    Ok(())
+}
+
+/// Select forge tab then open agent pane inside it.
+fn launch_herdr_in_surface(
+    space_id: &str,
+    tab_id: &str,
+    role: &str,
+    script_path: &Path,
+    cwd: &Path,
+) -> Result<()> {
+    let _ = crate::herdr::herdr_do("tab.select", &[("id", tab_id.to_string())]);
+    let _ = space_id; // reserved if Herdr later needs space-scoped select
+    let argv = crate::herdr::herdr_bash_argv(script_path);
+    let v = crate::herdr::herdr_do(
+        "terminal.open",
+        &[
+            ("folder", cwd.display().to_string()),
+            ("place", "right".into()),
+            ("argv", argv),
+            ("name", role.to_string()),
+        ],
+    )
+    .context("herdr-app do terminal.open in tab")?;
+    let (pane_id, terminal_id) = crate::herdr::parse_pane_ids(&v)?;
+    register_owned_herdr_pane(pane_id, terminal_id, role);
+    Ok(())
 }
 
 /// Read the focused tab id after we just opened a tab (no second new-tab).
@@ -1974,12 +2169,18 @@ pub fn launch_agent_in_surface(
             run_zellij_argv_pane_id(&zellij_run_argv(role, &script, &cwd_s, close_on_exit))
                 .context("zellij run")
         }
+        ItemSurface::Herdr {
+            space_id,
+            tab_id,
+            ..
+        } => launch_herdr_in_surface(space_id, tab_id, role, script_path, cwd).map(|_| None),
         ItemSurface::ITerm2 { window_id } => {
             if window_id.is_empty() {
                 let fallback = ResolvedTerminal {
                     kind: TerminalContext::ITerm2,
                     zellij: None,
                     tmux: None,
+                    herdr: None,
                 };
                 return launch_agent_window(&fallback, role, script_path, cwd);
             }
@@ -2017,7 +2218,8 @@ pub fn launch_agent_in_surface(
 pub fn kill_cmd_for_terminal(ctx: &ResolvedTerminal) -> String {
     match ctx.kind {
         TerminalContext::Tmux => "tmux kill-pane".into(),
-        TerminalContext::Zellij => ":".into(),
+        // Zellij: `--close-on-exit`. Herdr: host closes via owned-pane registry.
+        TerminalContext::Zellij | TerminalContext::Herdr => ":".into(),
         TerminalContext::ITerm2 => {
             "osascript -e 'tell application \"iTerm\" to close (current window)'".into()
         }
@@ -2061,6 +2263,15 @@ pub fn kill_item_surface(surface: &ItemSurface) -> Result<()> {
             }
             run_zellij_argv(&["action".into(), "close-tab".into()]).context("zellij close-tab")
         }
+        ItemSurface::Herdr { tab_id, .. } => crate::herdr::herdr_do(
+            "tab.close",
+            &[
+                ("id", tab_id.clone()),
+                ("confirmed", "true".into()),
+            ],
+        )
+        .map(|_| ())
+        .context("herdr-app do tab.close"),
         ItemSurface::ITerm2 { window_id } => {
             if window_id.is_empty() {
                 return Ok(());
@@ -2097,8 +2308,35 @@ pub fn close_sibling_panes() -> Result<u32> {
     match detect_terminal() {
         Some(TerminalContext::Tmux) => close_tmux_sibling_panes(),
         Some(TerminalContext::Zellij) => close_zellij_sibling_panes(),
+        Some(TerminalContext::Herdr) => close_herdr_sibling_panes(),
         _ => Ok(0),
     }
+}
+
+fn close_herdr_sibling_panes() -> Result<u32> {
+    let st = crate::herdr::herdr_status().context("herdr-app status")?;
+    let tab_id = st
+        .get("tab")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!("herdr status missing tab"))?;
+    let keep = st
+        .get("focused_pane")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let tid = st.get("agent").and_then(|x| x.as_str())?;
+            crate::herdr::pane_for_terminal_in_ls(tid)
+        });
+    let ls = crate::herdr::herdr_ls().context("herdr-app ls")?;
+    let siblings = crate::herdr::sibling_pane_ids(&ls, tab_id, keep.as_deref());
+    let mut closed = 0u32;
+    for pane_id in siblings {
+        match crate::herdr::herdr_do("pane.close", &[("pane", pane_id.clone())]) {
+            Ok(_) => closed += 1,
+            Err(e) => eprintln!("scrutiny: herdr sibling pane.close {pane_id}: {e:#}"),
+        }
+    }
+    Ok(closed)
 }
 
 fn close_tmux_sibling_panes() -> Result<u32> {
@@ -2295,6 +2533,19 @@ pub fn close_current_mux_container() -> Result<()> {
         Some(TerminalContext::Zellij) => {
             run_zellij_argv(&["action".into(), "close-tab".into()]).context("zellij close-tab")
         }
+        Some(TerminalContext::Herdr) => {
+            let st = crate::herdr::herdr_status().context("herdr-app status")?;
+            let tab = st
+                .get("tab")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow::anyhow!("herdr status missing tab"))?;
+            crate::herdr::herdr_do(
+                "tab.close",
+                &[("id", tab.to_string()), ("confirmed", "true".into())],
+            )
+            .map(|_| ())
+            .context("herdr-app do tab.close")
+        }
         Some(TerminalContext::ITerm2) => run_argv(
             "osascript",
             &[
@@ -2312,7 +2563,9 @@ pub fn close_current_mux_container() -> Result<()> {
         )
         .context("Terminal.app close front window"),
         None => {
-            eprintln!("scrutiny cleanup: not inside tmux/zellij/iTerm/Terminal — skip tab close");
+            eprintln!(
+                "scrutiny cleanup: not inside tmux/zellij/Herdr/iTerm/Terminal — skip tab close"
+            );
             Ok(())
         }
     }
@@ -2577,13 +2830,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn herdr_wins_over_mux_and_emulator() {
+        assert_eq!(
+            detect_from_env(
+                Some("t6"),
+                Some("/tmp/tmux-501/default,123,0"),
+                Some("0"),
+                Some("iTerm.app"),
+            ),
+            Some(TerminalContext::Herdr)
+        );
+    }
+
+    #[test]
     fn multiplexer_wins_over_emulator() {
         assert_eq!(
-            detect_from_env(Some("/tmp/tmux-501/default,123,0"), None, Some("iTerm.app")),
+            detect_from_env(
+                None,
+                Some("/tmp/tmux-501/default,123,0"),
+                None,
+                Some("iTerm.app"),
+            ),
             Some(TerminalContext::Tmux)
         );
         assert_eq!(
-            detect_from_env(None, Some("0"), Some("Apple_Terminal")),
+            detect_from_env(None, None, Some("0"), Some("Apple_Terminal")),
             Some(TerminalContext::Zellij)
         );
     }
@@ -2591,19 +2862,22 @@ mod tests {
     #[test]
     fn emulator_detection() {
         assert_eq!(
-            detect_from_env(None, None, Some("iTerm.app")),
+            detect_from_env(None, None, None, Some("iTerm.app")),
             Some(TerminalContext::ITerm2)
         );
         assert_eq!(
-            detect_from_env(None, None, Some("Apple_Terminal")),
+            detect_from_env(None, None, None, Some("Apple_Terminal")),
             Some(TerminalContext::AppleTerminal)
         );
     }
 
     #[test]
     fn empty_and_unknown_are_none() {
-        assert_eq!(detect_from_env(Some(""), Some(""), Some("vscode")), None);
-        assert_eq!(detect_from_env(None, None, None), None);
+        assert_eq!(
+            detect_from_env(Some(""), Some(""), Some(""), Some("vscode")),
+            None
+        );
+        assert_eq!(detect_from_env(None, None, None, None), None);
     }
 
     #[test]

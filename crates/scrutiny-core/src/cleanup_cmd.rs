@@ -17,7 +17,7 @@ use crate::terminal::{
 pub struct CleanupCmdInput {
     pub cwd: PathBuf,
     pub non_interactive: bool,
-    /// Close leftover agent panes across the tmux/zellij session (no git deletes).
+    /// Close leftover agent panes across the tmux/zellij/Herdr session (no git deletes).
     pub agents: bool,
 }
 
@@ -243,6 +243,17 @@ fn surface_label(s: &ItemSurface) -> String {
             Some(id) => format!("zellij tab `{tab}` (id {id})"),
             None => format!("zellij tab `{tab}`"),
         },
+        ItemSurface::Herdr {
+            space_id,
+            tab_id,
+            name,
+        } => {
+            if name.is_empty() {
+                format!("Herdr tab `{tab_id}` (space {space_id})")
+            } else {
+                format!("Herdr tab `{name}` ({tab_id})")
+            }
+        }
         ItemSurface::ITerm2 { window_id } => format!("iTerm2 window {window_id}"),
         ItemSurface::Apple { window_id } => format!("Terminal.app window {window_id}"),
     }
