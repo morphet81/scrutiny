@@ -417,6 +417,7 @@ fn close_owned_herdr_panes() -> Result<u32> {
     if owned.is_empty() {
         return Ok(0);
     }
+    crate::herdr::clear_herdr_stacks();
     let mut closed = 0u32;
     let mut failed = Vec::new();
     for pane in owned {
@@ -2019,41 +2020,23 @@ fn open_herdr_item_tab(
 }
 
 /// Split / open an agent pane in Herdr; register ids for host cleanup.
+///
+/// Layout: fill a vertical stack (≤4), then open a new column to the right.
 fn launch_herdr_agent_pane(
     anchor: Option<&HerdrAnchor>,
     label: &str,
     script_path: &Path,
     cwd: &Path,
 ) -> Result<()> {
-    let argv = crate::herdr::herdr_bash_argv(script_path);
-    let v = if let Some(pane) = anchor.and_then(|a| a.pane_id.clone()) {
-        crate::herdr::herdr_do(
-            "pane.split",
-            &[
-                ("direction", "right".into()),
-                ("pane", pane),
-                ("argv", argv),
-            ],
-        )
-        .context("herdr-app do pane.split")?
-    } else {
-        crate::herdr::herdr_do(
-            "terminal.open",
-            &[
-                ("folder", cwd.display().to_string()),
-                ("place", "right".into()),
-                ("argv", argv),
-                ("name", label.to_string()),
-            ],
-        )
-        .context("herdr-app do terminal.open")?
-    };
-    let (pane_id, terminal_id) = crate::herdr::parse_pane_ids(&v)?;
-    register_owned_herdr_pane(pane_id, terminal_id, label);
-    Ok(())
+    let tab_key = anchor
+        .map(|a| a.tab_id.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("_default");
+    let origin = anchor.and_then(|a| a.pane_id.as_deref());
+    herdr_open_stacked_pane(tab_key, origin, label, script_path, cwd)
 }
 
-/// Select forge tab then open agent pane inside it.
+/// Select forge tab then open agent pane inside it (same vertical-stack policy).
 fn launch_herdr_in_surface(
     space_id: &str,
     tab_id: &str,
@@ -2063,19 +2046,53 @@ fn launch_herdr_in_surface(
 ) -> Result<()> {
     let _ = crate::herdr::herdr_do("tab.select", &[("id", tab_id.to_string())]);
     let _ = space_id; // reserved if Herdr later needs space-scoped select
+    let origin = crate::herdr::herdr_ls()
+        .ok()
+        .and_then(|ls| crate::herdr::first_pane_in_tab(&ls, tab_id));
+    herdr_open_stacked_pane(tab_id, origin.as_deref(), role, script_path, cwd)
+}
+
+fn herdr_open_stacked_pane(
+    tab_key: &str,
+    origin_pane: Option<&str>,
+    label: &str,
+    script_path: &Path,
+    cwd: &Path,
+) -> Result<()> {
     let argv = crate::herdr::herdr_bash_argv(script_path);
-    let v = crate::herdr::herdr_do(
-        "terminal.open",
-        &[
-            ("folder", cwd.display().to_string()),
-            ("place", "right".into()),
-            ("argv", argv),
-            ("name", role.to_string()),
-        ],
-    )
-    .context("herdr-app do terminal.open in tab")?;
+    let split = crate::herdr::take_herdr_split(tab_key, origin_pane);
+    let v = if let Some(split) = split {
+        crate::herdr::herdr_do(
+            "pane.split",
+            &[
+                ("direction", split.direction().into()),
+                ("pane", split.relative().to_string()),
+                ("argv", argv),
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "herdr-app do pane.split --direction {} --pane {}",
+                split.direction(),
+                split.relative()
+            )
+        })?
+    } else {
+        // No origin pane id yet — open relative to focus (`down` starts the stack).
+        crate::herdr::herdr_do(
+            "terminal.open",
+            &[
+                ("folder", cwd.display().to_string()),
+                ("place", "down".into()),
+                ("argv", argv),
+                ("name", label.to_string()),
+            ],
+        )
+        .context("herdr-app do terminal.open --place down")?
+    };
     let (pane_id, terminal_id) = crate::herdr::parse_pane_ids(&v)?;
-    register_owned_herdr_pane(pane_id, terminal_id, role);
+    crate::herdr::record_herdr_split(tab_key, pane_id.clone());
+    register_owned_herdr_pane(pane_id, terminal_id, label);
     Ok(())
 }
 
